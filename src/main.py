@@ -26,7 +26,7 @@ active_processes: dict[str, asyncio.subprocess.Process] = {}
 def parse_args():
     parser = argparse.ArgumentParser(description="Test runner")
     parser.add_argument(
-        "--parallel", type=int, default=1, help="Number of parallel workers"
+        "--parallel", type=int, default=4, help="Number of parallel workers"
     )
     parser.add_argument("--watch", action="store_true", help="Watch for file changes")
     return parser.parse_args()
