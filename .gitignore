@@ -39,6 +39,7 @@ ENV/
 # Testing
 .pytest_cache/
 .coverage
+test_build
 htmlcov/
 
 # mypy

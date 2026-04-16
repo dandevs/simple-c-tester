@@ -6,7 +6,6 @@ int main() {
         sum += i;
     }
     if (sum == 55) {
-        printf("Sum test passed: sum of 1 to 10 = %d\n", sum);
         return 0;
     }
     return 1;

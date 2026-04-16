@@ -2,7 +2,6 @@
 
 int main() {
     int result = 20 / 4;
-    printf("Division test: 20 / 4 = %d\n", result);
     // This test will fail - intentionally wrong assertion
     if (result == 6) {
         return 0;

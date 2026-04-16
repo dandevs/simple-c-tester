@@ -11,7 +11,6 @@ int power(int base, int exp) {
 int main() {
     int result = power(2, 8);
     if (result == 256) {
-        printf("Power test passed: 2^8 = %d\n", result);
         return 0;
     }
     return 1;
