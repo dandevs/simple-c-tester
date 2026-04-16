@@ -13,6 +13,7 @@ class Test:
     dependencies: list[str] = field(default_factory=list)
     source_path: str = ""
     stdout: str = ""
+    stdout_raw: bytes = b""
     stderr: str = ""
     compile_err: str = ""
     compile_err_raw: bytes = b""

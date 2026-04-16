@@ -223,7 +223,20 @@ def _add_test_node(tree, test: Test, now: float):
             error_text = Text.from_ansi(raw.decode(errors="replace").strip())
         else:
             error_text = Text((test.compile_err or test.stderr or "").strip())
-        node.add(Panel(error_text, border_style="red"))
+        if error_text.plain.strip():
+            node.add(Panel(error_text, border_style="red"))
+
+    if test.state in (TestState.PASSED, TestState.FAILED, TestState.CANCELLED):
+        if test.stdout_raw:
+            stdout_text = Text.from_ansi(
+                test.stdout_raw.decode(errors="replace").strip()
+            )
+        elif test.stdout.strip():
+            stdout_text = Text(test.stdout.strip())
+        else:
+            stdout_text = None
+        if stdout_text and stdout_text.plain.strip():
+            node.add(Panel(stdout_text, border_style="green"))
 
 
 def build_display() -> Tree:
@@ -239,6 +252,26 @@ def build_display() -> Tree:
 def _all_tests_finished() -> bool:
     done_states = {TestState.PASSED, TestState.FAILED}
     return all(test.state in done_states for test in state.all_tests)
+
+
+def _has_active_tests() -> bool:
+    active_states = {TestState.PENDING, TestState.RUNNING, TestState.CANCELLED}
+    return any(test.state in active_states for test in state.all_tests)
+
+
+def _display_state_signature() -> tuple:
+    return tuple(
+        (
+            test.name,
+            test.state,
+            test.time_start,
+            test.time_state_changed,
+            test.stdout,
+            test.stderr,
+            test.compile_err,
+        )
+        for test in state.all_tests
+    )
 
 
 async def _terminate_active_processes() -> None:
@@ -283,12 +316,17 @@ async def main():
             observer.daemon = True
             observer.start()
 
-        with Live(build_display(), refresh_per_second=10) as live:
+        with Live(build_display(), refresh_per_second=10, auto_refresh=False) as live:
+            last_signature: tuple | None = None
             while True:
-                live.update(build_display())
+                has_active = _has_active_tests()
+                signature = _display_state_signature()
+                if has_active or signature != last_signature:
+                    live.update(build_display(), refresh=True)
+                    last_signature = signature
                 if not args.watch and _all_tests_finished():
                     break
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.1 if has_active else 0.25)
     finally:
         if observer is not None:
             observer.stop()
@@ -356,9 +394,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
                     await asyncio.sleep(0.05)
                     continue
                 if e.errno == errno.ENOENT:
-                    test.stderr = (
-                        f"test executable missing: ./test_build/{test.name}"
-                    )
+                    test.stderr = f"test executable missing: ./test_build/{test.name}"
                     test.stderr_raw = b""
                     test.state = TestState.FAILED
                     test.time_state_changed = time.monotonic()
@@ -374,16 +410,40 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
 
         test.time_start = time.monotonic()
         active_processes[process_key] = run_proc
-        run_stdout, run_stderr = await run_proc.communicate()
+
+        async def _read_stream(
+            stream: asyncio.StreamReader | None,
+            dest_str: list[str],
+            dest_raw: list[bytes],
+        ):
+            if stream is None:
+                return
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                dest_str.append(line.decode(errors="replace"))
+                dest_raw.append(line)
+
+        stdout_parts: list[str] = []
+        stdout_raw_parts: list[bytes] = []
+        stderr_parts: list[str] = []
+        stderr_raw_parts: list[bytes] = []
+        await asyncio.gather(
+            _read_stream(run_proc.stdout, stdout_parts, stdout_raw_parts),
+            _read_stream(run_proc.stderr, stderr_parts, stderr_raw_parts),
+            run_proc.wait(),
+        )
         if active_processes.get(process_key) is run_proc:
             active_processes.pop(process_key, None)
 
         if test.state == TestState.CANCELLED:
             return
 
-        test.stdout = run_stdout.decode()
-        test.stderr = run_stderr.decode(errors="replace")
-        test.stderr_raw = run_stderr
+        test.stdout = "".join(stdout_parts)
+        test.stdout_raw = b"".join(stdout_raw_parts)
+        test.stderr = "".join(stderr_parts)
+        test.stderr_raw = b"".join(stderr_raw_parts)
 
         if run_proc.returncode == 0:
             test.state = TestState.PASSED
