@@ -28,6 +28,12 @@ def parse_args():
         "--parallel", type=int, default=4, help="Number of parallel workers"
     )
     parser.add_argument("--watch", action="store_true", help="Watch for file changes")
+    parser.add_argument(
+        "--output-lines",
+        type=int,
+        default=25,
+        help="Maximum number of output lines to show per info box",
+    )
     return parser.parse_args()
 
 
@@ -249,9 +255,19 @@ def _render_output_box(
     test: Test,
     child_prefix: str,
     log: RichLog,
+    max_lines: int,
+    scroll_offset: int,
 ):
+    max_lines = max(1, max_lines)
+    total_lines = len(output_lines)
+    max_scroll_offset = max(0, total_lines - max_lines)
+    effective_scroll_offset = min(max(0, scroll_offset), max_scroll_offset)
+    end = total_lines - effective_scroll_offset
+    start = max(0, end - max_lines)
+    visible_lines = output_lines[start:end]
+
     max_content_width = max(
-        (_text_visual_width(line) for line in output_lines), default=0
+        (_text_visual_width(line) for line in visible_lines), default=0
     )
 
     # Content rows render one space of inner padding on both sides.
@@ -263,7 +279,7 @@ def _render_output_box(
     top = Text(child_prefix + "└── ╭" + dashes + "╮", style=border_style)
     log.write(top)
 
-    for line in output_lines:
+    for line in visible_lines:
         padded = line.copy()
         pad_count = max_content_width - _text_visual_width(line)
         if pad_count > 0:
@@ -285,14 +301,24 @@ class TestRunnerApp(App[None]):
     }
     """
 
-    BINDINGS = [("q", "quit", "Quit")]
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("[", "output_scroll_up", "Output Up"),
+        ("]", "output_scroll_down", "Output Down"),
+        ("{", "output_page_up", "Output PgUp"),
+        ("}", "output_page_down", "Output PgDn"),
+        ("-", "decrease_output_lines", "Fewer Output Lines"),
+        ("=", "increase_output_lines", "More Output Lines"),
+    ]
 
-    def __init__(self, watch: bool):
+    def __init__(self, watch: bool, output_max_lines: int):
         super().__init__()
         self.watch_mode = watch
         self.observer = None
         self.last_signature: tuple | None = None
         self.log_widget: RichLog | None = None
+        self.output_max_lines = max(1, output_max_lines)
+        self.output_scroll_offset = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -326,6 +352,36 @@ class TestRunnerApp(App[None]):
 
     async def action_quit(self) -> None:
         self.exit()
+
+    def _refresh_after_output_view_change(self) -> None:
+        self.last_signature = None
+        self._render_tree()
+
+    async def action_output_scroll_up(self) -> None:
+        self.output_scroll_offset += 1
+        self._refresh_after_output_view_change()
+
+    async def action_output_scroll_down(self) -> None:
+        self.output_scroll_offset = max(0, self.output_scroll_offset - 1)
+        self._refresh_after_output_view_change()
+
+    async def action_output_page_up(self) -> None:
+        self.output_scroll_offset += self.output_max_lines
+        self._refresh_after_output_view_change()
+
+    async def action_output_page_down(self) -> None:
+        self.output_scroll_offset = max(
+            0, self.output_scroll_offset - self.output_max_lines
+        )
+        self._refresh_after_output_view_change()
+
+    async def action_decrease_output_lines(self) -> None:
+        self.output_max_lines = max(1, self.output_max_lines - 1)
+        self._refresh_after_output_view_change()
+
+    async def action_increase_output_lines(self) -> None:
+        self.output_max_lines += 1
+        self._refresh_after_output_view_change()
 
     def stop_observer(self) -> None:
         if self.observer is None:
@@ -373,7 +429,14 @@ class TestRunnerApp(App[None]):
 
             output = _get_test_output(node)
             if output:
-                _render_output_box(output, node, child_prefix, log)
+                _render_output_box(
+                    output,
+                    node,
+                    child_prefix,
+                    log,
+                    self.output_max_lines,
+                    self.output_scroll_offset,
+                )
         else:
             guide = Text(prefix + connector, style="dim")
             log.write(guide + _suite_label(node, now))
@@ -431,7 +494,7 @@ async def main():
     generate_makefile()
     state.available_runners = args.parallel
 
-    app = TestRunnerApp(args.watch)
+    app = TestRunnerApp(args.watch, args.output_lines)
     try:
         await app.run_async()
     finally:
