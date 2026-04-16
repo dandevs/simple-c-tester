@@ -39,6 +39,20 @@ def rebuild_dep_index():
             dep_index.setdefault(dep, []).append(test)
 
 
+def generate_makefile():
+    os.makedirs("test_build", exist_ok=True)
+    lines = ["-include test_build/*.d", ""]
+    for test in state.all_tests:
+        target = f"test_build/{test.name}"
+        source = test.source_path
+        dep_file = f"test_build/{test.name}.d"
+        lines.append(f"{target}: {source}")
+        lines.append(f"\tgcc -MMD -MP -MF {dep_file} -o {target} {source}")
+        lines.append("")
+    with open("test_build/Makefile", "w") as f:
+        f.write("\n".join(lines))
+
+
 async def handle_file_changes(changed_paths: set[str]):
     affected: dict[str, Test] = {}
     for path in changed_paths:
@@ -76,11 +90,13 @@ async def handle_file_changes(changed_paths: set[str]):
         # Keep source paths relative for consistency with initially discovered tests.
         source_path = os.path.relpath(abs_path)
         test = Test(
-            name=os.path.splitext(os.path.basename(abs_path))[0], source_path=source_path
+            name=os.path.splitext(os.path.basename(abs_path))[0],
+            source_path=source_path,
         )
         state.root_suite.tests.append(test)
         state.all_tests.append(test)
 
+    generate_makefile()
     state_changed()
 
 
@@ -100,7 +116,9 @@ class DebounceHandler(FileSystemEventHandler):
         if not changed:
             return
 
-        self._loop.call_soon_threadsafe(asyncio.create_task, handle_file_changes(changed))
+        self._loop.call_soon_threadsafe(
+            asyncio.create_task, handle_file_changes(changed)
+        )
 
     def on_modified(self, event: FileSystemEvent):
         if event.is_directory:
@@ -211,34 +229,64 @@ def build_display() -> Tree:
     return root
 
 
+def _all_tests_finished() -> bool:
+    done_states = {TestState.PASSED, TestState.FAILED}
+    return all(test.state in done_states for test in state.all_tests)
+
+
+async def _terminate_active_processes() -> None:
+    processes = {proc for proc in active_processes.values() if proc.returncode is None}
+    for proc in processes:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+
+    if processes:
+        await asyncio.gather(
+            *(proc.wait() for proc in processes), return_exceptions=True
+        )
+
+    active_processes.clear()
+
+
 async def main():
     args = parse_args()
     loop = asyncio.get_running_loop()
     state.populate_suites("c/tests")
+    generate_makefile()
     state.available_runners = args.parallel
     state_changed()
 
     observer = None
-    if args.watch:
-        handler = DebounceHandler(loop)
-        observer = Observer()
-        watched_dirs = set()
-        tests_dir = os.path.abspath("c/tests")
-        watched_dirs.add(tests_dir)
-        for test in state.all_tests:
-            for dep in test.dependencies:
-                dep_dir = os.path.dirname(dep)
-                if dep_dir not in watched_dirs:
-                    watched_dirs.add(dep_dir)
-        for d in watched_dirs:
-            observer.schedule(handler, d, recursive=True)
-        observer.daemon = True
-        observer.start()
+    try:
+        if args.watch:
+            handler = DebounceHandler(loop)
+            observer = Observer()
+            watched_dirs = set()
+            tests_dir = os.path.abspath("c/tests")
+            watched_dirs.add(tests_dir)
+            for test in state.all_tests:
+                for dep in test.dependencies:
+                    dep_dir = os.path.dirname(dep)
+                    if dep_dir not in watched_dirs:
+                        watched_dirs.add(dep_dir)
+            for d in watched_dirs:
+                observer.schedule(handler, d, recursive=True)
+            observer.daemon = True
+            observer.start()
 
-    with Live(build_display(), refresh_per_second=10) as live:
-        while True:
-            live.update(build_display())
-            await asyncio.sleep(0.1)
+        with Live(build_display(), refresh_per_second=10) as live:
+            while True:
+                live.update(build_display())
+                if not args.watch and _all_tests_finished():
+                    break
+                await asyncio.sleep(0.1)
+    finally:
+        if observer is not None:
+            observer.stop()
+            observer.join()
+        await _terminate_active_processes()
 
 
 async def run_test(test: Test, on_complete: Callable[[], None]):
@@ -248,24 +296,19 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
     test.time_start = 0.0
     test.time_state_changed = time.monotonic()
 
-    os.makedirs("test_build", exist_ok=True)
     process_key = os.path.abspath(test.source_path)
 
-    compile_proc = await asyncio.create_subprocess_exec(
-        "gcc",
-        "-MMD",
-        "-MP",
-        "-MF",
-        f"test_build/{test.name}.d",
-        "-o",
+    make_proc = await asyncio.create_subprocess_exec(
+        "make",
+        "-f",
+        "test_build/Makefile",
         f"test_build/{test.name}",
-        test.source_path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    active_processes[process_key] = compile_proc
-    _compile_stdout, compile_stderr = await compile_proc.communicate()
-    if active_processes.get(process_key) is compile_proc:
+    active_processes[process_key] = make_proc
+    make_stdout, make_stderr = await make_proc.communicate()
+    if active_processes.get(process_key) is make_proc:
         active_processes.pop(process_key, None)
 
     dep_file = f"test_build/{test.name}.d"
@@ -288,8 +331,8 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         on_complete()
         return
 
-    if compile_proc.returncode != 0:
-        test.compile_err = compile_stderr.decode()
+    if make_proc.returncode != 0:
+        test.compile_err = make_stderr.decode()
         test.state = TestState.FAILED
         test.time_state_changed = time.monotonic()
         on_complete()
@@ -351,4 +394,7 @@ def state_changed():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
