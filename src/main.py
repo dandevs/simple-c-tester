@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import errno
 import os
 import threading
 import time
@@ -47,7 +48,9 @@ def generate_makefile():
         source = test.source_path
         dep_file = f"test_build/{test.name}.d"
         lines.append(f"{target}: {source}")
-        lines.append(f"\tgcc -MMD -MP -MF {dep_file} -o {target} {source}")
+        lines.append(
+            f"\tgcc -fdiagnostics-color=always -MMD -MP -MF {dep_file} -o {target} {source}"
+        )
         lines.append("")
     with open("test_build/Makefile", "w") as f:
         f.write("\n".join(lines))
@@ -215,8 +218,12 @@ def _add_test_node(tree, test: Test, now: float):
 
     node = tree.add(label)
     if test.state == TestState.FAILED:
-        error = test.compile_err or test.stderr or ""
-        node.add(Panel(error.strip(), border_style="red"))
+        raw = test.compile_err_raw or test.stderr_raw or b""
+        if raw:
+            error_text = Text.from_ansi(raw.decode(errors="replace").strip())
+        else:
+            error_text = Text((test.compile_err or test.stderr or "").strip())
+        node.add(Panel(error_text, border_style="red"))
 
 
 def build_display() -> Tree:
@@ -290,79 +297,112 @@ async def main():
 
 
 async def run_test(test: Test, on_complete: Callable[[], None]):
-    # print(f"Dispatching test: {test.name}")
-    test.state = TestState.RUNNING
-    # Execution timer should only include binary runtime, not compilation.
-    test.time_start = 0.0
-    test.time_state_changed = time.monotonic()
-
     process_key = os.path.abspath(test.source_path)
+    try:
+        if test.state == TestState.CANCELLED:
+            return
 
-    make_proc = await asyncio.create_subprocess_exec(
-        "make",
-        "-f",
-        "test_build/Makefile",
-        f"test_build/{test.name}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    active_processes[process_key] = make_proc
-    make_stdout, make_stderr = await make_proc.communicate()
-    if active_processes.get(process_key) is make_proc:
-        active_processes.pop(process_key, None)
+        make_proc = await asyncio.create_subprocess_exec(
+            "make",
+            "-f",
+            "test_build/Makefile",
+            f"test_build/{test.name}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        active_processes[process_key] = make_proc
+        _, make_stderr = await make_proc.communicate()
+        if active_processes.get(process_key) is make_proc:
+            active_processes.pop(process_key, None)
 
-    dep_file = f"test_build/{test.name}.d"
-    if os.path.exists(dep_file):
-        with open(dep_file, "r") as f:
-            dep_content = f.read()
-        colon_idx = dep_content.index(":")
-        deps_str = dep_content[colon_idx + 1 :].strip()
-        parts = deps_str.split()
-        deps = []
-        for part in parts:
-            if part.endswith("\\"):
-                part = part[:-1]
-            if part:
-                deps.append(os.path.abspath(part))
-        test.dependencies = deps
-        rebuild_dep_index()
+        dep_file = f"test_build/{test.name}.d"
+        if os.path.exists(dep_file):
+            with open(dep_file, "r") as f:
+                dep_content = f.read()
+            if ":" in dep_content:
+                colon_idx = dep_content.index(":")
+                deps_str = dep_content[colon_idx + 1 :].strip()
+                parts = deps_str.split()
+                deps = []
+                for part in parts:
+                    if part.endswith("\\"):
+                        part = part[:-1]
+                    if part:
+                        deps.append(os.path.abspath(part))
+                test.dependencies = deps
+                rebuild_dep_index()
 
-    if test.state == TestState.CANCELLED:
-        on_complete()
-        return
+        if test.state == TestState.CANCELLED:
+            return
 
-    if make_proc.returncode != 0:
-        test.compile_err = make_stderr.decode()
-        test.state = TestState.FAILED
+        if make_proc.returncode != 0:
+            test.compile_err = make_stderr.decode(errors="replace")
+            test.compile_err_raw = make_stderr
+            test.state = TestState.FAILED
+            test.time_state_changed = time.monotonic()
+            return
+
+        run_proc = None
+        for _ in range(10):
+            try:
+                run_proc = await asyncio.create_subprocess_exec(
+                    f"./test_build/{test.name}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                break
+            except OSError as e:
+                if e.errno == errno.ETXTBSY:
+                    await asyncio.sleep(0.05)
+                    continue
+                if e.errno == errno.ENOENT:
+                    test.stderr = (
+                        f"test executable missing: ./test_build/{test.name}"
+                    )
+                    test.stderr_raw = b""
+                    test.state = TestState.FAILED
+                    test.time_state_changed = time.monotonic()
+                    return
+                raise
+
+        if run_proc is None:
+            run_proc = await asyncio.create_subprocess_exec(
+                f"./test_build/{test.name}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+        test.time_start = time.monotonic()
+        active_processes[process_key] = run_proc
+        run_stdout, run_stderr = await run_proc.communicate()
+        if active_processes.get(process_key) is run_proc:
+            active_processes.pop(process_key, None)
+
+        if test.state == TestState.CANCELLED:
+            return
+
+        test.stdout = run_stdout.decode()
+        test.stderr = run_stderr.decode(errors="replace")
+        test.stderr_raw = run_stderr
+
+        if run_proc.returncode == 0:
+            test.state = TestState.PASSED
+        else:
+            test.state = TestState.FAILED
+
         test.time_state_changed = time.monotonic()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        if test.state != TestState.CANCELLED:
+            test.stderr = f"runner error: {e}"
+            test.stderr_raw = b""
+            test.state = TestState.FAILED
+            test.time_state_changed = time.monotonic()
+    finally:
+        if test.state != TestState.CANCELLED:
+            active_processes.pop(process_key, None)
         on_complete()
-        return
-
-    run_proc = await asyncio.create_subprocess_exec(
-        f"./test_build/{test.name}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    test.time_start = time.monotonic()
-    active_processes[process_key] = run_proc
-    run_stdout, run_stderr = await run_proc.communicate()
-    if active_processes.get(process_key) is run_proc:
-        active_processes.pop(process_key, None)
-
-    if test.state == TestState.CANCELLED:
-        on_complete()
-        return
-
-    test.stdout = run_stdout.decode()
-    test.stderr = run_stderr.decode()
-
-    if run_proc.returncode == 0:
-        test.state = TestState.PASSED
-    else:
-        test.state = TestState.FAILED
-
-    test.time_state_changed = time.monotonic()
-    on_complete()
 
 
 def state_changed():
@@ -375,6 +415,11 @@ def state_changed():
     while state.available_runners > 0 and len(pending_tests) > 0:
         test = pending_tests.pop()
         state.available_runners -= 1
+        # Mark as running before scheduling so this test cannot be enqueued twice.
+        test.state = TestState.RUNNING
+        # Execution timer should only include binary runtime, not compilation.
+        test.time_start = 0.0
+        test.time_state_changed = time.monotonic()
         tests_to_run.append(test)
 
     for test in tests_to_run:

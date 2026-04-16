@@ -15,6 +15,8 @@ class Test:
     stdout: str = ""
     stderr: str = ""
     compile_err: str = ""
+    compile_err_raw: bytes = b""
+    stderr_raw: bytes = b""
 
 
 @dataclass
