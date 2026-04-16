@@ -24,6 +24,15 @@ dep_index: dict[str, list[Test]] = {}
 active_processes: dict[str, asyncio.subprocess.Process] = {}
 stdbuf_path = shutil.which("stdbuf")
 
+SUITE_LABEL_STYLE = "bold bright_white"
+TEST_PENDING_STYLE = "bold bright_yellow"
+TEST_PASSED_STYLE = "bold bright_green"
+TEST_FAILED_STYLE = "bold bright_red"
+TEST_DEFAULT_STYLE = "bright_white"
+TREE_META_STYLE = "white"
+TREE_GUIDE_STYLE = "bright_black"
+OUTPUT_BOX_PASS_BORDER_STYLE = "white"
+
 
 @dataclass
 class OutputBoxRenderMeta:
@@ -191,8 +200,8 @@ def _suite_elapsed_seconds(suite: Suite, now: float) -> float:
 
 def _suite_label(suite: Suite, now: float) -> Text:
     elapsed_ms = int(_suite_elapsed_seconds(suite, now) * 1000)
-    text = Text(suite.name, style="bold")
-    text.append(f" [{elapsed_ms}ms]", style="bright_black")
+    text = Text(suite.name, style=SUITE_LABEL_STYLE)
+    text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
     return text
 
 
@@ -203,28 +212,28 @@ def _test_label(test: Test, now: float) -> Text:
     spinner = spinner_frames[int(now * 12) % len(spinner_frames)]
 
     if test.state == TestState.PENDING:
-        text = Text(f"{spinner} {test.name}", style="yellow")
-        text.append(" [pending]", style="bright_black")
+        text = Text(f"{spinner} {test.name}", style=TEST_PENDING_STYLE)
+        text.append(" [pending]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.RUNNING and test.time_start <= 0:
-        text = Text(f"{spinner} {test.name}", style="yellow")
-        text.append(" [compiling]", style="bright_black")
+        text = Text(f"{spinner} {test.name}", style=TEST_PENDING_STYLE)
+        text.append(" [compiling]", style=TREE_META_STYLE)
         return text
     elif test.state in (TestState.RUNNING, TestState.CANCELLED):
-        text = Text(f"{spinner} {test.name}", style="yellow")
-        text.append(f" [{elapsed_ms}ms]", style="bright_black")
+        text = Text(f"{spinner} {test.name}", style=TEST_PENDING_STYLE)
+        text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.PASSED:
-        text = Text(test.name, style="green")
-        text.append(f" [{elapsed_ms}ms]", style="bright_black")
+        text = Text(test.name, style=TEST_PASSED_STYLE)
+        text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.FAILED:
-        text = Text(test.name, style="bold red")
-        text.append(f" [{elapsed_ms}ms]", style="bright_black")
+        text = Text(test.name, style=TEST_FAILED_STYLE)
+        text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
 
-    text = Text(test.name, style="white")
-    text.append(f" [{elapsed_ms}ms]", style="bright_black")
+    text = Text(test.name, style=TEST_DEFAULT_STYLE)
+    text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
     return text
 
 
@@ -292,7 +301,11 @@ def _render_output_box(
     # Content rows render one space of inner padding on both sides.
     box_inner_width = max_content_width + 2
 
-    border_style = "bold red" if test.state == TestState.FAILED else "dim"
+    border_style = (
+        TEST_FAILED_STYLE
+        if test.state == TestState.FAILED
+        else OUTPUT_BOX_PASS_BORDER_STYLE
+    )
     dashes = "─" * box_inner_width
     top_plain = child_prefix + "└── ╭" + dashes + "╮"
 
@@ -304,7 +317,9 @@ def _render_output_box(
         pad_count = max_content_width - _text_visual_width(line)
         if pad_count > 0:
             padded.append(" " * pad_count)
-        content_line = Text(child_prefix + "    │ ", style=border_style)
+
+        content_line = Text(child_prefix + "    ")
+        content_line.append("│ ", style=border_style)
         content_line.append(padded)
         content_line.append(" │", style=border_style)
         log.write(content_line)
@@ -384,9 +399,9 @@ class TestOutputScreen(Screen[None]):
         log.clear()
         title = Text("Output: ", style="bold")
         title.append(self.test.name, style="bold")
-        title.append(f" [{self.test.state.value}]", style="bright_black")
+        title.append(f" [{self.test.state.value}]", style=TREE_META_STYLE)
         log.write(title)
-        log.write(Text(self.test.source_path, style="dim"))
+        log.write(Text(self.test.source_path, style=TREE_META_STYLE))
         log.write(Text())
 
         output_lines = _get_test_output(self.test)
@@ -394,7 +409,7 @@ class TestOutputScreen(Screen[None]):
             for line in output_lines:
                 log.write(line)
         else:
-            log.write(Text("No output.", style="dim"))
+            log.write(Text("No output.", style=TREE_META_STYLE))
 
         if near_bottom:
             log.scroll_end(animate=False, immediate=True)
@@ -547,7 +562,7 @@ class TestRunnerApp(App[None]):
         child_prefix = prefix + continuation
 
         if isinstance(node, Test):
-            guide = Text(prefix + connector, style="dim")
+            guide = Text(prefix + connector, style=TREE_GUIDE_STYLE)
             self._write_tree_line(log, guide + _test_label(node, now))
 
             output = _get_test_output(node)
@@ -572,7 +587,7 @@ class TestRunnerApp(App[None]):
                     )
                 )
         else:
-            guide = Text(prefix + connector, style="dim")
+            guide = Text(prefix + connector, style=TREE_GUIDE_STYLE)
             self._write_tree_line(log, guide + _suite_label(node, now))
 
             children = list(node.tests) + list(node.children)
