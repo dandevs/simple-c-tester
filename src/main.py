@@ -19,6 +19,7 @@ from models import Test, Suite, AppState, TestState
 state = AppState()
 dep_index: dict[str, list[Test]] = {}
 test_spinners: dict[str, Spinner] = {}
+active_processes: dict[str, asyncio.subprocess.Process] = {}
 
 
 def parse_args():
@@ -44,11 +45,20 @@ async def handle_file_changes(changed_paths: set[str]):
         abs_path = os.path.abspath(path)
         for test in dep_index.get(abs_path, []):
             affected[test.source_path] = test
+        for test in state.all_tests:
+            if os.path.abspath(test.source_path) == abs_path:
+                affected[test.source_path] = test
 
     for test in affected.values():
         if test.state == TestState.RUNNING:
             test.state = TestState.CANCELLED
             test.time_state_changed = time.monotonic()
+            process = active_processes.get(os.path.abspath(test.source_path))
+            if process is not None and process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
         elif test.state in (TestState.PASSED, TestState.FAILED):
             test.state = TestState.PENDING
             test.time_state_changed = time.monotonic()
@@ -127,7 +137,7 @@ def _get_test_spinner(test: Test) -> Spinner:
 
 
 def _add_test_node(tree, test: Test):
-    if test.state in (TestState.PENDING, TestState.RUNNING):
+    if test.state in (TestState.PENDING, TestState.RUNNING, TestState.CANCELLED):
         label = _get_test_spinner(test)
     elif test.state == TestState.PASSED:
         test_spinners.pop(os.path.abspath(test.source_path), None)
@@ -190,6 +200,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
     test.time_state_changed = time.monotonic()
 
     os.makedirs("test_build", exist_ok=True)
+    process_key = os.path.abspath(test.source_path)
 
     compile_proc = await asyncio.create_subprocess_exec(
         "gcc",
@@ -203,7 +214,10 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    active_processes[process_key] = compile_proc
     _compile_stdout, compile_stderr = await compile_proc.communicate()
+    if active_processes.get(process_key) is compile_proc:
+        active_processes.pop(process_key, None)
 
     dep_file = f"test_build/{test.name}.d"
     if os.path.exists(dep_file):
@@ -237,7 +251,10 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    active_processes[process_key] = run_proc
     run_stdout, run_stderr = await run_proc.communicate()
+    if active_processes.get(process_key) is run_proc:
+        active_processes.pop(process_key, None)
 
     if test.state == TestState.CANCELLED:
         on_complete()
@@ -269,10 +286,11 @@ def state_changed():
 
     for test in tests_to_run:
 
-        def on_complete():
+        def on_complete(completed_test: Test = test):
             state.available_runners += 1
-            if test.state == TestState.CANCELLED:
-                test.state = TestState.PENDING
+            if completed_test.state == TestState.CANCELLED:
+                completed_test.state = TestState.PENDING
+                completed_test.time_state_changed = time.monotonic()
             state_changed()
 
         asyncio.ensure_future(run_test(test, on_complete))
