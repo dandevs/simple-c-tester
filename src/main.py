@@ -18,6 +18,7 @@ from models import Test, Suite, AppState, TestState
 
 state = AppState()
 dep_index: dict[str, list[Test]] = {}
+test_spinners: dict[str, Spinner] = {}
 
 
 def parse_args():
@@ -116,14 +117,26 @@ def build_suite_tree(suite: Suite) -> Tree:
     return tree
 
 
+def _get_test_spinner(test: Test) -> Spinner:
+    key = os.path.abspath(test.source_path)
+    spinner = test_spinners.get(key)
+    if spinner is None:
+        spinner = Spinner("dots", text=Text(test.name, style="yellow"), style="yellow")
+        test_spinners[key] = spinner
+    return spinner
+
+
 def _add_test_node(tree, test: Test):
-    if test.state == TestState.PENDING:
-        label = Spinner("dots", text=Text(test.name, style="yellow"), style="yellow")
+    if test.state in (TestState.PENDING, TestState.RUNNING):
+        label = _get_test_spinner(test)
     elif test.state == TestState.PASSED:
+        test_spinners.pop(os.path.abspath(test.source_path), None)
         label = Text(test.name, style="green")
     elif test.state == TestState.FAILED:
+        test_spinners.pop(os.path.abspath(test.source_path), None)
         label = Text(test.name, style="red")
     else:
+        test_spinners.pop(os.path.abspath(test.source_path), None)
         label = Text(test.name)
 
     node = tree.add(label)
