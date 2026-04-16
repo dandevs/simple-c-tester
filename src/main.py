@@ -164,13 +164,25 @@ def _with_elapsed_text(name: str, name_style: str, elapsed_seconds: float) -> Te
     return text
 
 
+def _with_tag_text(name: str, name_style: str, tag: str) -> Text:
+    text = Text(name, style=name_style)
+    text.append(f" [{tag}]", style="bright_black")
+    return text
+
+
 def _suite_label(suite: Suite, now: float) -> Text:
     return _with_elapsed_text(suite.name, "bold", _suite_elapsed_seconds(suite, now))
 
 
 def _add_test_node(tree, test: Test, now: float):
     elapsed_seconds = _test_elapsed_seconds(test, now)
-    if test.state in (TestState.PENDING, TestState.RUNNING, TestState.CANCELLED):
+    if test.state == TestState.PENDING:
+        label = _get_test_spinner(test)
+        label.text = _with_tag_text(test.name, "yellow", "pending")
+    elif test.state == TestState.RUNNING and test.time_start <= 0:
+        label = _get_test_spinner(test)
+        label.text = _with_tag_text(test.name, "yellow", "compiling")
+    elif test.state in (TestState.RUNNING, TestState.CANCELLED):
         label = _get_test_spinner(test)
         label.text = _with_elapsed_text(test.name, "yellow", elapsed_seconds)
     elif test.state == TestState.PASSED:
@@ -232,7 +244,8 @@ async def main():
 async def run_test(test: Test, on_complete: Callable[[], None]):
     # print(f"Dispatching test: {test.name}")
     test.state = TestState.RUNNING
-    test.time_start = time.monotonic()
+    # Execution timer should only include binary runtime, not compilation.
+    test.time_start = 0.0
     test.time_state_changed = time.monotonic()
 
     os.makedirs("test_build", exist_ok=True)
@@ -287,6 +300,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    test.time_start = time.monotonic()
     active_processes[process_key] = run_proc
     run_stdout, run_stderr = await run_proc.communicate()
     if active_processes.get(process_key) is run_proc:
