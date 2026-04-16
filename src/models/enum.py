@@ -6,3 +6,4 @@ class TestState(Enum):
     PASSED = "passed"
     FAILED = "failed"
     PENDING = "pending"
+    CANCELLED = "cancelled"
