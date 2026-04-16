@@ -11,6 +11,7 @@ from typing import Callable
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import Footer, Header, RichLog
 from watchdog.events import FileSystemEvent
@@ -388,8 +389,8 @@ class TestOutputScreen(Screen[None]):
     """
 
     BINDINGS = [
-        ("escape", "close", "Back"),
-        ("q", "close", "Back"),
+        Binding("escape", "close", "Back"),
+        Binding("ctrl+c", "close", "Back", priority=True),
     ]
 
     def __init__(self, test: Test):
@@ -479,7 +480,7 @@ class TestRunnerApp(App[None]):
     """
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
+        Binding("ctrl+c", "quit", "Quit", priority=True),
     ]
 
     def __init__(self, watch: bool, output_max_lines: int, theme_name: str):
@@ -525,6 +526,9 @@ class TestRunnerApp(App[None]):
         self.set_interval(0.1, self._tick)
 
     async def action_quit(self) -> None:
+        if len(self.screen_stack) > 1:
+            self.pop_screen()
+            return
         self.exit()
 
     def _find_output_box_at(self, x: int, y: int) -> OutputBoxRegion | None:
