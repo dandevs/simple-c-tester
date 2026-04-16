@@ -6,11 +6,11 @@ import threading
 import time
 from typing import Callable
 
-from rich.live import Live
-from rich.panel import Panel
-from rich.spinner import Spinner
 from rich.text import Text
-from rich.tree import Tree
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal
+from textual.widgets import Footer, Header, RichLog, Tree
+from textual.widgets.tree import TreeNode
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -19,7 +19,6 @@ from models import Test, Suite, AppState, TestState
 
 state = AppState()
 dep_index: dict[str, list[Test]] = {}
-test_spinners: dict[str, Spinner] = {}
 active_processes: dict[str, asyncio.subprocess.Process] = {}
 
 
@@ -139,24 +138,6 @@ class DebounceHandler(FileSystemEventHandler):
         self.on_modified(event)
 
 
-def build_suite_tree(suite: Suite, now: float) -> Tree:
-    tree = Tree(_suite_label(suite, now))
-    for test in suite.tests:
-        _add_test_node(tree, test, now)
-    for child in suite.children:
-        tree.add(build_suite_tree(child, now))
-    return tree
-
-
-def _get_test_spinner(test: Test) -> Spinner:
-    key = os.path.abspath(test.source_path)
-    spinner = test_spinners.get(key)
-    if spinner is None:
-        spinner = Spinner("dots", text=Text(test.name, style="yellow"), style="yellow")
-        test_spinners[key] = spinner
-    return spinner
-
-
 def _test_elapsed_seconds(test: Test, now: float) -> float:
     if test.time_start <= 0:
         return 0.0
@@ -195,58 +176,219 @@ def _suite_label(suite: Suite, now: float) -> Text:
     return _with_elapsed_text(suite.name, "bold", _suite_elapsed_seconds(suite, now))
 
 
-def _add_test_node(tree, test: Test, now: float):
+def _test_label(test: Test, now: float) -> Text:
     elapsed_seconds = _test_elapsed_seconds(test, now)
+    spinner_frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    spinner = spinner_frames[int(now * 12) % len(spinner_frames)]
+
     if test.state == TestState.PENDING:
-        label = _get_test_spinner(test)
-        label.text = _with_tag_text(test.name, "yellow", "pending")
+        return _with_tag_text(f"{spinner} {test.name}", "yellow", "pending")
     elif test.state == TestState.RUNNING and test.time_start <= 0:
-        label = _get_test_spinner(test)
-        label.text = _with_tag_text(test.name, "yellow", "compiling")
+        return _with_tag_text(f"{spinner} {test.name}", "yellow", "compiling")
     elif test.state in (TestState.RUNNING, TestState.CANCELLED):
-        label = _get_test_spinner(test)
-        label.text = _with_elapsed_text(test.name, "yellow", elapsed_seconds)
+        return _with_elapsed_text(f"{spinner} {test.name}", "yellow", elapsed_seconds)
     elif test.state == TestState.PASSED:
-        test_spinners.pop(os.path.abspath(test.source_path), None)
-        label = _with_elapsed_text(test.name, "green", elapsed_seconds)
+        return _with_elapsed_text(test.name, "green", elapsed_seconds)
     elif test.state == TestState.FAILED:
-        test_spinners.pop(os.path.abspath(test.source_path), None)
-        label = _with_elapsed_text(test.name, "red", elapsed_seconds)
-    else:
-        test_spinners.pop(os.path.abspath(test.source_path), None)
-        label = _with_elapsed_text(test.name, "white", elapsed_seconds)
+        return _with_elapsed_text(test.name, "red", elapsed_seconds)
 
-    node = tree.add(label)
-    if test.state == TestState.FAILED:
-        raw = test.compile_err_raw or test.stderr_raw or b""
-        if raw:
-            error_text = Text.from_ansi(raw.decode(errors="replace").strip())
+    return _with_elapsed_text(test.name, "white", elapsed_seconds)
+
+
+class TestRunnerApp(App[None]):
+    CSS = """
+    #body {
+        height: 1fr;
+    }
+
+    #suite-tree {
+        width: 45%;
+        border: solid $primary;
+    }
+
+    #details {
+        width: 55%;
+        border: solid $primary;
+    }
+    """
+
+    BINDINGS = [("q", "quit", "Quit")]
+
+    def __init__(self, watch: bool):
+        super().__init__()
+        self.watch_mode = watch
+        self.observer = None
+        self.last_signature: tuple | None = None
+        self.tree_widget = None
+        self.details_widget = None
+        self.test_nodes: dict[str, TreeNode] = {}
+        self.selected_test_key: str | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Horizontal(id="body"):
+            yield Tree("root", id="suite-tree")
+            yield RichLog(id="details", wrap=True, markup=False, highlight=False)
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        self.tree_widget = self.query_one("#suite-tree", Tree)
+        self.details_widget = self.query_one("#details", RichLog)
+
+        assert self.tree_widget is not None
+        self.tree_widget.show_root = True
+        self._rebuild_tree()
+        self._render_selected_details()
+
+        if self.watch_mode:
+            loop = asyncio.get_running_loop()
+            handler = DebounceHandler(loop)
+            observer = Observer()
+            watched_dirs = set()
+            tests_dir = os.path.abspath("c/tests")
+            watched_dirs.add(tests_dir)
+            for test in state.all_tests:
+                for dep in test.dependencies:
+                    dep_dir = os.path.dirname(dep)
+                    if dep_dir not in watched_dirs:
+                        watched_dirs.add(dep_dir)
+            for d in watched_dirs:
+                observer.schedule(handler, d, recursive=True)
+            observer.daemon = True
+            observer.start()
+            self.observer = observer
+
+        state_changed()
+        self.set_interval(0.1, self._tick)
+
+    async def action_quit(self) -> None:
+        self.exit()
+
+    def stop_observer(self) -> None:
+        if self.observer is None:
+            return
+        self.observer.stop()
+        self.observer.join()
+        self.observer = None
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        data = event.node.data
+        if isinstance(data, Test):
+            self.selected_test_key = os.path.abspath(data.source_path)
         else:
-            error_text = Text((test.compile_err or test.stderr or "").strip())
-        if error_text.plain.strip():
-            node.add(Panel(error_text, border_style="red"))
+            self.selected_test_key = None
+        self._render_selected_details()
 
-    if test.state in (TestState.PASSED, TestState.FAILED, TestState.CANCELLED):
-        if test.stdout_raw:
-            stdout_text = Text.from_ansi(
-                test.stdout_raw.decode(errors="replace").strip()
+    def _tick(self) -> None:
+        has_active = _has_active_tests()
+        signature = _display_state_signature()
+        if has_active or signature != self.last_signature:
+            self._rebuild_tree()
+            self._render_selected_details()
+            self.last_signature = signature
+
+        if not self.watch_mode and _all_tests_finished():
+            self.exit()
+
+    def _rebuild_tree(self) -> None:
+        if self.tree_widget is None:
+            return
+
+        selected_key = self.selected_test_key
+        tree = self.tree_widget
+        tree.clear()
+        self.test_nodes.clear()
+
+        now = time.monotonic()
+        root = tree.root
+        root.set_label(_suite_label(state.root_suite, now))
+        root.data = state.root_suite
+        self._populate_suite_node(root, state.root_suite, now)
+        root.expand()
+
+        if selected_key is not None:
+            selected_node = self.test_nodes.get(selected_key)
+            if selected_node is not None:
+                tree.select_node(selected_node)
+
+    def _populate_suite_node(self, parent_node, suite: Suite, now: float) -> None:
+        for test in suite.tests:
+            node = parent_node.add(_test_label(test, now), data=test)
+            key = os.path.abspath(test.source_path)
+            self.test_nodes[key] = node
+
+        for child in suite.children:
+            child_node = parent_node.add(_suite_label(child, now), data=child)
+            self._populate_suite_node(child_node, child, now)
+
+    def _render_selected_details(self) -> None:
+        if self.details_widget is None:
+            return
+
+        details = self.details_widget
+        details.clear()
+
+        if self.selected_test_key is None:
+            passed = sum(1 for t in state.all_tests if t.state == TestState.PASSED)
+            failed = sum(1 for t in state.all_tests if t.state == TestState.FAILED)
+            running = sum(
+                1
+                for t in state.all_tests
+                if t.state in (TestState.RUNNING, TestState.CANCELLED)
             )
+            pending = sum(1 for t in state.all_tests if t.state == TestState.PENDING)
+            details.write("Select a test from the tree to inspect details.")
+            details.write(
+                f"Summary: passed={passed} failed={failed} running={running} pending={pending}"
+            )
+            return
+
+        test = None
+        for item in state.all_tests:
+            if os.path.abspath(item.source_path) == self.selected_test_key:
+                test = item
+                break
+
+        if test is None:
+            self.selected_test_key = None
+            details.write("Selected test no longer exists.")
+            return
+
+        now = time.monotonic()
+        elapsed_ms = int(_test_elapsed_seconds(test, now) * 1000)
+        details.write(f"Test: {test.name}")
+        details.write(f"Source: {test.source_path}")
+        details.write(f"State: {test.state.value}  Elapsed: {elapsed_ms}ms")
+
+        compile_text = None
+        if test.compile_err_raw:
+            compile_text = Text.from_ansi(test.compile_err_raw.decode(errors="replace"))
+        elif test.compile_err.strip():
+            compile_text = Text(test.compile_err)
+
+        stderr_text = None
+        if test.stderr_raw:
+            stderr_text = Text.from_ansi(test.stderr_raw.decode(errors="replace"))
+        elif test.stderr.strip():
+            stderr_text = Text(test.stderr)
+
+        stdout_text = None
+        if test.stdout_raw:
+            stdout_text = Text.from_ansi(test.stdout_raw.decode(errors="replace"))
         elif test.stdout.strip():
-            stdout_text = Text(test.stdout.strip())
-        else:
-            stdout_text = None
-        if stdout_text and stdout_text.plain.strip():
-            node.add(Panel(stdout_text, border_style="green"))
+            stdout_text = Text(test.stdout)
 
+        if compile_text is not None and compile_text.plain.strip():
+            details.write("\n--- compile stderr ---")
+            details.write(compile_text)
 
-def build_display() -> Tree:
-    now = time.monotonic()
-    root = Tree(_suite_label(state.root_suite, now))
-    for test in state.root_suite.tests:
-        _add_test_node(root, test, now)
-    for suite in state.root_suite.children:
-        root.add(build_suite_tree(suite, now))
-    return root
+        if stderr_text is not None and stderr_text.plain.strip():
+            details.write("\n--- runtime stderr ---")
+            details.write(stderr_text)
+
+        if stdout_text is not None and stdout_text.plain.strip():
+            details.write("\n--- stdout ---")
+            details.write(stdout_text)
 
 
 def _all_tests_finished() -> bool:
@@ -292,45 +434,15 @@ async def _terminate_active_processes() -> None:
 
 async def main():
     args = parse_args()
-    loop = asyncio.get_running_loop()
     state.populate_suites("c/tests")
     generate_makefile()
     state.available_runners = args.parallel
-    state_changed()
 
-    observer = None
+    app = TestRunnerApp(args.watch)
     try:
-        if args.watch:
-            handler = DebounceHandler(loop)
-            observer = Observer()
-            watched_dirs = set()
-            tests_dir = os.path.abspath("c/tests")
-            watched_dirs.add(tests_dir)
-            for test in state.all_tests:
-                for dep in test.dependencies:
-                    dep_dir = os.path.dirname(dep)
-                    if dep_dir not in watched_dirs:
-                        watched_dirs.add(dep_dir)
-            for d in watched_dirs:
-                observer.schedule(handler, d, recursive=True)
-            observer.daemon = True
-            observer.start()
-
-        with Live(build_display(), refresh_per_second=10, auto_refresh=False) as live:
-            last_signature: tuple | None = None
-            while True:
-                has_active = _has_active_tests()
-                signature = _display_state_signature()
-                if has_active or signature != last_signature:
-                    live.update(build_display(), refresh=True)
-                    last_signature = signature
-                if not args.watch and _all_tests_finished():
-                    break
-                await asyncio.sleep(0.1 if has_active else 0.25)
+        await app.run_async()
     finally:
-        if observer is not None:
-            observer.stop()
-            observer.join()
+        app.stop_observer()
         await _terminate_active_processes()
 
 

@@ -1,7 +1,12 @@
 # AGENTS.md
 
 ## Project
-C test runner written in Python. Scans `c/tests/` for `*.c` files, compiles each with gcc via a generated Makefile, runs the executable, and reports results. Uses Rich for live terminal UI.
+C test runner written in Python. Scans `c/tests/` for `*.c` files, compiles each with gcc via a generated Makefile, runs the executable, and reports results. Uses Textual TUI for interactive terminal display with scrollable details and test tree navigation.
+
+## Installation
+```bash
+pip install -r requirements.txt
+```
 
 ## Commands
 - **Run**: `python3 src/main.py` from repo root
@@ -14,9 +19,17 @@ C test runner written in Python. Scans `c/tests/` for `*.c` files, compiles each
 There is **no** positional source-dir argument; the test path is hardcoded as `c/tests`.
 
 ## Architecture
-- `src/main.py` — entry point, async test dispatch, Rich Live display, watchdog integration
+- `src/main.py` — entry point, async test dispatch, Textual TUI app with tree + scrollable details pane, watchdog integration
 - `src/models/` — `Test`, `Suite`, `AppState` dataclasses and `TestState` enum
 - `test_build/` — compiled executables, `.d` dependency files, and a generated `Makefile` (build artifact, gitignored)
+
+## Textual UI
+- Left pane: suite/test tree with status (pending/running/compiling/passed/failed)
+- Right pane: scrollable details view (select test from tree to inspect compile/runtime output)
+- Header: app title and status
+- Footer: keyboard bindings (q to quit)
+- Spinner animation for pending/running tests using Unicode braille characters
+- Elapsed timing updates on all nodes
 
 ## Compilation Flow
 - `generate_makefile()` writes `test_build/Makefile` with one rule per test. Called after `populate_suites()` and when new tests are discovered in watch mode.
@@ -28,9 +41,11 @@ There is **no** positional source-dir argument; the test path is hardcoded as `c
 - `state_changed()` is a **sync** function (not async) — it uses `asyncio.ensure_future()` to schedule `run_test()` and recurses to drain the pending queue
 - `available_runners` counter (not a semaphore) limits dispatch
 - Watchdog handler uses `threading.Timer` / `threading.Lock` for debouncing, then calls `loop.call_soon_threadsafe` back into the async loop
+- Textual app runs in async context; `_tick()` callback refreshes UI at 100ms intervals when active or state changes
 
 ## Tooling
-- **Rich** for live terminal tree output
+- **Textual** (>=0.68.0) for interactive TUI with scrollable widgets
+- **Rich** (>=13.7.0) for ANSI/markup text styling in Textual widgets
 - **gcc** for C compilation (invoked via generated Makefile)
-- **watchdog** for file system watching
-- No `pyproject.toml`, `requirements.txt`, or Python test framework configured
+- **watchdog** (>=3.0.0) for file system watching
+- Dependencies listed in `requirements.txt`
