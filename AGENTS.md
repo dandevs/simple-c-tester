@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-C test runner written in Python. Scans `c/tests/` for `*.c` files, compiles each with gcc via a generated Makefile, runs the executable, and reports results. Uses Textual TUI for interactive terminal display with scrollable details and test tree navigation.
+C test runner written in Python. Scans `c/tests/` for `*.c` files, compiles each with gcc via a generated Makefile, runs the executable, and reports results. Uses Textual TUI with a single RichLog widget that renders the full test tree as styled text — suites and tests shown with Unicode box-drawing characters (`├──`, `└──`, `│`), and test output displayed inline in bordered boxes (`╭─╮`, `│`, `╰─╯`) beneath each test that has output.
 
 ## Installation
 ```bash
@@ -15,21 +15,30 @@ pip install -r requirements.txt
 ## CLI Flags
 - `--parallel N` — number of concurrent test runners (default 4)
 - `--watch` — watch for file changes, re-run affected tests
+- `--theme ansi|default` — UI theme (default: `ansi`). `ansi` uses Textual's `textual-ansi` theme which blends with the terminal's native colors. `default` uses Textual's standard `textual-dark` theme.
 
 There is **no** positional source-dir argument; the test path is hardcoded as `c/tests`.
 
 ## Architecture
-- `src/main.py` — entry point, async test dispatch, Textual TUI app with tree + scrollable details pane, watchdog integration
+- `src/main.py` — entry point, async test dispatch, Textual TUI app with single RichLog tree view and inline output boxes, watchdog integration
 - `src/models/` — `Test`, `Suite`, `AppState` dataclasses and `TestState` enum
 - `test_build/` — compiled executables, `.d` dependency files, and a generated `Makefile` (build artifact, gitignored)
 
 ## Textual UI
-- Left pane: suite/test tree with status (pending/running/compiling/passed/failed)
-- Right pane: scrollable details view (select test from tree to inspect compile/runtime output)
+- Single full-screen `RichLog` widget rendering the test tree with Unicode box-drawing characters
+- Suite and test nodes displayed with `├──`/`└──`/`│` tree guides
+- Inline output boxes (`╭─╮`, `│`, `╰─╯`) beneath tests that have compile errors, stderr, or stdout
+- Box borders colored red for failures, dim for passes; tree guides styled dim
+- Test names colored green (passed), bold red (failed), yellow with spinner (pending/running)
+- Elapsed time `[Xms]` shown after each node in `bright_black`
 - Header: app title and status
 - Footer: keyboard bindings (q to quit)
 - Spinner animation for pending/running tests using Unicode braille characters
 - Elapsed timing updates on all nodes
+- `_render_tree()` clears and redraws the full tree on each tick (100ms) when state changes
+- `_render_node()` recursively walks suites/tests, computing tree prefix continuations
+- `_render_output_box()` draws the bordered output box with proper tree continuation lines
+- `_get_test_output()` collects compile_err, stderr, stdout as Rich Text lines (preserves ANSI colors)
 
 ## Compilation Flow
 - `generate_makefile()` writes `test_build/Makefile` with one rule per test. Called after `populate_suites()` and when new tests are discovered in watch mode.

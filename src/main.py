@@ -23,6 +23,7 @@ state = AppState()
 dep_index: dict[str, list[Test]] = {}
 active_processes: dict[str, asyncio.subprocess.Process] = {}
 stdbuf_path = shutil.which("stdbuf")
+subprocess_columns = 80
 
 SUITE_LABEL_STYLE = "bold bright_white"
 TEST_PENDING_STYLE = "bold bright_yellow"
@@ -88,7 +89,7 @@ def generate_makefile():
         dep_file = f"test_build/{test.name}.d"
         lines.append(f"{target}: {source}")
         lines.append(
-            f"\tgcc -fdiagnostics-color=always -MMD -MP -MF {dep_file} -o {target} {source}"
+            f"\tgcc -fdiagnostics-color=always -fmessage-length=$${{COLUMNS:-80}} -MMD -MP -MF {dep_file} -o {target} {source}"
         )
         lines.append("")
     with open("test_build/Makefile", "w") as f:
@@ -284,22 +285,60 @@ def _text_visual_width(text: Text) -> int:
     return max((len(line) for line in text.split(allow_blank=True)), default=0)
 
 
+def _wrap_output_lines(
+    output_lines: list[Text], max_content_width: int, log: RichLog
+) -> list[Text]:
+    width = max(1, max_content_width)
+    wrapped: list[Text] = []
+    console = getattr(log.app, "console", None)
+
+    for line in output_lines:
+        source = line.copy()
+        if not source.plain:
+            wrapped.append(Text())
+            continue
+
+        if console is None:
+            if len(source) <= width:
+                wrapped.append(source)
+            else:
+                offsets = list(range(width, len(source), width))
+                wrapped.extend(source.divide(offsets))
+            continue
+
+        wrapped.extend(
+            source.wrap(
+                console,
+                width,
+                justify="left",
+                overflow="fold",
+                no_wrap=False,
+            )
+        )
+
+    return wrapped if wrapped else [Text()]
+
+
 def _render_output_box(
     output_lines: list[Text],
     test: Test,
     child_prefix: str,
     log: RichLog,
     max_lines: int,
+    max_total_width: int,
 ) -> OutputBoxRenderMeta:
     max_lines = max(1, max_lines)
-    visible_lines = output_lines[-max_lines:]
 
-    max_content_width = max(
-        (_text_visual_width(line) for line in visible_lines), default=0
+    # Box rows are: child_prefix + border/content + border.
+    # Fill the available width and clamp content so no horizontal scrolling is needed.
+    border_overhead = 6  # "└── ╭" + "╮" (equivalently "    │ " + " │")
+    available_inner_width = max(
+        2, max_total_width - len(child_prefix) - border_overhead
     )
-
-    # Content rows render one space of inner padding on both sides.
-    box_inner_width = max_content_width + 2
+    box_inner_width = available_inner_width
+    max_content_width = max(0, box_inner_width - 2)
+    wrapped_lines = _wrap_output_lines(output_lines, max_content_width, log)
+    visible_lines = wrapped_lines[-max_lines:]
 
     border_style = (
         TEST_FAILED_STYLE
@@ -314,7 +353,7 @@ def _render_output_box(
 
     for line in visible_lines:
         padded = line.copy()
-        pad_count = max_content_width - _text_visual_width(line)
+        pad_count = max(0, max_content_width - _text_visual_width(padded))
         if pad_count > 0:
             padded.append(" " * pad_count)
 
@@ -339,6 +378,12 @@ class TestOutputScreen(Screen[None]):
     #output-full {
         height: 1fr;
         border: none;
+        scrollbar-size-vertical: 0;
+        scrollbar-size-horizontal: 0;
+        scrollbar-color: transparent;
+        scrollbar-background: transparent;
+        scrollbar-background-hover: transparent;
+        scrollbar-background-active: transparent;
     }
     """
 
@@ -424,6 +469,12 @@ class TestRunnerApp(App[None]):
     #tree-view {
         height: 1fr;
         border: none;
+        scrollbar-size-vertical: 0;
+        scrollbar-size-horizontal: 0;
+        scrollbar-color: transparent;
+        scrollbar-background: transparent;
+        scrollbar-background-hover: transparent;
+        scrollbar-background-active: transparent;
     }
     """
 
@@ -536,7 +587,10 @@ class TestRunnerApp(App[None]):
         if self.log_widget is None:
             return
 
+        global subprocess_columns
+
         log = self.log_widget
+        subprocess_columns = max(20, log.size.width or self.size.width or 80)
         log.clear()
         now = time.monotonic()
         self._tree_line_cursor = 0
@@ -574,6 +628,7 @@ class TestRunnerApp(App[None]):
                     child_prefix,
                     log,
                     self.output_max_lines,
+                    subprocess_columns,
                 )
                 self._tree_line_cursor += render_meta.rendered_lines
 
@@ -657,6 +712,9 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         if test.state == TestState.CANCELLED:
             return
 
+        proc_env = os.environ.copy()
+        proc_env["COLUMNS"] = str(max(20, subprocess_columns))
+
         make_proc = await asyncio.create_subprocess_exec(
             "make",
             "-f",
@@ -664,6 +722,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             f"test_build/{test.name}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=proc_env,
         )
         active_processes[process_key] = make_proc
         _, make_stderr = await make_proc.communicate()
@@ -708,6 +767,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
                     *run_cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=proc_env,
                 )
                 break
             except OSError as e:
@@ -727,6 +787,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
                 *run_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=proc_env,
             )
 
         test.time_start = time.monotonic()
