@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+from dataclasses import dataclass
 import errno
 import os
 import shutil
@@ -8,7 +9,9 @@ import time
 from typing import Callable
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
+from textual.screen import Screen
 from textual.widgets import Footer, Header, RichLog
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
@@ -22,6 +25,22 @@ active_processes: dict[str, asyncio.subprocess.Process] = {}
 stdbuf_path = shutil.which("stdbuf")
 
 
+@dataclass
+class OutputBoxRenderMeta:
+    rendered_lines: int
+    left_col: int
+    right_col: int
+
+
+@dataclass
+class OutputBoxRegion:
+    test_key: str
+    start_line: int
+    end_line: int
+    left_col: int
+    right_col: int
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Test runner")
     parser.add_argument(
@@ -33,6 +52,12 @@ def parse_args():
         type=int,
         default=25,
         help="Maximum number of output lines to show per info box",
+    )
+    parser.add_argument(
+        "--theme",
+        choices=["ansi", "default"],
+        default="ansi",
+        help="UI theme (default: ansi)",
     )
     return parser.parse_args()
 
@@ -256,15 +281,9 @@ def _render_output_box(
     child_prefix: str,
     log: RichLog,
     max_lines: int,
-    scroll_offset: int,
-):
+) -> OutputBoxRenderMeta:
     max_lines = max(1, max_lines)
-    total_lines = len(output_lines)
-    max_scroll_offset = max(0, total_lines - max_lines)
-    effective_scroll_offset = min(max(0, scroll_offset), max_scroll_offset)
-    end = total_lines - effective_scroll_offset
-    start = max(0, end - max_lines)
-    visible_lines = output_lines[start:end]
+    visible_lines = output_lines[-max_lines:]
 
     max_content_width = max(
         (_text_visual_width(line) for line in visible_lines), default=0
@@ -275,8 +294,9 @@ def _render_output_box(
 
     border_style = "bold red" if test.state == TestState.FAILED else "dim"
     dashes = "─" * box_inner_width
+    top_plain = child_prefix + "└── ╭" + dashes + "╮"
 
-    top = Text(child_prefix + "└── ╭" + dashes + "╮", style=border_style)
+    top = Text(top_plain, style=border_style)
     log.write(top)
 
     for line in visible_lines:
@@ -292,6 +312,97 @@ def _render_output_box(
     bottom = Text(child_prefix + "    ╰" + dashes + "╯", style=border_style)
     log.write(bottom)
 
+    return OutputBoxRenderMeta(
+        rendered_lines=len(visible_lines) + 2,
+        left_col=len(child_prefix),
+        right_col=max(0, len(top_plain) - 1),
+    )
+
+
+class TestOutputScreen(Screen[None]):
+    CSS = """
+    #output-full {
+        height: 1fr;
+        border: none;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "close", "Back"),
+        ("q", "close", "Back"),
+    ]
+
+    def __init__(self, test: Test):
+        super().__init__()
+        self.test = test
+        self.log_widget: RichLog | None = None
+        self.last_signature: tuple | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield RichLog(
+            id="output-full",
+            wrap=False,
+            markup=False,
+            highlight=False,
+            auto_scroll=False,
+        )
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        self.log_widget = self.query_one("#output-full", RichLog)
+        self._render_output(force=True)
+        self.set_interval(0.1, self._tick)
+
+    async def action_close(self) -> None:
+        self.app.pop_screen()
+
+    def _signature(self) -> tuple:
+        return (
+            self.test.state,
+            self.test.time_state_changed,
+            self.test.stdout,
+            self.test.stderr,
+            self.test.compile_err,
+        )
+
+    def _tick(self) -> None:
+        self._render_output()
+
+    def _render_output(self, force: bool = False) -> None:
+        if self.log_widget is None:
+            return
+
+        signature = self._signature()
+        if not force and signature == self.last_signature:
+            return
+
+        log = self.log_widget
+        previous_scroll_y = log.scroll_y
+        near_bottom = (log.max_scroll_y - log.scroll_y) <= 1
+
+        log.clear()
+        title = Text("Output: ", style="bold")
+        title.append(self.test.name, style="bold")
+        title.append(f" [{self.test.state.value}]", style="bright_black")
+        log.write(title)
+        log.write(Text(self.test.source_path, style="dim"))
+        log.write(Text())
+
+        output_lines = _get_test_output(self.test)
+        if output_lines:
+            for line in output_lines:
+                log.write(line)
+        else:
+            log.write(Text("No output.", style="dim"))
+
+        if near_bottom:
+            log.scroll_end(animate=False, immediate=True)
+        else:
+            log.scroll_to(y=previous_scroll_y, animate=False, immediate=True)
+
+        self.last_signature = signature
+
 
 class TestRunnerApp(App[None]):
     CSS = """
@@ -303,22 +414,19 @@ class TestRunnerApp(App[None]):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
-        ("[", "output_scroll_up", "Output Up"),
-        ("]", "output_scroll_down", "Output Down"),
-        ("{", "output_page_up", "Output PgUp"),
-        ("}", "output_page_down", "Output PgDn"),
-        ("-", "decrease_output_lines", "Fewer Output Lines"),
-        ("=", "increase_output_lines", "More Output Lines"),
     ]
 
-    def __init__(self, watch: bool, output_max_lines: int):
+    def __init__(self, watch: bool, output_max_lines: int, theme_name: str):
         super().__init__()
         self.watch_mode = watch
         self.observer = None
         self.last_signature: tuple | None = None
         self.log_widget: RichLog | None = None
         self.output_max_lines = max(1, output_max_lines)
-        self.output_scroll_offset = 0
+        self.rendered_output_boxes: list[OutputBoxRegion] = []
+        self._tree_line_cursor = 0
+        if theme_name == "ansi":
+            self.theme = "textual-ansi"
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -353,35 +461,44 @@ class TestRunnerApp(App[None]):
     async def action_quit(self) -> None:
         self.exit()
 
-    def _refresh_after_output_view_change(self) -> None:
-        self.last_signature = None
-        self._render_tree()
+    def _find_output_box_at(self, x: int, y: int) -> OutputBoxRegion | None:
+        for box in self.rendered_output_boxes:
+            if (
+                box.start_line <= y <= box.end_line
+                and box.left_col <= x <= box.right_col
+            ):
+                return box
+        return None
 
-    async def action_output_scroll_up(self) -> None:
-        self.output_scroll_offset += 1
-        self._refresh_after_output_view_change()
+    def _get_mouse_box_key(self, event: events.MouseEvent) -> str | None:
+        if self.log_widget is None:
+            return None
+        offset = event.get_content_offset(self.log_widget)
+        if offset is None:
+            return None
 
-    async def action_output_scroll_down(self) -> None:
-        self.output_scroll_offset = max(0, self.output_scroll_offset - 1)
-        self._refresh_after_output_view_change()
+        virtual_x = int(offset.x + self.log_widget.scroll_x)
+        virtual_y = int(offset.y + self.log_widget.scroll_y)
+        box = self._find_output_box_at(virtual_x, virtual_y)
+        return box.test_key if box is not None else None
 
-    async def action_output_page_up(self) -> None:
-        self.output_scroll_offset += self.output_max_lines
-        self._refresh_after_output_view_change()
+    def _get_test_by_key(self, test_key: str) -> Test | None:
+        for test in state.all_tests:
+            if test.source_path == test_key:
+                return test
+        return None
 
-    async def action_output_page_down(self) -> None:
-        self.output_scroll_offset = max(
-            0, self.output_scroll_offset - self.output_max_lines
-        )
-        self._refresh_after_output_view_change()
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        box_key = self._get_mouse_box_key(event)
+        if box_key is None:
+            return
+        test = self._get_test_by_key(box_key)
+        if test is None:
+            return
 
-    async def action_decrease_output_lines(self) -> None:
-        self.output_max_lines = max(1, self.output_max_lines - 1)
-        self._refresh_after_output_view_change()
-
-    async def action_increase_output_lines(self) -> None:
-        self.output_max_lines += 1
-        self._refresh_after_output_view_change()
+        self.push_screen(TestOutputScreen(test))
+        event.prevent_default()
+        event.stop()
 
     def stop_observer(self) -> None:
         if self.observer is None:
@@ -407,14 +524,20 @@ class TestRunnerApp(App[None]):
         log = self.log_widget
         log.clear()
         now = time.monotonic()
+        self._tree_line_cursor = 0
+        self.rendered_output_boxes = []
 
         root = state.root_suite
-        log.write(_suite_label(root, now))
+        self._write_tree_line(log, _suite_label(root, now))
 
         children = list(root.tests) + list(root.children)
         for i, child in enumerate(children):
             is_last = i == len(children) - 1
             self._render_node(child, "", is_last, log, now)
+
+    def _write_tree_line(self, log: RichLog, line: Text) -> None:
+        log.write(line)
+        self._tree_line_cursor += 1
 
     def _render_node(
         self, node: Test | Suite, prefix: str, is_last: bool, log: RichLog, now: float
@@ -425,21 +548,32 @@ class TestRunnerApp(App[None]):
 
         if isinstance(node, Test):
             guide = Text(prefix + connector, style="dim")
-            log.write(guide + _test_label(node, now))
+            self._write_tree_line(log, guide + _test_label(node, now))
 
             output = _get_test_output(node)
             if output:
-                _render_output_box(
+                start_line = self._tree_line_cursor
+                render_meta = _render_output_box(
                     output,
                     node,
                     child_prefix,
                     log,
                     self.output_max_lines,
-                    self.output_scroll_offset,
+                )
+                self._tree_line_cursor += render_meta.rendered_lines
+
+                self.rendered_output_boxes.append(
+                    OutputBoxRegion(
+                        test_key=node.source_path,
+                        start_line=start_line,
+                        end_line=start_line + render_meta.rendered_lines - 1,
+                        left_col=render_meta.left_col,
+                        right_col=render_meta.right_col,
+                    )
                 )
         else:
             guide = Text(prefix + connector, style="dim")
-            log.write(guide + _suite_label(node, now))
+            self._write_tree_line(log, guide + _suite_label(node, now))
 
             children = list(node.tests) + list(node.children)
             for i, child in enumerate(children):
@@ -494,7 +628,7 @@ async def main():
     generate_makefile()
     state.available_runners = args.parallel
 
-    app = TestRunnerApp(args.watch, args.output_lines)
+    app = TestRunnerApp(args.watch, args.output_lines, args.theme)
     try:
         await app.run_async()
     finally:
