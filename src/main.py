@@ -118,12 +118,12 @@ class DebounceHandler(FileSystemEventHandler):
         self.on_modified(event)
 
 
-def build_suite_tree(suite: Suite) -> Tree:
-    tree = Tree(suite.name)
+def build_suite_tree(suite: Suite, now: float) -> Tree:
+    tree = Tree(_suite_label(suite, now))
     for test in suite.tests:
-        _add_test_node(tree, test)
+        _add_test_node(tree, test, now)
     for child in suite.children:
-        tree.add(build_suite_tree(child))
+        tree.add(build_suite_tree(child, now))
     return tree
 
 
@@ -136,18 +136,52 @@ def _get_test_spinner(test: Test) -> Spinner:
     return spinner
 
 
-def _add_test_node(tree, test: Test):
+def _test_elapsed_seconds(test: Test, now: float) -> float:
+    if test.time_start <= 0:
+        return 0.0
+
+    if test.state in (TestState.PASSED, TestState.FAILED):
+        end_time = test.time_state_changed or now
+    elif test.state in (TestState.RUNNING, TestState.CANCELLED):
+        end_time = now
+    else:
+        return 0.0
+
+    return max(0.0, end_time - test.time_start)
+
+
+def _suite_elapsed_seconds(suite: Suite, now: float) -> float:
+    total = sum(_test_elapsed_seconds(test, now) for test in suite.tests)
+    for child in suite.children:
+        total += _suite_elapsed_seconds(child, now)
+    return total
+
+
+def _with_elapsed_text(name: str, name_style: str, elapsed_seconds: float) -> Text:
+    elapsed_ms = int(elapsed_seconds * 1000)
+    text = Text(name, style=name_style)
+    text.append(f" [{elapsed_ms}ms]", style="bright_black")
+    return text
+
+
+def _suite_label(suite: Suite, now: float) -> Text:
+    return _with_elapsed_text(suite.name, "bold", _suite_elapsed_seconds(suite, now))
+
+
+def _add_test_node(tree, test: Test, now: float):
+    elapsed_seconds = _test_elapsed_seconds(test, now)
     if test.state in (TestState.PENDING, TestState.RUNNING, TestState.CANCELLED):
         label = _get_test_spinner(test)
+        label.text = _with_elapsed_text(test.name, "yellow", elapsed_seconds)
     elif test.state == TestState.PASSED:
         test_spinners.pop(os.path.abspath(test.source_path), None)
-        label = Text(test.name, style="green")
+        label = _with_elapsed_text(test.name, "green", elapsed_seconds)
     elif test.state == TestState.FAILED:
         test_spinners.pop(os.path.abspath(test.source_path), None)
-        label = Text(test.name, style="red")
+        label = _with_elapsed_text(test.name, "red", elapsed_seconds)
     else:
         test_spinners.pop(os.path.abspath(test.source_path), None)
-        label = Text(test.name)
+        label = _with_elapsed_text(test.name, "white", elapsed_seconds)
 
     node = tree.add(label)
     if test.state == TestState.FAILED:
@@ -156,11 +190,12 @@ def _add_test_node(tree, test: Test):
 
 
 def build_display() -> Tree:
-    root = Tree(state.root_suite.name)
+    now = time.monotonic()
+    root = Tree(_suite_label(state.root_suite, now))
     for test in state.root_suite.tests:
-        _add_test_node(root, test)
+        _add_test_node(root, test, now)
     for suite in state.root_suite.children:
-        root.add(build_suite_tree(suite))
+        root.add(build_suite_tree(suite, now))
     return root
 
 
@@ -197,6 +232,7 @@ async def main():
 async def run_test(test: Test, on_complete: Callable[[], None]):
     # print(f"Dispatching test: {test.name}")
     test.state = TestState.RUNNING
+    test.time_start = time.monotonic()
     test.time_state_changed = time.monotonic()
 
     os.makedirs("test_build", exist_ok=True)
@@ -290,6 +326,7 @@ def state_changed():
             state.available_runners += 1
             if completed_test.state == TestState.CANCELLED:
                 completed_test.state = TestState.PENDING
+                completed_test.time_start = 0.0
                 completed_test.time_state_changed = time.monotonic()
             state_changed()
 
