@@ -13,7 +13,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import Footer, Header, RichLog
+from textual.widgets import Footer, RichLog
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -400,7 +400,6 @@ class TestOutputScreen(Screen[None]):
         self.last_signature: tuple | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header()
         yield RichLog(
             id="output-full",
             wrap=False,
@@ -408,7 +407,7 @@ class TestOutputScreen(Screen[None]):
             highlight=False,
             auto_scroll=False,
         )
-        yield Footer()
+        yield Footer(show_command_palette=False)
 
     async def on_mount(self) -> None:
         self.log_widget = self.query_one("#output-full", RichLog)
@@ -466,6 +465,8 @@ class TestOutputScreen(Screen[None]):
 
 
 class TestRunnerApp(App[None]):
+    ENABLE_COMMAND_PALETTE = False
+
     CSS = """
     #tree-view {
         height: 1fr;
@@ -496,9 +497,8 @@ class TestRunnerApp(App[None]):
             self.theme = "textual-ansi"
 
     def compose(self) -> ComposeResult:
-        yield Header()
         yield RichLog(id="tree-view", wrap=False, markup=False, highlight=False)
-        yield Footer()
+        yield Footer(show_command_palette=False)
 
     async def on_mount(self) -> None:
         self.log_widget = self.query_one("#tree-view", RichLog)
