@@ -2,15 +2,14 @@ import argparse
 import asyncio
 import errno
 import os
+import shutil
 import threading
 import time
 from typing import Callable
 
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal
-from textual.widgets import Footer, Header, RichLog, Tree
-from textual.widgets.tree import TreeNode
+from textual.widgets import Footer, Header, RichLog
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -20,6 +19,7 @@ from models import Test, Suite, AppState, TestState
 state = AppState()
 dep_index: dict[str, list[Test]] = {}
 active_processes: dict[str, asyncio.subprocess.Process] = {}
+stdbuf_path = shutil.which("stdbuf")
 
 
 def parse_args():
@@ -89,7 +89,6 @@ async def handle_file_changes(changed_paths: set[str]):
             continue
         if abs_path in existing_sources:
             continue
-        # Keep source paths relative for consistency with initially discovered tests.
         source_path = os.path.relpath(abs_path)
         test = Test(
             name=os.path.splitext(os.path.basename(abs_path))[0],
@@ -159,56 +158,130 @@ def _suite_elapsed_seconds(suite: Suite, now: float) -> float:
     return total
 
 
-def _with_elapsed_text(name: str, name_style: str, elapsed_seconds: float) -> Text:
-    elapsed_ms = int(elapsed_seconds * 1000)
-    text = Text(name, style=name_style)
+def _suite_label(suite: Suite, now: float) -> Text:
+    elapsed_ms = int(_suite_elapsed_seconds(suite, now) * 1000)
+    text = Text(suite.name, style="bold")
     text.append(f" [{elapsed_ms}ms]", style="bright_black")
     return text
 
 
-def _with_tag_text(name: str, name_style: str, tag: str) -> Text:
-    text = Text(name, style=name_style)
-    text.append(f" [{tag}]", style="bright_black")
-    return text
-
-
-def _suite_label(suite: Suite, now: float) -> Text:
-    return _with_elapsed_text(suite.name, "bold", _suite_elapsed_seconds(suite, now))
-
-
 def _test_label(test: Test, now: float) -> Text:
     elapsed_seconds = _test_elapsed_seconds(test, now)
+    elapsed_ms = int(elapsed_seconds * 1000)
     spinner_frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
     spinner = spinner_frames[int(now * 12) % len(spinner_frames)]
 
     if test.state == TestState.PENDING:
-        return _with_tag_text(f"{spinner} {test.name}", "yellow", "pending")
+        text = Text(f"{spinner} {test.name}", style="yellow")
+        text.append(" [pending]", style="bright_black")
+        return text
     elif test.state == TestState.RUNNING and test.time_start <= 0:
-        return _with_tag_text(f"{spinner} {test.name}", "yellow", "compiling")
+        text = Text(f"{spinner} {test.name}", style="yellow")
+        text.append(" [compiling]", style="bright_black")
+        return text
     elif test.state in (TestState.RUNNING, TestState.CANCELLED):
-        return _with_elapsed_text(f"{spinner} {test.name}", "yellow", elapsed_seconds)
+        text = Text(f"{spinner} {test.name}", style="yellow")
+        text.append(f" [{elapsed_ms}ms]", style="bright_black")
+        return text
     elif test.state == TestState.PASSED:
-        return _with_elapsed_text(test.name, "green", elapsed_seconds)
+        text = Text(test.name, style="green")
+        text.append(f" [{elapsed_ms}ms]", style="bright_black")
+        return text
     elif test.state == TestState.FAILED:
-        return _with_elapsed_text(test.name, "red", elapsed_seconds)
+        text = Text(test.name, style="bold red")
+        text.append(f" [{elapsed_ms}ms]", style="bright_black")
+        return text
 
-    return _with_elapsed_text(test.name, "white", elapsed_seconds)
+    text = Text(test.name, style="white")
+    text.append(f" [{elapsed_ms}ms]", style="bright_black")
+    return text
+
+
+def _get_test_output(test: Test) -> list[Text] | None:
+    sections: list[Text] = []
+
+    def _to_text(raw: bytes, plain: str) -> Text | None:
+        if raw:
+            return Text.from_ansi(raw.decode(errors="replace"))
+        if plain.strip():
+            return Text(plain)
+        return None
+
+    if test.state == TestState.FAILED:
+        if test.compile_err_raw or test.compile_err.strip():
+            compile_text = _to_text(test.compile_err_raw, test.compile_err)
+            if compile_text and compile_text.plain.strip():
+                for line in compile_text.split(allow_blank=True):
+                    sections.append(line)
+            return _strip_trailing(sections)
+
+        stderr_text = _to_text(test.stderr_raw, test.stderr)
+        stdout_text = _to_text(test.stdout_raw, test.stdout)
+        if stderr_text and stderr_text.plain.strip():
+            for line in stderr_text.split(allow_blank=True):
+                sections.append(line)
+        if stdout_text and stdout_text.plain.strip():
+            if sections:
+                sections.append(Text())
+            for line in stdout_text.split(allow_blank=True):
+                sections.append(line)
+        return _strip_trailing(sections)
+
+    stdout_text = _to_text(test.stdout_raw, test.stdout)
+    if stdout_text and stdout_text.plain.strip():
+        for line in stdout_text.split(allow_blank=True):
+            sections.append(line)
+    return _strip_trailing(sections)
+
+
+def _strip_trailing(sections: list[Text]) -> list[Text] | None:
+    while sections and not sections[-1].plain.strip():
+        sections.pop()
+    return sections if sections else None
+
+
+def _text_visual_width(text: Text) -> int:
+    return max((len(line) for line in text.split(allow_blank=True)), default=0)
+
+
+def _render_output_box(
+    output_lines: list[Text],
+    test: Test,
+    child_prefix: str,
+    log: RichLog,
+):
+    max_content_width = max(
+        (_text_visual_width(line) for line in output_lines), default=0
+    )
+
+    # Content rows render one space of inner padding on both sides.
+    box_inner_width = max_content_width + 2
+
+    border_style = "bold red" if test.state == TestState.FAILED else "dim"
+    dashes = "─" * box_inner_width
+
+    top = Text(child_prefix + "└── ╭" + dashes + "╮", style=border_style)
+    log.write(top)
+
+    for line in output_lines:
+        padded = line.copy()
+        pad_count = max_content_width - _text_visual_width(line)
+        if pad_count > 0:
+            padded.append(" " * pad_count)
+        content_line = Text(child_prefix + "    │ ", style=border_style)
+        content_line.append(padded)
+        content_line.append(" │", style=border_style)
+        log.write(content_line)
+
+    bottom = Text(child_prefix + "    ╰" + dashes + "╯", style=border_style)
+    log.write(bottom)
 
 
 class TestRunnerApp(App[None]):
     CSS = """
-    #body {
+    #tree-view {
         height: 1fr;
-    }
-
-    #suite-tree {
-        width: 45%;
-        border: solid $primary;
-    }
-
-    #details {
-        width: 55%;
-        border: solid $primary;
+        border: none;
     }
     """
 
@@ -219,26 +292,16 @@ class TestRunnerApp(App[None]):
         self.watch_mode = watch
         self.observer = None
         self.last_signature: tuple | None = None
-        self.tree_widget = None
-        self.details_widget = None
-        self.test_nodes: dict[str, TreeNode] = {}
-        self.selected_test_key: str | None = None
+        self.log_widget: RichLog | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Horizontal(id="body"):
-            yield Tree("root", id="suite-tree")
-            yield RichLog(id="details", wrap=True, markup=False, highlight=False)
+        yield RichLog(id="tree-view", wrap=False, markup=False, highlight=False)
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.tree_widget = self.query_one("#suite-tree", Tree)
-        self.details_widget = self.query_one("#details", RichLog)
-
-        assert self.tree_widget is not None
-        self.tree_widget.show_root = True
-        self._rebuild_tree()
-        self._render_selected_details()
+        self.log_widget = self.query_one("#tree-view", RichLog)
+        self._render_tree()
 
         if self.watch_mode:
             loop = asyncio.get_running_loop()
@@ -271,124 +334,54 @@ class TestRunnerApp(App[None]):
         self.observer.join()
         self.observer = None
 
-    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
-        data = event.node.data
-        if isinstance(data, Test):
-            self.selected_test_key = os.path.abspath(data.source_path)
-        else:
-            self.selected_test_key = None
-        self._render_selected_details()
-
     def _tick(self) -> None:
         has_active = _has_active_tests()
         signature = _display_state_signature()
         if has_active or signature != self.last_signature:
-            self._rebuild_tree()
-            self._render_selected_details()
+            self._render_tree()
             self.last_signature = signature
 
         if not self.watch_mode and _all_tests_finished():
             self.exit()
 
-    def _rebuild_tree(self) -> None:
-        if self.tree_widget is None:
+    def _render_tree(self) -> None:
+        if self.log_widget is None:
             return
 
-        selected_key = self.selected_test_key
-        tree = self.tree_widget
-        tree.clear()
-        self.test_nodes.clear()
-
+        log = self.log_widget
+        log.clear()
         now = time.monotonic()
-        root = tree.root
-        root.set_label(_suite_label(state.root_suite, now))
-        root.data = state.root_suite
-        self._populate_suite_node(root, state.root_suite, now)
-        root.expand()
 
-        if selected_key is not None:
-            selected_node = self.test_nodes.get(selected_key)
-            if selected_node is not None:
-                tree.select_node(selected_node)
+        root = state.root_suite
+        log.write(_suite_label(root, now))
 
-    def _populate_suite_node(self, parent_node, suite: Suite, now: float) -> None:
-        for test in suite.tests:
-            node = parent_node.add(_test_label(test, now), data=test)
-            key = os.path.abspath(test.source_path)
-            self.test_nodes[key] = node
+        children = list(root.tests) + list(root.children)
+        for i, child in enumerate(children):
+            is_last = i == len(children) - 1
+            self._render_node(child, "", is_last, log, now)
 
-        for child in suite.children:
-            child_node = parent_node.add(_suite_label(child, now), data=child)
-            self._populate_suite_node(child_node, child, now)
+    def _render_node(
+        self, node: Test | Suite, prefix: str, is_last: bool, log: RichLog, now: float
+    ) -> None:
+        connector = "└── " if is_last else "├── "
+        continuation = "    " if is_last else "│   "
+        child_prefix = prefix + continuation
 
-    def _render_selected_details(self) -> None:
-        if self.details_widget is None:
-            return
+        if isinstance(node, Test):
+            guide = Text(prefix + connector, style="dim")
+            log.write(guide + _test_label(node, now))
 
-        details = self.details_widget
-        details.clear()
+            output = _get_test_output(node)
+            if output:
+                _render_output_box(output, node, child_prefix, log)
+        else:
+            guide = Text(prefix + connector, style="dim")
+            log.write(guide + _suite_label(node, now))
 
-        if self.selected_test_key is None:
-            passed = sum(1 for t in state.all_tests if t.state == TestState.PASSED)
-            failed = sum(1 for t in state.all_tests if t.state == TestState.FAILED)
-            running = sum(
-                1
-                for t in state.all_tests
-                if t.state in (TestState.RUNNING, TestState.CANCELLED)
-            )
-            pending = sum(1 for t in state.all_tests if t.state == TestState.PENDING)
-            details.write("Select a test from the tree to inspect details.")
-            details.write(
-                f"Summary: passed={passed} failed={failed} running={running} pending={pending}"
-            )
-            return
-
-        test = None
-        for item in state.all_tests:
-            if os.path.abspath(item.source_path) == self.selected_test_key:
-                test = item
-                break
-
-        if test is None:
-            self.selected_test_key = None
-            details.write("Selected test no longer exists.")
-            return
-
-        now = time.monotonic()
-        elapsed_ms = int(_test_elapsed_seconds(test, now) * 1000)
-        details.write(f"Test: {test.name}")
-        details.write(f"Source: {test.source_path}")
-        details.write(f"State: {test.state.value}  Elapsed: {elapsed_ms}ms")
-
-        compile_text = None
-        if test.compile_err_raw:
-            compile_text = Text.from_ansi(test.compile_err_raw.decode(errors="replace"))
-        elif test.compile_err.strip():
-            compile_text = Text(test.compile_err)
-
-        stderr_text = None
-        if test.stderr_raw:
-            stderr_text = Text.from_ansi(test.stderr_raw.decode(errors="replace"))
-        elif test.stderr.strip():
-            stderr_text = Text(test.stderr)
-
-        stdout_text = None
-        if test.stdout_raw:
-            stdout_text = Text.from_ansi(test.stdout_raw.decode(errors="replace"))
-        elif test.stdout.strip():
-            stdout_text = Text(test.stdout)
-
-        if compile_text is not None and compile_text.plain.strip():
-            details.write("\n--- compile stderr ---")
-            details.write(compile_text)
-
-        if stderr_text is not None and stderr_text.plain.strip():
-            details.write("\n--- runtime stderr ---")
-            details.write(stderr_text)
-
-        if stdout_text is not None and stdout_text.plain.strip():
-            details.write("\n--- stdout ---")
-            details.write(stdout_text)
+            children = list(node.tests) + list(node.children)
+            for i, child in enumerate(children):
+                is_child_last = i == len(children) - 1
+                self._render_node(child, child_prefix, is_child_last, log, now)
 
 
 def _all_tests_finished() -> bool:
@@ -492,11 +485,15 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             test.time_state_changed = time.monotonic()
             return
 
+        run_cmd = [f"./test_build/{test.name}"]
+        if stdbuf_path:
+            run_cmd = [stdbuf_path, "-oL", "-eL", *run_cmd]
+
         run_proc = None
         for _ in range(10):
             try:
                 run_proc = await asyncio.create_subprocess_exec(
-                    f"./test_build/{test.name}",
+                    *run_cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -515,7 +512,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
 
         if run_proc is None:
             run_proc = await asyncio.create_subprocess_exec(
-                f"./test_build/{test.name}",
+                *run_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -523,10 +520,16 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         test.time_start = time.monotonic()
         active_processes[process_key] = run_proc
 
+        test.stdout = ""
+        test.stdout_raw = b""
+        test.stderr = ""
+        test.stderr_raw = b""
+
         async def _read_stream(
             stream: asyncio.StreamReader | None,
             dest_str: list[str],
             dest_raw: list[bytes],
+            is_stdout: bool,
         ):
             if stream is None:
                 return
@@ -534,16 +537,25 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
                 line = await stream.readline()
                 if not line:
                     break
-                dest_str.append(line.decode(errors="replace"))
+                decoded_line = line.decode(errors="replace")
+                dest_str.append(decoded_line)
                 dest_raw.append(line)
+
+                # Keep output fields updated during execution so UI can render live logs.
+                if is_stdout:
+                    test.stdout += decoded_line
+                    test.stdout_raw += line
+                else:
+                    test.stderr += decoded_line
+                    test.stderr_raw += line
 
         stdout_parts: list[str] = []
         stdout_raw_parts: list[bytes] = []
         stderr_parts: list[str] = []
         stderr_raw_parts: list[bytes] = []
         await asyncio.gather(
-            _read_stream(run_proc.stdout, stdout_parts, stdout_raw_parts),
-            _read_stream(run_proc.stderr, stderr_parts, stderr_raw_parts),
+            _read_stream(run_proc.stdout, stdout_parts, stdout_raw_parts, True),
+            _read_stream(run_proc.stderr, stderr_parts, stderr_raw_parts, False),
             run_proc.wait(),
         )
         if active_processes.get(process_key) is run_proc:
@@ -587,9 +599,7 @@ def state_changed():
     while state.available_runners > 0 and len(pending_tests) > 0:
         test = pending_tests.pop()
         state.available_runners -= 1
-        # Mark as running before scheduling so this test cannot be enqueued twice.
         test.state = TestState.RUNNING
-        # Execution timer should only include binary runtime, not compilation.
         test.time_start = 0.0
         test.time_state_changed = time.monotonic()
         tests_to_run.append(test)
