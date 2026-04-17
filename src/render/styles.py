@@ -6,7 +6,7 @@ TEST_PASSED_STYLE = "bold bright_green"
 TEST_FAILED_STYLE = "bold bright_red"
 TEST_DEFAULT_STYLE = "bright_white"
 TREE_META_STYLE = "white"
-TREE_GUIDE_STYLE = "bright_black"
+TREE_GUIDE_STYLE = "white"
 OUTPUT_BOX_PASS_BORDER_STYLE = "white"
 
 

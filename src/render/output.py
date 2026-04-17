@@ -4,6 +4,7 @@ from models import Test, TestState
 from .styles import (
     TEST_FAILED_STYLE,
     OUTPUT_BOX_PASS_BORDER_STYLE,
+    TREE_GUIDE_STYLE,
     OutputBoxRenderMeta,
 )
 
@@ -114,9 +115,9 @@ def render_output_box(
         else OUTPUT_BOX_PASS_BORDER_STYLE
     )
     dashes = "─" * box_inner_width
-    top_plain = child_prefix + "└── ╭" + dashes + "╮"
 
-    top = Text(top_plain, style=border_style)
+    top = Text(child_prefix, style=TREE_GUIDE_STYLE)
+    top.append("└── ╭" + dashes + "╮", style=border_style)
     log.write(top)
 
     for line in visible_lines:
@@ -125,17 +126,21 @@ def render_output_box(
         if pad_count > 0:
             padded.append(" " * pad_count)
 
-        content_line = Text(child_prefix + "    ")
+        content_line = Text()
+        content_line.append(child_prefix, style=TREE_GUIDE_STYLE)
+        content_line.append("    ")
         content_line.append("│ ", style=border_style)
         content_line.append(padded)
         content_line.append(" │", style=border_style)
         log.write(content_line)
 
-    bottom = Text(child_prefix + "    ╰" + dashes + "╯", style=border_style)
+    bottom = Text(child_prefix, style=TREE_GUIDE_STYLE)
+    bottom.append("    ╰" + dashes + "╯", style=border_style)
     log.write(bottom)
 
+    top_length = len(child_prefix) + len("└── " + dashes + "╮")
     return OutputBoxRenderMeta(
         rendered_lines=len(visible_lines) + 2,
         left_col=len(child_prefix),
-        right_col=max(0, len(top_plain) - 1),
+        right_col=max(0, top_length - 1),
     )
