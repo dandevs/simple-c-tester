@@ -1,109 +1,168 @@
 # simple-c-tester
 
-C test runner with a Textual TUI. Scans `c/tests/` for `*.c` files, compiles each with gcc via a generated Makefile, runs the executable, and reports results.
+simple-c-tester is a C test runner with a Textual TUI.
 
-Suites and tests are displayed as a tree with Unicode box-drawing characters (`├──`, `└──`, `│`). Test output is shown inline in bordered boxes (`╭─╮`, `│`, `╰─╯`) beneath each test that has output. Click an output box to view the full output.
+It scans a tests directory for .c files, builds each test via a generated Makefile, runs the compiled binaries, and renders live results in a tree view.
+
+## What You Get
+
+- Recursive test discovery from a tests directory.
+- Parallel test execution.
+- Incremental C builds with dependency tracking via .d files.
+- Rich TUI output with Unicode tree guides and inline output boxes.
+- Click any inline output box to open a full output screen.
+- Optional file watching to re-run only affected tests.
 
 ## Requirements
 
-- Python >= 3.9
-- gcc (for compiling C tests)
+- Python 3.9+
+- gcc
 - make
 
 ## Quick Start
 
+From repository root:
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-python3 src/main.py
+
+cd c
+python3 ../src/main.py
 ```
 
-The test path is hardcoded as `c/tests`. Place your `*.c` test files there.
+Important: run the app from the c directory.
+The runner expects relative paths tests/ and test_build/ in the current working directory.
 
-## CLI Flags
+## CLI Options
 
-| Flag | Default | Description |
+```text
+python3 ../src/main.py [--parallel N] [--watch] [--output-lines N] [--theme ansi|default]
+```
+
+| Option | Default | Description |
 |---|---|---|
-| `--parallel N` | 4 | Number of concurrent test runners |
-| `--watch` | off | Watch for file changes, re-run affected tests |
-| `--output-lines N` | 25 | Max output lines per inline output box |
-| `--theme ansi\|default` | `ansi` | UI theme. `ansi` blends with terminal colors, `default` uses Textual's dark theme |
+| --parallel N | 4 | Number of concurrent test workers. |
+| --watch | off | Watch for file changes and re-run affected tests. |
+| --output-lines N | 10 | Max visible lines in each inline output box. |
+| --theme ansi\|default | ansi | ansi uses terminal-native ANSI styling; default uses Textual default theme. |
 
-## Building a Portable PEX
+## TUI Interaction
 
-The project can be packaged into a single `.pex` file using [PEX](https://docs.pex-tool.org/). The resulting file bundles the application and all Python dependencies (rich, textual, watchdog) with native extensions for Linux, macOS, and Windows.
+- Ctrl+C closes the app.
+- Mouse click on an inline output box opens full output for that test.
+- In the full output screen:
+  - Escape returns to the tree.
+  - Ctrl+C also returns to the tree.
 
-### Prerequisites
+## Test Layout
+
+The app scans tests/ recursively for .c files. Directory structure becomes suite structure in the UI.
+
+Example:
+
+```text
+c/
+  tests/
+    test_addition.c
+    a/
+      test_array_access.c
+      b/
+        test_factorial.c
+```
+
+## How It Works
+
+1. Discover test files and build suite tree.
+2. Resolve include directories per test using iterative gcc -E checks.
+3. Generate test_build/Makefile.
+4. Optionally prebuild test_build/libproject.a from discovered project .c files.
+5. Run make -f test_build/Makefile test_build/<test_name> per test.
+6. Execute the produced binary and capture stdout/stderr.
+7. Parse .d files and update dependency index for watch mode.
+
+Pass/fail rules:
+
+- Compile step non-zero exit status: test fails with compile error output.
+- Compile success + test binary exit code 0: pass.
+- Compile success + test binary non-zero exit: fail.
+
+## Watch Mode
+
+With --watch, the runner monitors:
+
+- tests directory
+- discovered include directories
+- dependency file directories tracked by prior runs
+
+On change, affected tests are re-queued. If a test is currently running, it is cancelled and restarted.
+
+## Project Structure
+
+```text
+src/
+  main.py              Entry point and CLI parsing
+  app.py               Textual app and event handling
+  state.py             Shared mutable runtime state
+  models/              Test, Suite, AppState, TestState
+  render/              Tree rendering, labels, output formatting, screens
+  runner/              Makefile generation, execution, state transitions
+  watch/               File watcher debounce and change handling
+
+c/
+  tests/               C test files (recursive)
+  test_build/          Generated Makefile, binaries, .d files
+```
+
+## Packaging As A PEX
+
+Build a portable executable archive:
 
 ```bash
 pip install pex
+./build.sh
 ```
 
-### Build
+Output:
+
+```text
+out/ctester.pex
+```
+
+The build script targets multiple platforms (Linux/macOS/Windows) for CPython 3.9.
+
+Run it from c (same working-directory requirement):
 
 ```bash
-./build_pex.sh
+cd c
+../out/ctester.pex
 ```
 
-Output: `out/simple-c-tester.pex`
+## Common Issues
 
-### Included Platforms
+### Error: test directory not found: tests
 
-The PEX bundles watchdog native extensions for:
+Cause: running from repository root instead of c.
 
-| Platform | Flag |
-|---|---|
-| Linux x86_64 | `manylinux2014_x86_64` |
-| Linux ARM64 | `manylinux2014_aarch64` |
-| macOS Intel | `macosx_10_9_x86_64` |
-| macOS Apple Silicon | `macosx_11_0_arm64` |
-| Windows x86_64 | `win_amd64` |
-
-All targeting Python 3.9. To change the target Python version, edit the `--platform` flags in `build_pex.sh` (e.g. `cp-312-cp312` for Python 3.12).
-
-### Running the PEX
+Fix:
 
 ```bash
-./out/simple-c-tester.pex
+cd c
+python3 ../src/main.py
 ```
 
-Python 3.9 must be installed on the target machine. gcc and make are still required for compiling C tests. The PEX must be run from a directory containing the `c/tests/` folder.
+### gcc or make not found
 
-## Development
+Install system build tools and verify both commands are available in PATH.
 
-### Installation
+### Import errors with python -m src.main
 
-```bash
-pip install -r requirements.txt
-```
+Do not use module mode here.
+Use python3 ../src/main.py (from c) or python3 src/main.py only if your working directory already has tests/ and test_build/.
 
-### Run
+## Development Notes
 
-```bash
-python3 src/main.py
-```
-
-Run from the repo root. Do **not** use `python3 -m src.main` — imports use bare module names (`from models import ...`) which rely on the `sys.path` setup in `main.py`.
-
-### Project Structure
-
-```
-src/
-  main.py          entry point, CLI argument parsing
-  app.py           TestRunnerApp (Textual TUI)
-  state.py         shared mutable state
-  models/          Test, Suite, AppState dataclasses, TestState enum
-  render/          UI rendering (tree, labels, output boxes, styles)
-  runner/          test execution, Makefile generation, build state
-  watch/           file system watching (watchdog)
-c/
-  tests/           C test source files
-test_build/        compiled executables and generated Makefile (gitignored)
-```
-
-### Packaging Config
-
-`pyproject.toml` configures the package for PEX builds:
-
-- `setuptools.packages.find` with `where = ["src"]` discovers packages (`models`, `render`, `runner`, `watch`)
-- `py-modules` lists top-level modules (`main`, `app`, `state`)
-- `project.scripts` defines the `simple-c-tester` console script entry point
+- Python dependencies are in requirements.txt.
+- Packaging metadata is in pyproject.toml.
+- Console script entry point is simple-c-tester = main:entry.
