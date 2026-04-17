@@ -8,7 +8,7 @@ from watchdog.events import FileSystemEventHandler
 
 from state import state, dep_index, active_processes
 from models import Test, TestState
-from runner.makefile import generate_makefile
+from runner.makefile import generate_makefile, build_project_sources
 from runner.execute import state_changed
 
 
@@ -23,6 +23,7 @@ async def handle_file_changes(changed_paths: set[str]):
                 affected[test.source_path] = test
 
     for test in affected.values():
+        test.include_dirs = []
         if test.state == TestState.RUNNING:
             test.state = TestState.CANCELLED
             test.time_state_changed = time.monotonic()
@@ -55,6 +56,7 @@ async def handle_file_changes(changed_paths: set[str]):
         state.all_tests.append(test)
 
     generate_makefile()
+    build_project_sources()
     state_changed()
 
 

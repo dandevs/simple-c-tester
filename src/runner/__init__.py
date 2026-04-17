@@ -1,5 +1,5 @@
 from .execute import run_test, state_changed, _terminate_active_processes
-from .makefile import generate_makefile, rebuild_dep_index
+from .makefile import generate_makefile, rebuild_dep_index, build_project_sources
 from .state import all_tests_finished, has_active_tests, display_state_signature
 
 __all__ = [
@@ -8,6 +8,7 @@ __all__ = [
     "_terminate_active_processes",
     "generate_makefile",
     "rebuild_dep_index",
+    "build_project_sources",
     "all_tests_finished",
     "has_active_tests",
     "display_state_signature",

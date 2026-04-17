@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from models import Test, Suite, AppState
 from state import state, active_processes
 from render import TestOutputScreen, render_tree_stdout
-from runner import state_changed, generate_makefile, _terminate_active_processes
+from runner import state_changed, generate_makefile, build_project_sources, _terminate_active_processes
 from app import TestRunnerApp
 
 
@@ -43,6 +43,7 @@ async def _main():
         sys.exit(1)
     state.populate_suites(str(tests_dir))
     generate_makefile()
+    build_project_sources()
     state.available_runners = args.parallel
 
     app = TestRunnerApp(args.watch, args.output_lines, args.theme)
