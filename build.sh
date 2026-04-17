@@ -16,6 +16,7 @@ pex \
     --platform macosx_10_9_x86_64-cp-312-cp312 \
     --platform macosx_11_0_arm64-cp-312-cp312 \
     --platform win_amd64-cp-312-cp312 \
+    --python-shebang '#!/usr/bin/env python3' \
     -r requirements.txt \
     -o "$OUTPUT"
 

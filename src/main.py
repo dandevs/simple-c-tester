@@ -3,6 +3,7 @@ import asyncio
 import shutil
 import sys
 import os
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -36,7 +37,11 @@ def parse_args():
 
 async def _main():
     args = parse_args()
-    state.populate_suites("c/tests")
+    tests_dir = Path("tests")
+    if not tests_dir.is_dir():
+        print(f"Error: test directory not found: {tests_dir}", file=sys.stderr)
+        sys.exit(1)
+    state.populate_suites(str(tests_dir))
     generate_makefile()
     state.available_runners = args.parallel
 
