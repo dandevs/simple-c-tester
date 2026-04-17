@@ -49,6 +49,9 @@ class TestOutputScreen(Screen[None]):
         self._render_output(force=True)
         self.set_interval(0.1, self._tick)
 
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        event.stop()
+
     async def action_close(self) -> None:
         self.app.pop_screen()
 

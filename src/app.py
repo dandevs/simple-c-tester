@@ -120,6 +120,8 @@ class TestRunnerApp(App[None]):
         return None
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
+        if len(self.screen_stack) > 1:
+            return
         box_key = self._get_mouse_box_key(event)
         if box_key is None:
             return
