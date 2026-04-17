@@ -11,6 +11,7 @@ class Test:
     state: TestState = TestState.PENDING
     qeueued: bool = False
     dependencies: list[str] = field(default_factory=list)
+    include_dirs: list[str] = field(default_factory=list)
     source_path: str = ""
     stdout: str = ""
     stdout_raw: bytes = b""

@@ -22,7 +22,7 @@ There is **no** positional source-dir argument; the test path is hardcoded as `c
 ## Architecture
 - `src/main.py` — entry point: `parse_args()`, `main()`, sys.path setup
 - `src/state.py` — shared mutable state: `state` (AppState), `dep_index`, `active_processes`, `subprocess_columns`
-- `src/app.py` — `TestRunnerApp` Textual TUI class (tree rendering delegates to `render/`, test dispatch delegates to `runner/`, file watching delegates to `watch/`)
+- `src/app.py` — `TestRunnerApp` Textual TUI class (tree rendering delegates to `render/`, test dispatch delegates to `runner/`, file watching delegates to `watch/`; watches `tests/`, resolved include dirs, and dependency dirs in watch mode)
 - `src/models/` — `Test`, `Suite`, `AppState` dataclasses and `TestState` enum
 - `src/render/` — all UI rendering logic
   - `styles.py` — style constant strings, `OutputBoxRenderMeta`, `OutputBoxRegion` dataclasses
@@ -32,7 +32,8 @@ There is **no** positional source-dir argument; the test path is hardcoded as `c
   - `tree.py` — `render_tree()`, `render_node()` standalone functions that walk the suite tree and write to RichLog
   - `screens.py` — `TestOutputScreen` for full test output view
 - `src/runner/` — test execution and build logic
-  - `makefile.py` — `generate_makefile()`, `rebuild_dep_index()`
+  - `makefile.py` — `generate_makefile()`, `rebuild_dep_index()`, `resolve_include_dirs()`,
+    `discover_project_sources()`, `build_project_sources()`
   - `execute.py` — `run_test()`, `state_changed()`, `_terminate_active_processes()`
   - `state.py` — `all_tests_finished()`, `has_active_tests()`, `display_state_signature()`
 - `src/watch/` — file system watching
@@ -43,7 +44,7 @@ There is **no** positional source-dir argument; the test path is hardcoded as `c
 - Single full-screen `RichLog` widget rendering the test tree with Unicode box-drawing characters
 - Suite and test nodes displayed with `├──`/`└──`/`│` tree guides
 - Inline output boxes (`╭─╮`, `│`, `╰─╯`) beneath tests that have compile errors, stderr, or stdout
-- Box borders colored red for failures, dim for passes; tree guides styled dim
+- Box borders colored red for failures, white for passes; tree guides styled white
 - Test names colored green (passed), bold red (failed), yellow with spinner (pending/running)
 - Elapsed time `[Xms]` shown after each node in `bright_black`
 - Header: app title and status
@@ -60,6 +61,32 @@ There is **no** positional source-dir argument; the test path is hardcoded as `c
 - `run_test()` calls `make -f test_build/Makefile test_build/<name>` — **not** direct `gcc`. Make handles incremental builds: if the binary is newer than its source and all `.d`-tracked header dependencies, compilation is skipped.
 - `.d` files are parsed **after** make returns — dependencies populate regardless of pass/fail and feed the `dep_index` used by watch mode.
 - Exit code 0 from make + exit code 0 from binary = PASSED. Non-zero from either = FAILED.
+
+## Include Path Resolution
+
+- `resolve_include_dirs()` auto-discovers `-I` flags per test using iterative `gcc -E`:
+  1. Run `gcc -E <test.c>` with current `-I` flags
+  2. If exit 0 → preprocessing succeeded, done
+  3. If stderr contains `fatal error: <header.h>: No such file or directory`:
+     - Search project tree for `<header.h>` (excluding `test_build/`)
+     - Add containing directory as `-I<dir>`
+     - Retry from step 1
+  4. Max 20 iterations; returns discovered include dirs
+- Results cached on `Test.include_dirs`; cleared in watch mode when sources change
+
+## Project Source Linking
+
+- `discover_project_sources()` scans resolved include dirs for `.c` files:
+  - Excludes `main.c` (program entry point convention)
+  - Excludes files in `tests/` or `test_build/`
+  - Returns sorted unique list of implementation sources
+- `generate_makefile()` generates:
+  - Object rules: `test_build/obj/<name>.o` from each project source (flattened path names with `__` separator)
+  - Library rule: `test_build/libproject.a` archives all objects (`ar rcs`)
+  - Test rules: each test links against `libproject.a`
+- `build_project_sources()` pre-builds library synchronously before test dispatch
+  - Avoids race condition when parallel tests try to build library simultaneously
+- Watch mode rebuilds library when project sources change
 
 ## Concurrency Notes
 - `state_changed()` is a **sync** function (not async) — it uses `asyncio.ensure_future()` to schedule `run_test()` and recurses to drain the pending queue

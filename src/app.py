@@ -60,6 +60,8 @@ class TestRunnerApp(App[None]):
         if self.watch_mode:
             from watchdog.observers import Observer
 
+            from runner import build_project_sources as _bps
+
             loop = asyncio.get_running_loop()
             handler = DebounceHandler(loop)
             observer = Observer()
@@ -71,6 +73,10 @@ class TestRunnerApp(App[None]):
                     dep_dir = os.path.dirname(dep)
                     if dep_dir not in watched_dirs:
                         watched_dirs.add(dep_dir)
+                for inc_dir in test.include_dirs:
+                    abs_inc = os.path.abspath(inc_dir)
+                    if abs_inc not in watched_dirs:
+                        watched_dirs.add(abs_inc)
             for d in watched_dirs:
                 observer.schedule(handler, d, recursive=True)
             observer.daemon = True
@@ -114,6 +120,8 @@ class TestRunnerApp(App[None]):
         return None
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
+        if len(self.screen_stack) > 1:
+            return
         box_key = self._get_mouse_box_key(event)
         if box_key is None:
             return
