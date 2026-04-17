@@ -58,7 +58,7 @@ The PEX bundles watchdog native extensions for:
 | macOS Apple Silicon | `macosx_11_0_arm64` |
 | Windows x86_64 | `win_amd64` |
 
-All targeting CPython 3.12. To change the target Python version, edit the `--platform` flags in `build_pex.sh` (e.g. `cp-311-cp311` for Python 3.11).
+All targeting Python 3.9. To change the target Python version, edit the `--platform` flags in `build_pex.sh` (e.g. `cp-312-cp312` for Python 3.12).
 
 ### Running the PEX
 
@@ -66,7 +66,7 @@ All targeting CPython 3.12. To change the target Python version, edit the `--pla
 ./out/simple-c-tester.pex
 ```
 
-Python 3.12 must be installed on the target machine. gcc and make are still required for compiling C tests. The PEX must be run from a directory containing the `c/tests/` folder.
+Python 3.9 must be installed on the target machine. gcc and make are still required for compiling C tests. The PEX must be run from a directory containing the `c/tests/` folder.
 
 ## Development
 
