@@ -3,7 +3,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import RichLog
+from textual.widgets import RichLog, Static
 
 from models import Test
 from .output import get_test_output
@@ -22,11 +22,18 @@ class TestOutputScreen(Screen[None]):
         scrollbar-background-hover: transparent;
         scrollbar-background-active: transparent;
     }
+    #controls-footer {
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        background: transparent;
+        color: ansi_bright_black;
+    }
     """
 
     BINDINGS = [
         Binding("escape", "close", "Back"),
-        Binding("ctrl+c", "close", "Back", priority=True),
+        Binding("ctrl+c", "close", "Go Back", priority=True),
     ]
 
     def __init__(self, test: Test):
@@ -43,6 +50,8 @@ class TestOutputScreen(Screen[None]):
             highlight=False,
             auto_scroll=False,
         )
+        if self.app.watch_mode:
+            yield Static("Output page  |  Ctrl+C: Go Back", id="controls-footer")
 
     async def on_mount(self) -> None:
         self.log_widget = self.query_one("#output-full", RichLog)

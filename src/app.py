@@ -5,7 +5,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import RichLog
+from textual.widgets import RichLog, Static
 
 from state import state
 from models import Test
@@ -33,10 +33,17 @@ class TestRunnerApp(App[None]):
         scrollbar-background-hover: transparent;
         scrollbar-background-active: transparent;
     }
+    #controls-footer {
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        background: transparent;
+        color: ansi_bright_black;
+    }
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", priority=True),
+        Binding("ctrl+c", "quit", "Exit", priority=True),
     ]
 
     def __init__(self, watch: bool, output_max_lines: int, theme_name: str):
@@ -52,6 +59,8 @@ class TestRunnerApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="tree-view", wrap=False, markup=False, highlight=False)
+        if self.watch_mode:
+            yield Static("Main page  |  Ctrl+C: Exit", id="controls-footer")
 
     async def on_mount(self) -> None:
         self.log_widget = self.query_one("#tree-view", RichLog)

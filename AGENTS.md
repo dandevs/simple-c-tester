@@ -12,6 +12,11 @@ pip install -r requirements.txt
 - **Run**: `python3 src/main.py` from repo root
 - **NOT** `python3 -m src.main` — imports use `from models import ...` which only works when running the file directly (Python adds `src/` to `sys.path`)
 
+## Build
+- **Build**: `./build.sh` — creates a self-contained `out/ctester.pex` executable using pex
+- The `.pex` file is built for multiple platforms (Linux x86_64/aarch64, macOS x86_64/arm64, Windows x64) targeting Python 3.9
+- After building, copy to `c/ctester.pex` for distribution
+
 ## CLI Flags
 - `--parallel N` — number of concurrent test runners (default 4)
 - `--watch` — watch for file changes, re-run affected tests
