@@ -20,8 +20,22 @@ pip install -r requirements.txt
 There is **no** positional source-dir argument; the test path is hardcoded as `c/tests`.
 
 ## Architecture
-- `src/main.py` — entry point, async test dispatch, Textual TUI app with single RichLog tree view and inline output boxes, watchdog integration
+- `src/main.py` — entry point: `parse_args()`, `main()`, sys.path setup
+- `src/state.py` — shared mutable state: `state` (AppState), `dep_index`, `active_processes`, `subprocess_columns`
+- `src/app.py` — `TestRunnerApp` Textual TUI class (tree rendering delegates to `render/`, test dispatch delegates to `runner/`, file watching delegates to `watch/`)
 - `src/models/` — `Test`, `Suite`, `AppState` dataclasses and `TestState` enum
+- `src/render/` — all UI rendering logic
+  - `styles.py` — style constant strings, `OutputBoxRenderMeta`, `OutputBoxRegion` dataclasses
+  - `labels.py` — elapsed time helpers, `suite_label()`, `test_label()` with spinner
+  - `output.py` — `get_test_output()`, `render_output_box()`, text wrapping/stripping helpers
+  - `tree.py` — `render_tree()`, `render_node()` standalone functions that walk the suite tree and write to RichLog
+  - `screens.py` — `TestOutputScreen` for full test output view
+- `src/runner/` — test execution and build logic
+  - `makefile.py` — `generate_makefile()`, `rebuild_dep_index()`
+  - `execute.py` — `run_test()`, `state_changed()`, `_terminate_active_processes()`
+  - `state.py` — `all_tests_finished()`, `has_active_tests()`, `display_state_signature()`
+- `src/watch/` — file system watching
+  - `handler.py` — `DebounceHandler` (watchdog), `handle_file_changes()`
 - `test_build/` — compiled executables, `.d` dependency files, and a generated `Makefile` (build artifact, gitignored)
 
 ## Textual UI
@@ -35,10 +49,10 @@ There is **no** positional source-dir argument; the test path is hardcoded as `c
 - Footer: keyboard bindings (q to quit)
 - Spinner animation for pending/running tests using Unicode braille characters
 - Elapsed timing updates on all nodes
-- `_render_tree()` clears and redraws the full tree on each tick (100ms) when state changes
-- `_render_node()` recursively walks suites/tests, computing tree prefix continuations
-- `_render_output_box()` draws the bordered output box with proper tree continuation lines
-- `_get_test_output()` collects compile_err, stderr, stdout as Rich Text lines (preserves ANSI colors)
+- `render_tree()` clears and redraws the full tree on each tick (100ms) when state changes
+- `render_node()` recursively walks suites/tests, computing tree prefix continuations
+- `render_output_box()` draws the bordered output box with proper tree continuation lines
+- `get_test_output()` collects compile_err, stderr, stdout as Rich Text lines (preserves ANSI colors)
 
 ## Compilation Flow
 - `generate_makefile()` writes `test_build/Makefile` with one rule per test. Called after `populate_suites()` and when new tests are discovered in watch mode.
