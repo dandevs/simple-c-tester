@@ -64,7 +64,7 @@ class TestRunnerApp(App[None]):
             handler = DebounceHandler(loop)
             observer = Observer()
             watched_dirs = set()
-            tests_dir = os.path.abspath("c/tests")
+            tests_dir = os.path.abspath("tests")
             watched_dirs.add(tests_dir)
             for test in state.all_tests:
                 for dep in test.dependencies:

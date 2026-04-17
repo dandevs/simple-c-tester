@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument(
         "--output-lines",
         type=int,
-        default=25,
+        default=10,
         help="Maximum number of output lines to show per info box",
     )
     parser.add_argument(

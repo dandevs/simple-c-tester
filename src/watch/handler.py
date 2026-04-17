@@ -37,7 +37,7 @@ async def handle_file_changes(changed_paths: set[str]):
             test.time_state_changed = time.monotonic()
 
     existing_sources = {os.path.abspath(t.source_path) for t in state.all_tests}
-    tests_dir = os.path.abspath("c/tests")
+    tests_dir = os.path.abspath("tests")
     for path in changed_paths:
         abs_path = os.path.abspath(path)
         if not abs_path.startswith(tests_dir):
