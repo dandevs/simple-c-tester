@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import shutil
 import sys
 import os
 
@@ -7,7 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from models import Test, Suite, AppState
 from state import state, active_processes
-from render import TestOutputScreen
+from render import TestOutputScreen, render_tree_stdout
 from runner import state_changed, generate_makefile, _terminate_active_processes
 from app import TestRunnerApp
 
@@ -45,6 +46,8 @@ async def _main():
     finally:
         app.stop_observer()
         await _terminate_active_processes()
+        if not args.watch:
+            render_tree_stdout(args.output_lines, shutil.get_terminal_size().columns)
 
 
 def entry():

@@ -1,5 +1,6 @@
 import time
 
+from rich.console import Console
 from rich.text import Text
 from textual.widgets import RichLog
 
@@ -8,6 +9,26 @@ from models import Test, Suite
 from .styles import TREE_GUIDE_STYLE, OutputBoxRegion
 from .labels import suite_label, test_label
 from .output import get_test_output, render_output_box
+
+
+class _ConsoleApp:
+    def __init__(self, console: Console):
+        self.console = console
+
+
+class ConsoleWriter:
+    def __init__(self, console: Console):
+        self.console = console
+        self.app = _ConsoleApp(console)
+
+    def write(self, text):
+        self.console.print(text)
+
+
+def render_tree_stdout(output_max_lines: int, width: int):
+    console = Console()
+    writer = ConsoleWriter(console)
+    render_tree(writer, output_max_lines, width)
 
 
 def render_tree(

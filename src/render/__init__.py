@@ -12,7 +12,7 @@ from .output import (
     get_test_output,
     render_output_box,
 )
-from .tree import render_tree, render_node
+from .tree import render_tree, render_node, render_tree_stdout
 from .screens import TestOutputScreen
 
 __all__ = [
@@ -26,5 +26,6 @@ __all__ = [
     "render_output_box",
     "render_tree",
     "render_node",
+    "render_tree_stdout",
     "TestOutputScreen",
 ]
