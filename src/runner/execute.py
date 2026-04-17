@@ -7,7 +7,7 @@ from typing import Callable
 
 from state import state, active_processes, subprocess_columns
 from models import Test, TestState
-from runner.makefile import rebuild_dep_index
+from .makefile import rebuild_dep_index
 
 
 async def _terminate_active_processes() -> None:

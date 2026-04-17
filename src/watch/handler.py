@@ -5,7 +5,6 @@ import time
 
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
 
 from state import state, dep_index, active_processes
 from models import Test, TestState

@@ -1,19 +1,19 @@
-from render.styles import (
+from .styles import (
     OutputBoxRenderMeta,
     OutputBoxRegion,
 )
-from render.labels import (
+from .labels import (
     test_elapsed_seconds,
     suite_elapsed_seconds,
     suite_label,
     test_label,
 )
-from render.output import (
+from .output import (
     get_test_output,
     render_output_box,
 )
-from render.tree import render_tree, render_node
-from render.screens import TestOutputScreen
+from .tree import render_tree, render_node
+from .screens import TestOutputScreen
 
 __all__ = [
     "OutputBoxRenderMeta",

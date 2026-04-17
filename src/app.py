@@ -5,8 +5,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import Footer, RichLog
-from watchdog.observers import Observer
+from textual.widgets import RichLog
 
 from state import state
 from models import Test
@@ -53,13 +52,14 @@ class TestRunnerApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="tree-view", wrap=False, markup=False, highlight=False)
-        yield Footer(show_command_palette=False)
 
     async def on_mount(self) -> None:
         self.log_widget = self.query_one("#tree-view", RichLog)
         self._render_tree()
 
         if self.watch_mode:
+            from watchdog.observers import Observer
+
             loop = asyncio.get_running_loop()
             handler = DebounceHandler(loop)
             observer = Observer()

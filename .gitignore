@@ -42,5 +42,8 @@ ENV/
 test_build
 htmlcov/
 
+# Build output
+out/
+
 # mypy
 .mypy_cache/

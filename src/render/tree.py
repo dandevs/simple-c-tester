@@ -5,9 +5,9 @@ from textual.widgets import RichLog
 
 from state import state
 from models import Test, Suite
-from render.styles import TREE_GUIDE_STYLE, OutputBoxRegion
-from render.labels import suite_label, test_label
-from render.output import get_test_output, render_output_box
+from .styles import TREE_GUIDE_STYLE, OutputBoxRegion
+from .labels import suite_label, test_label
+from .output import get_test_output, render_output_box
 
 
 def render_tree(

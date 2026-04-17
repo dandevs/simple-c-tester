@@ -1,7 +1,7 @@
 from rich.text import Text
 
 from models import Test, TestState
-from render.styles import (
+from .styles import (
     TEST_FAILED_STYLE,
     OUTPUT_BOX_PASS_BORDER_STYLE,
     OutputBoxRenderMeta,

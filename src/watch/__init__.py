@@ -1,4 +1,4 @@
-from watch.handler import DebounceHandler, handle_file_changes
+from .handler import DebounceHandler, handle_file_changes
 
 __all__ = [
     "DebounceHandler",

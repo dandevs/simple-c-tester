@@ -33,7 +33,7 @@ def parse_args():
     return parser.parse_args()
 
 
-async def main():
+async def _main():
     args = parse_args()
     state.populate_suites("c/tests")
     generate_makefile()
@@ -47,8 +47,12 @@ async def main():
         await _terminate_active_processes()
 
 
-if __name__ == "__main__":
+def entry():
     try:
-        asyncio.run(main())
+        asyncio.run(_main())
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == "__main__":
+    entry()

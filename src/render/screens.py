@@ -3,11 +3,11 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import Footer, RichLog
+from textual.widgets import RichLog
 
 from models import Test
-from render.output import get_test_output
-from render.styles import TREE_META_STYLE
+from .output import get_test_output
+from .styles import TREE_META_STYLE
 
 
 class TestOutputScreen(Screen[None]):
@@ -43,7 +43,6 @@ class TestOutputScreen(Screen[None]):
             highlight=False,
             auto_scroll=False,
         )
-        yield Footer(show_command_palette=False)
 
     async def on_mount(self) -> None:
         self.log_widget = self.query_one("#output-full", RichLog)

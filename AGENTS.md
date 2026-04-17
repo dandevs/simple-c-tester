@@ -26,6 +26,7 @@ There is **no** positional source-dir argument; the test path is hardcoded as `c
 - `src/models/` — `Test`, `Suite`, `AppState` dataclasses and `TestState` enum
 - `src/render/` — all UI rendering logic
   - `styles.py` — style constant strings, `OutputBoxRenderMeta`, `OutputBoxRegion` dataclasses
+  ka
   - `labels.py` — elapsed time helpers, `suite_label()`, `test_label()` with spinner
   - `output.py` — `get_test_output()`, `render_output_box()`, text wrapping/stripping helpers
   - `tree.py` — `render_tree()`, `render_node()` standalone functions that walk the suite tree and write to RichLog
