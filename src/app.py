@@ -12,6 +12,7 @@ from state import state
 from models import Test
 from render import TestOutputScreen, render_tree, OutputBoxRegion
 from runner import (
+    generate_makefile,
     state_changed,
     all_tests_finished,
     has_active_tests,
@@ -62,6 +63,8 @@ class TestRunnerApp(App[None]):
         self.log_widget: RichLog | None = None
         self.output_max_lines = max(1, output_max_lines)
         self.rendered_output_boxes: list[OutputBoxRegion] = []
+        self._pending_makefile_regen = False
+        self._last_makefile_columns = 0
         if theme_name == "ansi":
             self.theme = "textual-ansi"
 
@@ -73,6 +76,7 @@ class TestRunnerApp(App[None]):
 
     async def on_mount(self) -> None:
         self.log_widget = self.query_one("#tree-view", RichLog)
+        self._set_subprocess_columns_from_ui()
         self._render_tree()
 
         if self.watch_mode:
@@ -107,6 +111,10 @@ class TestRunnerApp(App[None]):
 
         state_changed()
         self.set_interval(0.1, self._tick)
+
+    def on_resize(self, event: events.Resize) -> None:
+        _ = event
+        self._set_subprocess_columns_from_ui()
 
     async def action_quit(self) -> None:
         if len(self.screen_stack) > 1:
@@ -163,6 +171,10 @@ class TestRunnerApp(App[None]):
         self.observer = None
 
     def _tick(self) -> None:
+        if self._pending_makefile_regen and not has_active_tests():
+            generate_makefile()
+            self._pending_makefile_regen = False
+
         if self.watch_mode:
             self._update_dep_warning()
 
@@ -197,3 +209,16 @@ class TestRunnerApp(App[None]):
         warning.update(
             "Dependency graph incomplete (fresh build or compile errors). Run one clean pass for precise selective reruns."
         )
+
+    def _set_subprocess_columns_from_ui(self) -> None:
+        width = 80
+        if self.log_widget is not None:
+            width = self.log_widget.size.width or self.size.width or 80
+        else:
+            width = self.size.width or 80
+
+        width = max(20, width)
+        global_state.subprocess_columns = width
+        if width != self._last_makefile_columns:
+            self._last_makefile_columns = width
+            self._pending_makefile_regen = True
