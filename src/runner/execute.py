@@ -8,6 +8,7 @@ from typing import Callable
 from state import state, active_processes, subprocess_columns
 from models import Test, TestState
 from .makefile import refresh_dependency_graph
+from .artifacts import test_binary_path
 
 
 async def _terminate_active_processes() -> None:
@@ -28,6 +29,7 @@ async def _terminate_active_processes() -> None:
 
 async def run_test(test: Test, on_complete: Callable[[], None]):
     process_key = os.path.abspath(test.source_path)
+    binary_path = test_binary_path(test.source_path)
     try:
         if test.state == TestState.CANCELLED:
             return
@@ -39,7 +41,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             "make",
             "-f",
             "test_build/Makefile",
-            f"test_build/{test.name}",
+            binary_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=proc_env,
@@ -64,7 +66,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         test.compile_err = ""
         test.compile_err_raw = b""
 
-        run_cmd = [f"./test_build/{test.name}"]
+        run_cmd = [f"./{binary_path}"]
         stdbuf_path = shutil.which("stdbuf")
         if stdbuf_path:
             run_cmd = [stdbuf_path, "-oL", "-eL", *run_cmd]
@@ -84,7 +86,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
                     await asyncio.sleep(0.05)
                     continue
                 if e.errno == errno.ENOENT:
-                    test.stderr = f"test executable missing: ./test_build/{test.name}"
+                    test.stderr = f"test executable missing: ./{binary_path}"
                     test.stderr_raw = b""
                     test.state = TestState.FAILED
                     test.time_state_changed = time.monotonic()

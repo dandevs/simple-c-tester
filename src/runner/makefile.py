@@ -5,6 +5,7 @@ import json
 
 from state import state, dep_index
 import state as global_state
+from .artifacts import test_binary_path, test_dep_path, test_map_path
 
 
 _MISSING_HEADER_RE = re.compile(r"fatal error:\s+(\S+):\s+No such file or directory")
@@ -311,12 +312,12 @@ def refresh_dependency_graph() -> None:
     broad_project_deps: set[str] | None = None
     changed_test_keys: set[str] = set()
     for test in state.all_tests:
-        test_dep_file = os.path.join("test_build", f"{test.name}.d")
+        test_dep_file = test_dep_path(test.source_path)
         previous = sorted(set(test.dependencies))
         current: set[str] = set()
         current.update(_parse_dep_file(test_dep_file))
         if has_project_sources:
-            map_path = os.path.join("test_build", f"{test.name}.map")
+            map_path = test_map_path(test.source_path)
             linked_members = _parse_linked_archive_members_from_map(map_path, archive_path)
             if linked_members is None:
                 if broad_project_deps is None:
@@ -373,14 +374,15 @@ def generate_makefile():
         lines.append("")
 
     for test in state.all_tests:
-        target = f"test_build/{test.name}"
+        target = test_binary_path(test.source_path)
         source = test.source_path
-        dep_file = f"test_build/{test.name}.d"
+        dep_file = test_dep_path(test.source_path)
+        map_file = test_map_path(test.source_path)
         test_include_flags = " ".join(f"-I{d}" for d in test.include_dirs)
         if project_sources:
             lines.append(f"{target}: {source} {lib_target}")
             lines.append(
-                f"\tgcc {test_include_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -Wl,-Map,test_build/{test.name}.map -o {target} {source} {lib_target}"
+                f"\tgcc {test_include_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -Wl,-Map,{map_file} -o {target} {source} {lib_target}"
             )
         else:
             lines.append(f"{target}: {source}")
