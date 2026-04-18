@@ -6,6 +6,7 @@ import time
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 
+import state as global_state
 from state import state, dep_index, active_processes
 from models import Test, TestState
 from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph
@@ -29,7 +30,9 @@ async def handle_file_changes(changed_paths: set[str]):
         if (
             abs_path == src_dir or abs_path.startswith(f"{src_dir}{os.sep}")
         ) and not mapped_for_path:
-            src_changed_with_no_mapping = True
+            _, ext = os.path.splitext(abs_path)
+            if ext == ".h" or not global_state.dep_graph_ready:
+                src_changed_with_no_mapping = True
 
     if src_changed_with_no_mapping:
         for test in state.all_tests:
