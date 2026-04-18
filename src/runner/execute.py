@@ -61,6 +61,9 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             test.time_state_changed = time.monotonic()
             return
 
+        test.compile_err = ""
+        test.compile_err_raw = b""
+
         run_cmd = [f"./test_build/{test.name}"]
         stdbuf_path = shutil.which("stdbuf")
         if stdbuf_path:
