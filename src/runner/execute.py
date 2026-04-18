@@ -7,7 +7,7 @@ from typing import Callable
 
 from state import state, active_processes, subprocess_columns
 from models import Test, TestState
-from .makefile import rebuild_dep_index
+from .makefile import refresh_dependency_graph
 
 
 async def _terminate_active_processes() -> None:
@@ -49,22 +49,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         if active_processes.get(process_key) is make_proc:
             active_processes.pop(process_key, None)
 
-        dep_file = f"test_build/{test.name}.d"
-        if os.path.exists(dep_file):
-            with open(dep_file, "r") as f:
-                dep_content = f.read()
-            if ":" in dep_content:
-                colon_idx = dep_content.index(":")
-                deps_str = dep_content[colon_idx + 1 :].strip()
-                parts = deps_str.split()
-                deps = []
-                for part in parts:
-                    if part.endswith("\\"):
-                        part = part[:-1]
-                    if part:
-                        deps.append(os.path.abspath(part))
-                test.dependencies = deps
-                rebuild_dep_index()
+        refresh_dependency_graph()
 
         if test.state == TestState.CANCELLED:
             return

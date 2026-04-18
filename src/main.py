@@ -1,16 +1,22 @@
 import argparse
 import asyncio
+import os
 import shutil
 import sys
-import os
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from models import Test, Suite, AppState
-from state import state, active_processes
+from state import state
 from render import TestOutputScreen, render_tree_stdout
-from runner import state_changed, generate_makefile, build_project_sources, _terminate_active_processes
+from runner import (
+    state_changed,
+    generate_makefile,
+    build_project_sources,
+    hydrate_dependencies_from_db,
+    refresh_dependency_graph,
+    _terminate_active_processes,
+)
 from app import TestRunnerApp
 
 
@@ -42,8 +48,10 @@ async def _main():
         print(f"Error: test directory not found: {tests_dir}", file=sys.stderr)
         sys.exit(1)
     state.populate_suites(str(tests_dir))
+    hydrate_dependencies_from_db()
     generate_makefile()
     build_project_sources()
+    refresh_dependency_graph()
     state.available_runners = args.parallel
 
     app = TestRunnerApp(args.watch, args.output_lines, args.theme)

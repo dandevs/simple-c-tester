@@ -8,19 +8,32 @@ from watchdog.events import FileSystemEventHandler
 
 from state import state, dep_index, active_processes
 from models import Test, TestState
-from runner.makefile import generate_makefile, build_project_sources
+from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph
 from runner.execute import state_changed
 
 
 async def handle_file_changes(changed_paths: set[str]):
     affected: dict[str, Test] = {}
+    src_changed_with_no_mapping = False
+    src_dir = os.path.abspath("src")
     for path in changed_paths:
         abs_path = os.path.abspath(path)
+        mapped_for_path = False
         for test in dep_index.get(abs_path, []):
             affected[test.source_path] = test
+            mapped_for_path = True
         for test in state.all_tests:
             if os.path.abspath(test.source_path) == abs_path:
                 affected[test.source_path] = test
+                mapped_for_path = True
+        if (
+            abs_path == src_dir or abs_path.startswith(f"{src_dir}{os.sep}")
+        ) and not mapped_for_path:
+            src_changed_with_no_mapping = True
+
+    if src_changed_with_no_mapping:
+        for test in state.all_tests:
+            affected[test.source_path] = test
 
     for test in affected.values():
         test.include_dirs = []
@@ -57,6 +70,7 @@ async def handle_file_changes(changed_paths: set[str]):
 
     generate_makefile()
     build_project_sources()
+    refresh_dependency_graph()
     state_changed()
 
 

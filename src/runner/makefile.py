@@ -1,11 +1,15 @@
 import os
 import re
 import subprocess
+import json
 
 from state import state, dep_index
+import state as global_state
 
 
 _MISSING_HEADER_RE = re.compile(r"fatal error:\s+(\S+):\s+No such file or directory")
+SRC_DIR = os.path.abspath("src")
+DB_PATH = os.path.join("test_build", "db.json")
 
 
 def _parse_missing_header(stderr: str) -> str | None:
@@ -22,6 +26,29 @@ def _find_header_dir(header_name: str) -> str | None:
         if os.path.isfile(candidate):
             return os.path.normpath(root)
     return None
+
+
+def _normalize_dep_path(path: str) -> str:
+    return os.path.abspath(os.path.normpath(path))
+
+
+def _parse_dep_file(dep_file: str) -> list[str]:
+    if not os.path.exists(dep_file):
+        return []
+
+    with open(dep_file, "r", encoding="utf-8", errors="replace") as f:
+        dep_content = f.read()
+
+    if ":" not in dep_content:
+        return []
+
+    deps_part = dep_content.split(":", 1)[1].replace("\\\n", " ")
+    deps: set[str] = set()
+    for part in deps_part.split():
+        candidate = part[:-1] if part.endswith("\\") else part
+        if candidate:
+            deps.add(_normalize_dep_path(candidate))
+    return sorted(deps)
 
 
 def resolve_include_dirs(source_path: str) -> list[str]:
@@ -69,6 +96,24 @@ def _obj_name(source_path: str) -> str:
     return os.path.splitext(rel)[0]
 
 
+def _collect_project_dependencies() -> set[str]:
+    deps: set[str] = set()
+
+    for src in discover_project_sources():
+        deps.add(_normalize_dep_path(src))
+
+    obj_dir = os.path.join("test_build", "obj")
+    if os.path.isdir(obj_dir):
+        for root, _, files in os.walk(obj_dir):
+            for file_name in files:
+                if not file_name.endswith(".d"):
+                    continue
+                dep_path = os.path.join(root, file_name)
+                deps.update(_parse_dep_file(dep_path))
+
+    return deps
+
+
 def build_project_sources():
     sources = discover_project_sources()
     if not sources:
@@ -84,12 +129,117 @@ def build_project_sources():
         pass
 
 
+def update_dep_graph_readiness() -> None:
+    tests = state.all_tests
+    if not tests:
+        global_state.dep_graph_ready = False
+        global_state.dep_graph_reason = "no tests discovered"
+        return
+
+    if any(len(test.dependencies) == 0 for test in tests):
+        global_state.dep_graph_ready = False
+        global_state.dep_graph_reason = "tests missing dependencies"
+        return
+
+    has_src_dependency = any(
+        dep == SRC_DIR or dep.startswith(f"{SRC_DIR}{os.sep}")
+        for test in tests
+        for dep in test.dependencies
+    )
+    if not has_src_dependency:
+        global_state.dep_graph_ready = False
+        global_state.dep_graph_reason = "no src dependencies collected"
+        return
+
+    global_state.dep_graph_ready = True
+    global_state.dep_graph_reason = "ready"
+
+
 def rebuild_dep_index():
-    global dep_index
-    dep_index = {}
+    dep_index.clear()
     for test in state.all_tests:
         for dep in test.dependencies:
             dep_index.setdefault(dep, []).append(test)
+
+
+def load_dependency_db() -> dict[str, dict[str, list[str]]]:
+    if not os.path.exists(DB_PATH):
+        return {}
+
+    try:
+        with open(DB_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    tests_data = data.get("tests") if isinstance(data, dict) else None
+    if not isinstance(tests_data, dict):
+        return {}
+
+    hydrated: dict[str, dict[str, list[str]]] = {}
+    for test_key, payload in tests_data.items():
+        if not isinstance(test_key, str) or not isinstance(payload, dict):
+            continue
+        deps = payload.get("collected_dependencies", [])
+        if not isinstance(deps, list):
+            continue
+        normalized = []
+        for dep in deps:
+            if isinstance(dep, str):
+                normalized.append(_normalize_dep_path(dep))
+        hydrated[_normalize_dep_path(test_key)] = {
+            "collected_dependencies": sorted(set(normalized))
+        }
+
+    return hydrated
+
+
+def save_dependency_db() -> None:
+    os.makedirs("test_build", exist_ok=True)
+    tests_payload: dict[str, dict[str, list[str]]] = {}
+    for test in state.all_tests:
+        test_key = _normalize_dep_path(test.source_path)
+        tests_payload[test_key] = {
+            "collected_dependencies": sorted(set(test.dependencies))
+        }
+
+    payload = {"tests": tests_payload}
+    with open(DB_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def hydrate_dependencies_from_db() -> None:
+    db = load_dependency_db()
+    if not db:
+        update_dep_graph_readiness()
+        return
+
+    for test in state.all_tests:
+        test_key = _normalize_dep_path(test.source_path)
+        cached = db.get(test_key)
+        if cached is None:
+            continue
+        deps = cached.get("collected_dependencies", [])
+        if deps:
+            test.dependencies = sorted(set(deps))
+
+    rebuild_dep_index()
+    update_dep_graph_readiness()
+
+
+def refresh_dependency_graph() -> None:
+    project_deps = _collect_project_dependencies()
+    for test in state.all_tests:
+        test_dep_file = os.path.join("test_build", f"{test.name}.d")
+        current = set(test.dependencies)
+        current.update(_parse_dep_file(test_dep_file))
+        current.update(project_deps)
+        test.dependencies = sorted(current)
+
+    rebuild_dep_index()
+    update_dep_graph_readiness()
+    save_dependency_db()
 
 
 def generate_makefile():
