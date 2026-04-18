@@ -60,7 +60,7 @@ class TestRunnerApp(App[None]):
     def compose(self) -> ComposeResult:
         yield RichLog(id="tree-view", wrap=False, markup=False, highlight=False)
         if self.watch_mode:
-            yield Static("Main page  |  Ctrl+C: Exit", id="controls-footer")
+            yield Static("Tests  |  Ctrl+C: Exit", id="controls-footer")
 
     async def on_mount(self) -> None:
         self.log_widget = self.query_one("#tree-view", RichLog)

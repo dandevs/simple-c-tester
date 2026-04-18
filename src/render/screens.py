@@ -51,7 +51,7 @@ class TestOutputScreen(Screen[None]):
             auto_scroll=False,
         )
         if self.app.watch_mode:
-            yield Static("Output page  |  Ctrl+C: Go Back", id="controls-footer")
+            yield Static(f"Output: {self.test.name}  |  Ctrl+C: Go Back", id="controls-footer")
 
     async def on_mount(self) -> None:
         self.log_widget = self.query_one("#output-full", RichLog)
