@@ -10,6 +10,7 @@ import state as global_state
 _MISSING_HEADER_RE = re.compile(r"fatal error:\s+(\S+):\s+No such file or directory")
 SRC_DIR = os.path.abspath("src")
 DB_PATH = os.path.join("test_build", "db.json")
+_last_db_mtime_ns: int | None = None
 
 
 def _parse_missing_header(stderr: str) -> str | None:
@@ -39,15 +40,31 @@ def _parse_dep_file(dep_file: str) -> list[str]:
     with open(dep_file, "r", encoding="utf-8", errors="replace") as f:
         dep_content = f.read()
 
-    if ":" not in dep_content:
-        return []
-
-    deps_part = dep_content.split(":", 1)[1].replace("\\\n", " ")
     deps: set[str] = set()
-    for part in deps_part.split():
-        candidate = part[:-1] if part.endswith("\\") else part
-        if candidate:
-            deps.add(_normalize_dep_path(candidate))
+
+    logical_lines: list[str] = []
+    current = ""
+    for line in dep_content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.endswith("\\"):
+            current += stripped[:-1] + " "
+            continue
+        current += stripped
+        logical_lines.append(current)
+        current = ""
+    if current:
+        logical_lines.append(current)
+
+    for line in logical_lines:
+        if ":" not in line:
+            continue
+        _, deps_part = line.split(":", 1)
+        for candidate in deps_part.split():
+            if candidate:
+                deps.add(_normalize_dep_path(candidate))
+
     return sorted(deps)
 
 
@@ -114,6 +131,43 @@ def _collect_project_dependencies() -> set[str]:
     return deps
 
 
+def _parse_linked_archive_members_from_map(
+    map_path: str, archive_path: str
+) -> set[str] | None:
+    if not os.path.exists(map_path):
+        return None
+
+    try:
+        with open(map_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return None
+
+    if not content.strip():
+        return None
+
+    archive_basename = re.escape(os.path.basename(archive_path))
+    archive_normalized = re.escape(os.path.normpath(archive_path))
+    archive_absolute = re.escape(os.path.abspath(archive_path))
+    path_pattern = rf"(?:[^\s()]*[/\\])?(?:{archive_absolute}|{archive_normalized}|{archive_basename})"
+    member_pattern = r"([^)\\/]+\.o)"
+    pattern = re.compile(rf"{path_pattern}\({member_pattern}\)")
+
+    return {match.group(1) for match in pattern.finditer(content)}
+
+
+def _collect_linked_member_dependencies(linked_members: set[str]) -> set[str]:
+    deps: set[str] = set()
+    for member in linked_members:
+        member_base = os.path.basename(member)
+        if not member_base.endswith(".o"):
+            continue
+        dep_name = os.path.splitext(member_base)[0]
+        dep_path = os.path.join("test_build", "obj", f"{dep_name}.d")
+        deps.update(_parse_dep_file(dep_path))
+    return deps
+
+
 def build_project_sources():
     sources = discover_project_sources()
     if not sources:
@@ -163,18 +217,27 @@ def rebuild_dep_index():
 
 
 def load_dependency_db() -> dict[str, dict[str, list[str]]]:
+    global _last_db_mtime_ns
     if not os.path.exists(DB_PATH):
+        _last_db_mtime_ns = None
         return {}
 
     try:
         with open(DB_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
+        _last_db_mtime_ns = None
         return {}
 
     tests_data = data.get("tests") if isinstance(data, dict) else None
     if not isinstance(tests_data, dict):
+        _last_db_mtime_ns = None
         return {}
+
+    try:
+        _last_db_mtime_ns = os.stat(DB_PATH).st_mtime_ns
+    except OSError:
+        _last_db_mtime_ns = None
 
     hydrated: dict[str, dict[str, list[str]]] = {}
     for test_key, payload in tests_data.items():
@@ -194,8 +257,16 @@ def load_dependency_db() -> dict[str, dict[str, list[str]]]:
     return hydrated
 
 
-def save_dependency_db() -> None:
-    os.makedirs("test_build", exist_ok=True)
+def save_dependency_db(changed_test_keys: set[str] | None = None) -> None:
+    global _last_db_mtime_ns
+
+    if changed_test_keys is not None and not changed_test_keys:
+        try:
+            if os.stat(DB_PATH).st_mtime_ns == _last_db_mtime_ns:
+                return
+        except OSError:
+            pass
+
     tests_payload: dict[str, dict[str, list[str]]] = {}
     for test in state.all_tests:
         test_key = _normalize_dep_path(test.source_path)
@@ -204,9 +275,14 @@ def save_dependency_db() -> None:
         }
 
     payload = {"tests": tests_payload}
+    new_content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    os.makedirs("test_build", exist_ok=True)
     with open(DB_PATH, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-        f.write("\n")
+        f.write(new_content)
+    try:
+        _last_db_mtime_ns = os.stat(DB_PATH).st_mtime_ns
+    except OSError:
+        _last_db_mtime_ns = None
 
 
 def hydrate_dependencies_from_db() -> None:
@@ -229,17 +305,33 @@ def hydrate_dependencies_from_db() -> None:
 
 
 def refresh_dependency_graph() -> None:
-    project_deps = _collect_project_dependencies()
+    project_sources = discover_project_sources()
+    has_project_sources = bool(project_sources)
+    archive_path = os.path.join("test_build", "libproject.a")
+    broad_project_deps: set[str] | None = None
+    changed_test_keys: set[str] = set()
     for test in state.all_tests:
         test_dep_file = os.path.join("test_build", f"{test.name}.d")
-        current = set(test.dependencies)
+        previous = sorted(set(test.dependencies))
+        current: set[str] = set()
         current.update(_parse_dep_file(test_dep_file))
-        current.update(project_deps)
-        test.dependencies = sorted(current)
+        if has_project_sources:
+            map_path = os.path.join("test_build", f"{test.name}.map")
+            linked_members = _parse_linked_archive_members_from_map(map_path, archive_path)
+            if linked_members is None:
+                if broad_project_deps is None:
+                    broad_project_deps = _collect_project_dependencies()
+                current.update(broad_project_deps)
+            else:
+                current.update(_collect_linked_member_dependencies(linked_members))
+        updated = sorted(current)
+        test.dependencies = updated
+        if updated != previous:
+            changed_test_keys.add(_normalize_dep_path(test.source_path))
 
     rebuild_dep_index()
     update_dep_graph_readiness()
-    save_dependency_db()
+    save_dependency_db(changed_test_keys)
 
 
 def generate_makefile():
@@ -288,7 +380,7 @@ def generate_makefile():
         if project_sources:
             lines.append(f"{target}: {source} {lib_target}")
             lines.append(
-                f"\tgcc {test_include_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -o {target} {source} {lib_target}"
+                f"\tgcc {test_include_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -Wl,-Map,test_build/{test.name}.map -o {target} {source} {lib_target}"
             )
         else:
             lines.append(f"{target}: {source}")
