@@ -24,3 +24,11 @@ class OutputBoxRegion:
     end_line: int
     left_col: int
     right_col: int
+
+
+@dataclass
+class TestRowRegion:
+    test_key: str
+    line: int
+    left_col: int
+    right_col: int

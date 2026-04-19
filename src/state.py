@@ -8,3 +8,6 @@ active_processes: dict[str, asyncio.subprocess.Process] = {}
 subprocess_columns = 80
 dep_graph_ready = False
 dep_graph_reason = "dependency graph not initialized"
+debug_build_enabled = False
+timeline_capture_enabled = False
+active_debug_test_key: str | None = None

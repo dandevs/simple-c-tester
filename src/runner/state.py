@@ -22,6 +22,10 @@ def display_state_signature() -> tuple:
             test.stdout,
             test.stderr,
             test.compile_err,
+            len(test.timeline_events),
+            test.debug_running,
+            test.debug_exited,
+            test.debug_exit_code,
         )
         for test in state.all_tests
     )

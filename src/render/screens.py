@@ -1,5 +1,9 @@
 import shutil
 import subprocess
+import os
+import asyncio
+import time
+from rich.console import Group
 
 from rich.text import Text
 from rich.cells import cell_len
@@ -9,9 +13,22 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import RichLog, Static
 
-from models import Test
+import state as global_state
+from models import Test, TestState
 from .output import get_test_output
 from .styles import TREE_META_STYLE
+from runner import (
+    start_debug_session,
+    stop_debug_session,
+    debug_step_next,
+    debug_step_in,
+    debug_step_out,
+    debug_continue,
+    debug_interrupt,
+    debug_continue_auto_trace,
+    is_debug_active,
+    state_changed,
+)
 
 
 class TestOutputScreen(Screen[None]):
@@ -131,6 +148,8 @@ class TestOutputScreen(Screen[None]):
         event.stop()
 
     async def action_close(self) -> None:
+        if is_debug_active(self.test):
+            await stop_debug_session(self.test)
         self.app.pop_screen()
 
     def _signature(self) -> tuple:
@@ -152,10 +171,10 @@ class TestOutputScreen(Screen[None]):
         if self.footer_widget is None:
             return
         if message is None:
-            self.footer_widget.update(Text(self._base_footer_text(), style="ansi_bright_black"))
+            self.footer_widget.update(Text(self._base_footer_text(), style="bright_black"))
             return
 
-        style = "ansi_yellow" if warning else "ansi_bright_black"
+        style = "yellow" if warning else "bright_black"
         self.footer_widget.update(Text(message, style=style))
 
     def _clear_footer_message(self) -> None:
@@ -340,4 +359,669 @@ class TestOutputScreen(Screen[None]):
         else:
             log.scroll_to(y=previous_scroll_y, animate=False, immediate=True)
 
+        self.last_signature = signature
+
+
+class TestDebuggerScreen(Screen[None]):
+    CSS = """
+    #debug-header {
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        text-style: bold;
+    }
+    #timeline-overview {
+        height: 2;
+        min-height: 2;
+        padding: 0 1;
+    }
+    #timeline-detail {
+        height: 2;
+        min-height: 2;
+        padding: 0 1;
+    }
+    #timeline-meta {
+        height: 3;
+        min-height: 3;
+        padding: 0 1;
+        color: #8f96a3;
+    }
+    #story-code {
+        height: 1fr;
+        border: none;
+        padding: 0 1;
+    }
+    #debug-log {
+        height: 8;
+        min-height: 6;
+        border: none;
+        scrollbar-size-vertical: 0;
+        scrollbar-size-horizontal: 0;
+        scrollbar-color: transparent;
+        scrollbar-background: transparent;
+        scrollbar-background-hover: transparent;
+        scrollbar-background-active: transparent;
+    }
+    #debug-footer {
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        color: #8f96a3;
+    }
+    """
+
+    STORY_BAR_BASE = "#2e3440"
+    STORY_BAR_WINDOW = "#4c566a"
+    STORY_BAR_ACTIVE = "#6ea8fe"
+    STORY_BAR_SELECTED = "#ffd166"
+    STORY_META_HIGHLIGHT = "#89dceb"
+    STORY_META_SELECTED = "#ffd166"
+    STORY_HELP = "#7f8a9d"
+    STORY_LINE_MARKER = "#ff6b6b"
+    STORY_CURRENT_LINE = "#263238"
+
+    BINDINGS = [
+        Binding("escape", "close", "Back"),
+        Binding("ctrl+c", "close", "Back", priority=True),
+        Binding("d", "toggle_debug", "Debug"),
+        Binding("t", "toggle_timeline", "Timeline"),
+        Binding("r", "rerun_test", "Rerun"),
+        Binding("n", "step_next", "Next"),
+        Binding("i", "step_in", "Step In"),
+        Binding("o", "step_out", "Step Out"),
+        Binding("c", "continue_run", "Continue"),
+        Binding("k", "interrupt_run", "Interrupt"),
+        Binding("a", "auto_trace", "Auto Trace"),
+        Binding("plus", "zoom_in", "Zoom In"),
+        Binding("minus", "zoom_out", "Zoom Out"),
+        Binding("left", "timeline_prev", "Prev Step"),
+        Binding("right", "timeline_next", "Next Step"),
+        Binding("ctrl+left", "timeline_prev_10", "-10 Steps"),
+        Binding("ctrl+right", "timeline_next_10", "+10 Steps"),
+    ]
+
+    def __init__(self, test: Test):
+        super().__init__()
+        self.test = test
+        self.header_widget: Static | None = None
+        self.timeline_overview_widget: Static | None = None
+        self.timeline_detail_widget: Static | None = None
+        self.timeline_meta_widget: Static | None = None
+        self.code_widget: Static | None = None
+        self.log_widget: RichLog | None = None
+        self.footer_widget: Static | None = None
+        self.last_signature: tuple | None = None
+        self.selected_frame_index = -1
+        self.zoom_level = 1
+        self._source_cache: dict[str, list[str]] = {}
+        self._footer_timer = None
+        self._action_task: asyncio.Task | None = None
+        self._last_log_count = -1
+        self._follow_latest_frames = True
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="debug-header")
+        yield Static("", id="timeline-overview")
+        yield Static("", id="timeline-detail")
+        yield Static("", id="timeline-meta")
+        yield Static("", id="story-code")
+        yield RichLog(
+            id="debug-log",
+            wrap=False,
+            markup=False,
+            highlight=False,
+            auto_scroll=True,
+        )
+        yield Static("", id="debug-footer")
+
+    async def on_mount(self) -> None:
+        self.header_widget = self.query_one("#debug-header", Static)
+        self.timeline_overview_widget = self.query_one("#timeline-overview", Static)
+        self.timeline_detail_widget = self.query_one("#timeline-detail", Static)
+        self.timeline_meta_widget = self.query_one("#timeline-meta", Static)
+        self.code_widget = self.query_one("#story-code", Static)
+        self.log_widget = self.query_one("#debug-log", RichLog)
+        self.footer_widget = self.query_one("#debug-footer", Static)
+        self.test.timeline_capture_enabled = True
+        self._set_footer_text()
+        self._refresh_view(force=True)
+        if not self._line_frames() and self.test.state != TestState.RUNNING and not is_debug_active(self.test):
+            self._set_footer_text("No Test Story yet. Recording is on; press R to run.")
+        self.set_interval(0.1, self._tick)
+
+    async def action_close(self) -> None:
+        self.app.pop_screen()
+
+    async def action_toggle_timeline(self) -> None:
+        self.test.timeline_capture_enabled = not self.test.timeline_capture_enabled
+        mode = "enabled" if self.test.timeline_capture_enabled else "disabled"
+        self._set_footer_text(f"Timeline capture {mode} for {self.test.name}.")
+
+    async def action_rerun_test(self) -> None:
+        if self.test.debug_running or is_debug_active(self.test):
+            await self._run_action(self._restart_debug_session(), "Debugger restarted.")
+            return
+
+        self._reset_story_state()
+        self.test.state = TestState.PENDING
+        self.test.time_start = 0.0
+        self.test.time_state_changed = time.monotonic()
+        state_changed()
+        self._set_footer_text("Queued test rerun.")
+
+    async def _restart_debug_session(self) -> None:
+        await stop_debug_session(self.test)
+        self._reset_story_state()
+        await start_debug_session(self.test, auto_trace=False)
+
+    def _reset_story_state(self) -> None:
+        self.test.timeline_events = []
+        self.test.debug_logs = []
+        self.test.stdout = ""
+        self.test.stdout_raw = b""
+        self.test.stderr = ""
+        self.test.stderr_raw = b""
+        self.test.compile_err = ""
+        self.test.compile_err_raw = b""
+        self._follow_latest_frames = True
+        self.selected_frame_index = -1
+
+    async def action_toggle_debug(self) -> None:
+        if is_debug_active(self.test):
+            await self._run_action(stop_debug_session(self.test), "Debugger stopped.")
+            return
+        await self._run_action(
+            start_debug_session(self.test, auto_trace=False),
+            "Debugger started at main().",
+        )
+
+    async def action_step_next(self) -> None:
+        if not self._ensure_debug_active("Step"):
+            return
+        await self._run_action(debug_step_next(self.test), "Stepped over.")
+
+    async def action_step_in(self) -> None:
+        if not self._ensure_debug_active("Step-in"):
+            return
+        await self._run_action(debug_step_in(self.test), "Stepped in.")
+
+    async def action_step_out(self) -> None:
+        if not self._ensure_debug_active("Step-out"):
+            return
+        await self._run_action(debug_step_out(self.test), "Stepped out.")
+
+    async def action_continue_run(self) -> None:
+        if not self._ensure_debug_active("Continue"):
+            return
+        await self._run_action(debug_continue(self.test), "Continued execution.")
+
+    async def action_interrupt_run(self) -> None:
+        if not self._ensure_debug_active("Interrupt"):
+            return
+        await self._run_action(debug_interrupt(self.test), "Sent interrupt.")
+
+    async def action_auto_trace(self) -> None:
+        if not self._ensure_debug_active("Auto trace"):
+            return
+        await self._run_action(debug_continue_auto_trace(self.test), "Auto trace complete.")
+
+    def action_zoom_in(self) -> None:
+        self.zoom_level = min(64, self.zoom_level * 2)
+        self._refresh_view(force=True)
+
+    def action_zoom_out(self) -> None:
+        self.zoom_level = max(1, self.zoom_level // 2)
+        self._refresh_view(force=True)
+
+    def action_timeline_prev(self) -> None:
+        frames = self._line_frames()
+        if not frames:
+            return
+        self._ensure_selected_frame_index()
+        self.selected_frame_index = max(0, self.selected_frame_index - 1)
+        self._follow_latest_frames = False
+        self._refresh_view(force=True)
+
+    def action_timeline_next(self) -> None:
+        frames = self._line_frames()
+        if not frames:
+            return
+        self._ensure_selected_frame_index()
+        self.selected_frame_index = min(len(frames) - 1, self.selected_frame_index + 1)
+        self._follow_latest_frames = self.selected_frame_index >= len(frames) - 1
+        self._refresh_view(force=True)
+
+    def action_timeline_prev_10(self) -> None:
+        self._timeline_jump(-10)
+
+    def action_timeline_next_10(self) -> None:
+        self._timeline_jump(10)
+
+    def _timeline_jump(self, offset: int) -> None:
+        frames = self._line_frames()
+        if not frames:
+            return
+        self._ensure_selected_frame_index()
+        self.selected_frame_index = min(
+            len(frames) - 1,
+            max(0, self.selected_frame_index + offset),
+        )
+        self._follow_latest_frames = self.selected_frame_index >= len(frames) - 1
+        self._refresh_view(force=True)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button != 1:
+            return
+        if self.timeline_overview_widget is None or self.timeline_detail_widget is None:
+            return
+
+        if event.widget == self.timeline_overview_widget:
+            index = self._mouse_to_overview_index(event)
+            if index is not None:
+                self.selected_frame_index = index
+                self._follow_latest_frames = False
+                self._refresh_view(force=True)
+                event.prevent_default()
+                event.stop()
+            return
+
+        if event.widget == self.timeline_detail_widget:
+            index = self._mouse_to_detail_index(event)
+            if index is not None:
+                self.selected_frame_index = index
+                self._follow_latest_frames = False
+                self._refresh_view(force=True)
+                event.prevent_default()
+                event.stop()
+
+    def _mouse_to_overview_index(self, event: events.MouseDown) -> int | None:
+        frames = self._line_frames()
+        if not frames or self.timeline_overview_widget is None:
+            return None
+        offset = event.get_content_offset(self.timeline_overview_widget)
+        if offset is None:
+            return None
+        width = max(1, self.timeline_overview_widget.size.width - 2)
+        x = min(max(int(offset.x), 0), width - 1)
+        denom = max(1, width - 1)
+        return int((x / denom) * (len(frames) - 1))
+
+    def _mouse_to_detail_index(self, event: events.MouseDown) -> int | None:
+        frames = self._line_frames()
+        if not frames or self.timeline_detail_widget is None:
+            return None
+        offset = event.get_content_offset(self.timeline_detail_widget)
+        if offset is None:
+            return None
+        window_start, window_end = self._timeline_window(len(frames))
+        count = max(1, window_end - window_start)
+        width = max(1, self.timeline_detail_widget.size.width - 2)
+        x = min(max(int(offset.x), 0), width - 1)
+        denom = max(1, width - 1)
+        return window_start + int((x / denom) * (count - 1))
+
+    async def _run_action(self, action_coro, success_message: str) -> None:
+        if self._action_task is not None and not self._action_task.done():
+            closer = getattr(action_coro, "close", None)
+            if callable(closer):
+                closer()
+            self._set_footer_text("A debug action is already running.", warning=True)
+            return
+
+        async def _runner() -> None:
+            try:
+                await action_coro
+                self._set_footer_text(success_message)
+            except Exception as error:
+                self._set_footer_text(f"Debug action failed: {error}", warning=True)
+            finally:
+                self._action_task = None
+
+        self._action_task = asyncio.create_task(_runner())
+
+    def _tick(self) -> None:
+        self._refresh_view()
+
+    def _ensure_debug_active(self, action_label: str) -> bool:
+        if is_debug_active(self.test):
+            return True
+        self._set_footer_text(
+            f"Debugger idle. Press D to start before {action_label.lower()}.",
+            warning=True,
+        )
+        return False
+
+    def _signature(self) -> tuple:
+        last_event = self.test.timeline_events[-1] if self.test.timeline_events else None
+        last_event_sig = (
+            last_event.kind,
+            last_event.timestamp,
+            last_event.file_path,
+            last_event.line,
+            last_event.message,
+        ) if last_event else ()
+        return (
+            self.test.state,
+            self.test.time_state_changed,
+            len(self.test.timeline_events),
+            self.test.debug_running,
+            self.test.debug_exited,
+            self.test.debug_exit_code,
+            self.test.timeline_capture_enabled,
+            len(self.test.debug_logs),
+            last_event_sig,
+            self.selected_frame_index,
+            self.zoom_level,
+            self._follow_latest_frames,
+        )
+
+    def _base_footer_text(self) -> str:
+        if not self._line_frames():
+            return (
+                "No story yet. Press R to run. Scrub: <-/-> or Ctrl+<- / Ctrl+->  D: debug"
+            )
+        return (
+            "Scrub: click or <-/-> or Ctrl+<- / Ctrl+->  Steps: N/I/O/C/K  A: auto trace  R: rerun/restart debug  D: debug"
+        )
+
+    def _set_footer_text(self, message: str | None = None, warning: bool = False) -> None:
+        if self.footer_widget is None:
+            return
+        if message is None:
+            self.footer_widget.update(Text(self._base_footer_text(), style="bright_black"))
+            return
+
+        style = "yellow" if warning else "bright_black"
+        self.footer_widget.update(Text(message, style=style))
+        if self._footer_timer is not None:
+            self._footer_timer.stop()
+        self._footer_timer = self.set_timer(2.0, self._clear_footer_message)
+
+    def _clear_footer_message(self) -> None:
+        self._footer_timer = None
+        self._set_footer_text()
+
+    def _line_frames(self):
+        return [
+            event
+            for event in self.test.timeline_events
+            if self._event_has_useful_source_line(event.file_path, event.line)
+        ]
+
+    def _event_has_useful_source_line(self, file_path: str, line_number: int) -> bool:
+        if not file_path or line_number <= 0:
+            return False
+        source_path = os.path.abspath(file_path)
+        lines = self._load_source_lines(source_path)
+        if not lines or line_number > len(lines):
+            return False
+        return bool(lines[line_number - 1].strip())
+
+    def _ensure_selected_frame_index(self) -> None:
+        total = len(self._line_frames())
+        if total <= 0:
+            self.selected_frame_index = -1
+            return
+
+        if self.selected_frame_index < 0 or self.selected_frame_index >= total:
+            self.selected_frame_index = total - 1
+
+    def _timeline_window(self, total: int) -> tuple[int, int]:
+        if total <= 0:
+            return (0, 0)
+
+        self._ensure_selected_frame_index()
+        window_size = max(8, total // max(1, self.zoom_level))
+        window_size = min(total, window_size)
+
+        center = self.selected_frame_index
+        start = max(0, center - (window_size // 2))
+        end = start + window_size
+        if end > total:
+            end = total
+            start = max(0, end - window_size)
+        return (start, end)
+
+    def _build_overview_text(self, width: int, start: int, end: int) -> Text:
+        total = len(self._line_frames())
+        line = Text()
+        if total == 0:
+            line.append("(no line-execution frames yet)", style=self.STORY_HELP)
+            return line
+
+        for column in range(width):
+            bucket_start = int((column / width) * total)
+            bucket_end = int(((column + 1) / width) * total)
+            bucket_end = max(bucket_end, bucket_start + 1)
+            inside_window = not (bucket_end <= start or bucket_start >= end)
+            style = self.STORY_BAR_WINDOW if inside_window else self.STORY_BAR_BASE
+            if bucket_start <= self.selected_frame_index < bucket_end:
+                style = self.STORY_BAR_SELECTED
+            line.append("█", style=style)
+
+        return line
+
+    def _build_detail_text(self, width: int, start: int, end: int) -> Text:
+        total = len(self._line_frames())
+        line = Text()
+        if total == 0 or end <= start:
+            line.append("(no frame window)", style=self.STORY_HELP)
+            return line
+
+        count = end - start
+        for column in range(width):
+            event_start = start + int((column / width) * count)
+            event_end = start + int(((column + 1) / width) * count)
+            event_end = max(event_end, event_start + 1)
+            event_end = min(event_end, end)
+            style = self.STORY_BAR_ACTIVE
+            selected_here = event_start <= self.selected_frame_index < event_end
+            if selected_here:
+                style = f"{self.STORY_BAR_SELECTED} bold"
+            line.append("█", style=style)
+
+        return line
+
+    def _load_source_lines(self, file_path: str) -> list[str]:
+        cached = self._source_cache.get(file_path)
+        if cached is not None:
+            return cached
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            lines = []
+
+        self._source_cache[file_path] = lines
+        return lines
+
+    def _frame_cards_window(self, total: int) -> tuple[int, int]:
+        if total <= 0:
+            return (0, 0)
+
+        self._ensure_selected_frame_index()
+        height = 1
+        if self.code_widget is not None:
+            height = max(1, self.code_widget.size.height)
+
+        card_height = 5
+        card_count = max(1, height // card_height)
+        card_count = min(total, card_count)
+
+        center = self.selected_frame_index
+        start = max(0, center - (card_count // 2))
+        end = start + card_count
+        if end > total:
+            end = total
+            start = max(0, end - card_count)
+        return (start, end)
+
+    def _build_frame_snippet(
+        self,
+        source_lines: list[str],
+        line_number: int,
+        snippet_start: int,
+        snippet_end: int,
+        selected: bool,
+    ) -> Text:
+        snippet = Text()
+        number_width = len(str(max(1, snippet_end)))
+        current_line_style = f"on {self.STORY_CURRENT_LINE}"
+        if selected:
+            current_line_style = f"bold {self.STORY_LINE_MARKER} on {self.STORY_CURRENT_LINE}"
+
+        for render_line in range(snippet_start, snippet_end + 1):
+            code = source_lines[render_line - 1]
+            if render_line == line_number:
+                snippet.append(f"{render_line:>{number_width}} | ", style=current_line_style)
+                snippet.append(code if code else " ", style=current_line_style)
+            else:
+                snippet.append(f"{render_line:>{number_width}} | ", style=self.STORY_HELP)
+                snippet.append(code, style="default")
+
+            if render_line < snippet_end:
+                snippet.append("\n")
+
+        return snippet
+
+    def _render_code_panel(self) -> None:
+        if self.code_widget is None:
+            return
+
+        frames = self._line_frames()
+        total = len(frames)
+        if total == 0:
+            hint = Text()
+            hint.append("No Test Story frames yet. ", style=self.STORY_HELP)
+            hint.append("Recording is on. ", style=self.STORY_META_HIGHLIGHT)
+            hint.append("Press R to run and capture a story.", style=f"bold {self.STORY_META_SELECTED}")
+            self.code_widget.update(hint)
+            return
+
+        self._ensure_selected_frame_index()
+        start_index, end_index = self._frame_cards_window(total)
+        width = max(8, self.code_widget.size.width - 2)
+        renderables = []
+
+        for index in range(start_index, end_index):
+            event = frames[index]
+            source_path = os.path.abspath(event.file_path)
+            source_lines = self._load_source_lines(source_path)
+            if not source_lines:
+                continue
+
+            line_number = event.line
+            snippet_start = max(1, line_number - 1)
+            snippet_end = min(len(source_lines), line_number + 1)
+            selected = index == self.selected_frame_index
+
+            title = Text()
+            if selected:
+                title.append(">> ", style=f"bold {self.STORY_META_SELECTED}")
+                title.append(
+                    f"Frame {index + 1}/{total} (current)",
+                    style=f"bold {self.STORY_META_SELECTED}",
+                )
+            else:
+                title.append("   ", style=self.STORY_HELP)
+                title.append(f"Frame {index + 1}/{total}", style=self.STORY_META_HIGHLIGHT)
+            title.append("  ")
+            title.append(f"{event.file_path}:{line_number}", style=self.STORY_META_HIGHLIGHT)
+            if event.function:
+                title.append(f"  fn={event.function}", style=self.STORY_HELP)
+
+            snippet_text = self._build_frame_snippet(
+                source_lines,
+                line_number,
+                snippet_start,
+                snippet_end,
+                selected,
+            )
+
+            renderables.append(title)
+            renderables.append(snippet_text)
+            if index < end_index - 1:
+                renderables.append(Text("-" * width, style=self.STORY_BAR_BASE))
+
+        if not renderables:
+            self.code_widget.update(Text("No renderable story frames.", style=self.STORY_HELP))
+            return
+
+        self.code_widget.update(Group(*renderables))
+
+    def _render_log_panel(self) -> None:
+        if self.log_widget is None:
+            return
+        if len(self.test.debug_logs) == self._last_log_count:
+            return
+
+        log = self.log_widget
+        log.clear()
+        for line in self.test.debug_logs[-200:]:
+            log.write(line)
+        log.scroll_end(animate=False, immediate=True)
+        self._last_log_count = len(self.test.debug_logs)
+
+    def _refresh_view(self, force: bool = False) -> None:
+        signature = self._signature()
+        if not force and signature == self.last_signature:
+            return
+
+        frames = self._line_frames()
+        total = len(frames)
+        if self._follow_latest_frames and total > 0 and (
+            self.test.debug_running or is_debug_active(self.test) or self.test.state == TestState.RUNNING
+        ):
+            self.selected_frame_index = total - 1
+        self._ensure_selected_frame_index()
+        window_start, window_end = self._timeline_window(total)
+        selected = None
+        if 0 <= self.selected_frame_index < total:
+            selected = frames[self.selected_frame_index]
+
+        if self.header_widget is not None:
+            status = self.test.state.value
+            debug_status = "active" if is_debug_active(self.test) else "idle"
+            timeline_status = "on" if self.test.timeline_capture_enabled or global_state.timeline_capture_enabled else "off"
+            self.header_widget.update(
+                Text(
+                    f"Test Story: {self.test.name} [{status}]  Debug: {debug_status}  Recording: {timeline_status}  Zoom: {self.zoom_level}x"
+                )
+            )
+
+        overview_width = 80
+        if self.timeline_overview_widget is not None:
+            overview_width = max(8, self.timeline_overview_widget.size.width - 2)
+            overview = self._build_overview_text(overview_width, window_start, window_end)
+            self.timeline_overview_widget.update(overview)
+
+        if self.timeline_detail_widget is not None:
+            detail_width = max(8, self.timeline_detail_widget.size.width - 2)
+            detail = self._build_detail_text(detail_width, window_start, window_end)
+            self.timeline_detail_widget.update(detail)
+
+        if self.timeline_meta_widget is not None:
+            meta = Text()
+            meta.append(f"Frame {window_start + 1 if total else 0}-{window_end} / {total}    ")
+            if selected is not None:
+                meta.append(
+                    f"selected {self.selected_frame_index + 1}/{total}",
+                    style=f"bold {self.STORY_META_SELECTED}",
+                )
+                meta.append("\n")
+                meta.append(f"{selected.file_path}:{selected.line}", style=self.STORY_META_HIGHLIGHT)
+                if selected.function:
+                    meta.append(f"  fn={selected.function}", style=self.STORY_META_HIGHLIGHT)
+            else:
+                meta.append("No line frame selected. Press R to run.", style=self.STORY_HELP)
+            meta.append("\n")
+            meta.append(
+                "Help: click bars or <-/-> or Ctrl+<- / Ctrl+-> to scrub, N/I/O/C/K to step, A auto-trace, R rerun/restart debug, D debug toggle",
+                style=self.STORY_HELP,
+            )
+            self.timeline_meta_widget.update(meta)
+
+        self._render_code_panel()
+        self._render_log_panel()
         self.last_signature = signature

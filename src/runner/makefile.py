@@ -347,6 +347,7 @@ def generate_makefile():
             test.include_dirs = resolve_include_dirs(test.source_path)
 
     message_length = max(20, int(global_state.subprocess_columns))
+    debug_flags = "-g -O0 -fno-omit-frame-pointer" if global_state.debug_build_enabled else ""
 
     project_sources = discover_project_sources()
     all_include_dirs = set()
@@ -370,7 +371,7 @@ def generate_makefile():
             lines.append(f"{obj_path}: {src}")
             lines.append(f"\t@mkdir -p {obj_dir}")
             lines.append(
-                f"\tgcc {include_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_path} -c $< -o $@"
+                f"\tgcc {include_flags} {debug_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_path} -c $< -o $@"
             )
             lines.append("")
 
@@ -387,12 +388,12 @@ def generate_makefile():
         if project_sources:
             lines.append(f"{target}: {source} {lib_target}")
             lines.append(
-                f"\tgcc {test_include_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -Wl,-Map,{map_file} -o {target} {source} {lib_target}"
+                f"\tgcc {test_include_flags} {debug_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -Wl,-Map,{map_file} -o {target} {source} {lib_target}"
             )
         else:
             lines.append(f"{target}: {source}")
             lines.append(
-                f"\tgcc {test_include_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -o {target} {source}"
+                f"\tgcc {test_include_flags} {debug_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -o {target} {source}"
             )
         lines.append("")
 

@@ -4,6 +4,18 @@ from .enum import TestState
 
 
 @dataclass
+class TimelineEvent:
+    index: int = 0
+    timestamp: float = 0.0
+    kind: str = ""
+    message: str = ""
+    file_path: str = ""
+    line: int = 0
+    function: str = ""
+    stream: str = ""
+
+
+@dataclass
 class Test:
     name: str = ""
     time_start: float = 0.0
@@ -19,6 +31,12 @@ class Test:
     compile_err: str = ""
     compile_err_raw: bytes = b""
     stderr_raw: bytes = b""
+    timeline_events: list[TimelineEvent] = field(default_factory=list)
+    timeline_capture_enabled: bool = False
+    debug_logs: list[str] = field(default_factory=list)
+    debug_running: bool = False
+    debug_exited: bool = False
+    debug_exit_code: int | None = None
 
 
 @dataclass

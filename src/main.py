@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+import state as global_state
 from state import state
 from render import TestOutputScreen, render_tree_stdout
 from runner import (
@@ -38,11 +39,24 @@ def parse_args():
         default="ansi",
         help="UI theme (default: ansi)",
     )
+    parser.add_argument(
+        "--timeline",
+        action="store_true",
+        help="Enable per-line timeline capture with gdb",
+    )
+    parser.add_argument(
+        "--debug-build",
+        action="store_true",
+        help="Compile tests with debug flags (-g -O0)",
+    )
     return parser.parse_args()
 
 
 async def _main():
     args = parse_args()
+    global_state.timeline_capture_enabled = bool(args.timeline)
+    global_state.debug_build_enabled = bool(args.debug_build or args.timeline)
+
     tests_dir = Path("tests")
     if not tests_dir.is_dir():
         print(f"Error: test directory not found: {tests_dir}", file=sys.stderr)
@@ -54,7 +68,7 @@ async def _main():
     refresh_dependency_graph()
     state.available_runners = args.parallel
 
-    app = TestRunnerApp(args.watch, args.output_lines, args.theme)
+    app = TestRunnerApp(args.watch, args.output_lines, args.theme, args.timeline)
     try:
         await app.run_async()
     finally:

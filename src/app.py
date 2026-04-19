@@ -10,7 +10,7 @@ from textual.widgets import RichLog, Static
 import state as global_state
 from state import state
 from models import Test
-from render import TestOutputScreen, render_tree, OutputBoxRegion
+from render import TestOutputScreen, TestDebuggerScreen, render_tree, OutputBoxRegion, TestRowRegion
 from runner import (
     generate_makefile,
     state_changed,
@@ -55,14 +55,23 @@ class TestRunnerApp(App[None]):
         Binding("ctrl+c", "quit", "Exit", priority=True),
     ]
 
-    def __init__(self, watch: bool, output_max_lines: int, theme_name: str):
+    def __init__(
+        self,
+        watch: bool,
+        output_max_lines: int,
+        theme_name: str,
+        timeline_enabled: bool = False,
+    ):
         super().__init__()
         self.watch_mode = watch
+        self.timeline_enabled = timeline_enabled
         self.observer = None
         self.last_signature: tuple | None = None
         self.log_widget: RichLog | None = None
         self.output_max_lines = max(1, output_max_lines)
         self.rendered_output_boxes: list[OutputBoxRegion] = []
+        self.rendered_test_rows: list[TestRowRegion] = []
+        self._watch_flush_task: asyncio.Task | None = None
         self._pending_makefile_regen = False
         self._last_makefile_columns = 0
         if theme_name == "ansi":
@@ -120,6 +129,12 @@ class TestRunnerApp(App[None]):
                 return box
         return None
 
+    def _find_test_row_at(self, x: int, y: int) -> TestRowRegion | None:
+        for row in self.rendered_test_rows:
+            if row.line == y and row.left_col <= x <= row.right_col:
+                return row
+        return None
+
     def _get_mouse_box_key(self, event: events.MouseEvent) -> str | None:
         if self.log_widget is None:
             return None
@@ -132,6 +147,18 @@ class TestRunnerApp(App[None]):
         box = self._find_output_box_at(virtual_x, virtual_y)
         return box.test_key if box is not None else None
 
+    def _get_mouse_row_key(self, event: events.MouseEvent) -> str | None:
+        if self.log_widget is None:
+            return None
+        offset = event.get_content_offset(self.log_widget)
+        if offset is None:
+            return None
+
+        virtual_x = int(offset.x + self.log_widget.scroll_x)
+        virtual_y = int(offset.y + self.log_widget.scroll_y)
+        row = self._find_test_row_at(virtual_x, virtual_y)
+        return row.test_key if row is not None else None
+
     def _get_test_by_key(self, test_key: str) -> Test | None:
         for test in state.all_tests:
             if test.source_path == test_key:
@@ -141,6 +168,16 @@ class TestRunnerApp(App[None]):
     def on_mouse_down(self, event: events.MouseDown) -> None:
         if len(self.screen_stack) > 1:
             return
+
+        row_key = self._get_mouse_row_key(event)
+        if row_key is not None:
+            row_test = self._get_test_by_key(row_key)
+            if row_test is not None:
+                self.push_screen(TestDebuggerScreen(row_test))
+                event.prevent_default()
+                event.stop()
+                return
+
         box_key = self._get_mouse_box_key(event)
         if box_key is None:
             return
@@ -166,6 +203,7 @@ class TestRunnerApp(App[None]):
 
         if self.watch_mode:
             self._update_dep_warning()
+            self._flush_deferred_watch_changes()
 
         has_active = has_active_tests()
         signature = display_state_signature()
@@ -186,7 +224,7 @@ class TestRunnerApp(App[None]):
         near_bottom = (log.max_scroll_y - log.scroll_y) <= 1
 
         log.clear()
-        self.rendered_output_boxes = render_tree(
+        self.rendered_output_boxes, self.rendered_test_rows = render_tree(
             log, self.output_max_lines, max(20, log.size.width or self.size.width or 80)
         )
 
@@ -212,6 +250,16 @@ class TestRunnerApp(App[None]):
         warning.update(
             "Dependency graph incomplete (fresh build or compile errors). Run one clean pass for precise selective reruns."
         )
+
+    def _flush_deferred_watch_changes(self) -> None:
+        if global_state.active_debug_test_key is not None:
+            return
+        if self._watch_flush_task is not None and not self._watch_flush_task.done():
+            return
+
+        from watch import flush_deferred_changes
+
+        self._watch_flush_task = asyncio.create_task(flush_deferred_changes())
 
     def _set_subprocess_columns_from_ui(self) -> None:
         width = 80
