@@ -17,6 +17,13 @@ python3 ../src/main.py
 - `--watch` — file change monitoring, re-runs affected tests
 - `--output-lines N` (default 10) — max lines in inline output boxes
 - `--theme ansi|default` (default `ansi`)
+- `--timeline` — enable per-line Test Story capture with gdb
+- `--debug-build` — compile tests with debug flags (`-g -O0`)
+- `--tsv-lines-above N` (default 4) — source lines shown above current frame
+- `--tsv-lines-below N` (default 4) — source lines shown below current frame
+- `--tsv-skip-seq-lines N` (default 10) — thin out sequential same-file frames in record mode
+- `--tsv-vars-depth N` (default 2) — variable expansion depth in the Test Story viewer
+- `--tsv-variables-height N` (default 10) — minimum height for the variables panel
 
 ## Setup
 ```bash
@@ -41,14 +48,15 @@ src/main.py        entry, argparse, asyncio.run
 src/app.py         TestRunnerApp (Textual)
 src/state.py       global mutable state singleton
 src/models/        Test, Suite, AppState, TestState
-src/render/        tree/box rendering, labels, screens
-src/runner/        makefile generation, test execution, dep graph
+src/render/        tree/box rendering, labels, screens, Test Story UI
+src/runner/        makefile generation, test execution, dep graph, gdb/MI debugger
 src/watch/         watchdog debounce handler
 src/runner/artifacts.py  path/name mangling for build artifacts
 ```
 
 - `src/runner/makefile.py` — `generate_makefile()`, include path resolution (`resolve_include_dirs` via iterative `gcc -E`), project source discovery and `libproject.a` build
-- `src/runner/execute.py` — `run_test()` invokes `make` then the binary; `state_changed()` dispatches tests via `asyncio.ensure_future()`
+- `src/runner/execute.py` — `run_test()` invokes `make` then the binary; `state_changed()` dispatches tests via `asyncio.ensure_future()`; also owns Test Story/debug session orchestration and cancellation/rebuild restore flow
+- `src/runner/debugger.py` — gdb MI controller used for Test Story capture and variable expansion
 - `src/runner/state.py` — helpers for checking completion state
 - All intra-src imports are bare (no `src.` prefix) — the package is not installed, `main.py` adds its own directory to `sys.path`
 
@@ -59,6 +67,8 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 - Artifact names use a readable + hash scheme: `test_artifact_stem()` in `src/runner/artifacts.py`
 - UI redraws the full tree every 100ms tick when state changes (single `RichLog` widget)
 - `state_changed()` is sync, uses `asyncio.ensure_future()` to schedule async work
+- Test Story opens a per-test debug page with code frames and a variables tree; exiting a running story cancels the test, restores normal build mode, and reruns it normally
+- Variables expansion is driven by gdb MI (`pygdbmi`) and is frame-aware; expand/collapse state and per-frame scroll position are preserved in the viewer
 
 ## Watch Mode Details
 - Observes repo root (`.`) recursively — no need to pre-build watched directory lists
@@ -78,7 +88,9 @@ src/runner/artifacts.py  path/name mangling for build artifacts
   - any test has a compile error (checked in `update_dep_graph_readiness()` and set in `run_test()`)
   - a runner error occurs
   - This prevents stale "ready" state from suppressing necessary rebuilds during error recovery
+- If a Test Story page is open and the running test is exited, the app cancels the active run/debug session, restores normal build flags, and requeues that test for a normal rebuild/rerun
 
 ## Gotchas
 - `requirements.txt` includes `pyperclip` for clipboard support in the output screen, but it's not listed in `pyproject.toml` dependencies — the app handles `ImportError` gracefully
+- `pygdbmi` is required for Test Story/debug capture and must be available in the PEX/runtime environment
 - The pex entry point is `main:entry` (not `src.main:entry`)

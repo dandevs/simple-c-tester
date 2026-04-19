@@ -11,6 +11,9 @@ from .execute import (
     debug_interrupt,
     debug_continue_auto_trace,
     is_debug_active,
+    get_debug_session,
+    cancel_test_and_restore_normal_build,
+    restore_normal_build_mode,
 )
 from .makefile import (
     generate_makefile,
@@ -34,6 +37,9 @@ __all__ = [
     "debug_interrupt",
     "debug_continue_auto_trace",
     "is_debug_active",
+    "get_debug_session",
+    "cancel_test_and_restore_normal_build",
+    "restore_normal_build_mode",
     "generate_makefile",
     "rebuild_dep_index",
     "build_project_sources",

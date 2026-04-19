@@ -38,6 +38,9 @@ class Test:
     debug_running: bool = False
     debug_exited: bool = False
     debug_exit_code: int | None = None
+    cancelled_by_user: bool = False
+    rerun_after_user_cancel: bool = False
+    force_rebuild_once: bool = False
 
 
 @dataclass

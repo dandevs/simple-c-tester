@@ -12,7 +12,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import RichLog, Static
+from textual.widgets import RichLog, Static, Tree as TextualTree
 
 import state as global_state
 from models import Test, TestState
@@ -28,6 +28,8 @@ from runner import (
     debug_interrupt,
     debug_continue_auto_trace,
     is_debug_active,
+    get_debug_session,
+    cancel_test_and_restore_normal_build,
     state_changed,
 )
 
@@ -371,32 +373,23 @@ class TestDebuggerScreen(Screen[None]):
         padding: 0 1;
         text-style: bold;
     }
-    #timeline-overview {
-        height: 2;
-        min-height: 2;
-        padding: 0 1;
-    }
-    #timeline-detail {
-        height: 2;
-        min-height: 2;
-        padding: 0 1;
-    }
-    #timeline-meta {
-        height: 3;
-        min-height: 3;
-        padding: 0 1;
-        color: #8f96a3;
-    }
     #story-code {
         height: 1fr;
+        min-height: 1;
         border: none;
         padding: 0 1;
     }
     #vars-panel {
-        height: 4;
-        min-height: 3;
+        height: 1;
+        min-height: 1;
         padding: 0 1;
         border: none;
+    }
+    #vars-tree {
+        height: 10;
+        min-height: 3;
+        border: none;
+        padding: 0 1;
     }
     #debug-footer {
         height: 1;
@@ -430,51 +423,51 @@ class TestDebuggerScreen(Screen[None]):
         Binding("c", "continue_run", "Continue"),
         Binding("k", "interrupt_run", "Interrupt"),
         Binding("a", "auto_trace", "Auto Trace"),
-        Binding("plus", "zoom_in", "Zoom In"),
-        Binding("minus", "zoom_out", "Zoom Out"),
         Binding("left", "timeline_prev", "Prev Step"),
         Binding("right", "timeline_next", "Next Step"),
         Binding("ctrl+left", "timeline_prev_10", "-10 Steps"),
         Binding("ctrl+right", "timeline_next_10", "+10 Steps"),
+        Binding("v", "toggle_variables", "Variables"),
     ]
 
     def __init__(self, test: Test):
         super().__init__()
         self.test = test
         self.header_widget: Static | None = None
-        self.timeline_overview_widget: Static | None = None
-        self.timeline_detail_widget: Static | None = None
-        self.timeline_meta_widget: Static | None = None
         self.code_widget: Static | None = None
         self.vars_widget: Static | None = None
+        self.vars_tree_widget: TextualTree | None = None
         self.footer_widget: Static | None = None
         self.last_signature: tuple | None = None
         self.selected_frame_index = -1
-        self.zoom_level = 1
         self._source_cache: dict[str, list[str]] = {}
         self._line_frames_cache_key: tuple | None = None
         self._line_frames_cache: list = []
+        self._variables_cache: dict[tuple[int, str, int], list[tuple[str, str]]] = {}
+        self._variables_task: asyncio.Task | None = None
+        self._vars_tree_signature: tuple | None = None
+        self._vars_tree_scroll_by_frame: dict[tuple[int, str, int], float] = {}
+        self._vars_tree_current_key: tuple[int, str, int] | None = None
+        self.variables_visible = True
         self._footer_timer = None
         self._action_task: asyncio.Task | None = None
         self._last_log_count = -1
 
     def compose(self) -> ComposeResult:
         yield Static("", id="debug-header")
-        yield Static("", id="timeline-overview")
-        yield Static("", id="timeline-detail")
-        yield Static("", id="timeline-meta")
         yield Static("", id="story-code")
-        yield Static("", id="vars-panel")
+        yield Static(Text("Variables", style=f"bold {self.STORY_META_SELECTED}"), id="vars-panel")
+        yield TextualTree("Variables", id="vars-tree")
         yield Static("", id="debug-footer")
 
     async def on_mount(self) -> None:
         self.header_widget = self.query_one("#debug-header", Static)
-        self.timeline_overview_widget = self.query_one("#timeline-overview", Static)
-        self.timeline_detail_widget = self.query_one("#timeline-detail", Static)
-        self.timeline_meta_widget = self.query_one("#timeline-meta", Static)
         self.code_widget = self.query_one("#story-code", Static)
         self.vars_widget = self.query_one("#vars-panel", Static)
+        self.vars_tree_widget = self.query_one("#vars-tree", TextualTree)
         self.footer_widget = self.query_one("#debug-footer", Static)
+        if self.vars_tree_widget is not None:
+            self.vars_tree_widget.show_root = False
         self.test.timeline_capture_enabled = True
         self._set_footer_text()
         self._refresh_view(force=True)
@@ -483,6 +476,11 @@ class TestDebuggerScreen(Screen[None]):
         self.set_interval(0.1, self._tick)
 
     async def action_close(self) -> None:
+        if self._variables_task is not None and not self._variables_task.done():
+            self._variables_task.cancel()
+
+        await cancel_test_and_restore_normal_build(self.test)
+        self._set_footer_text("Cancelled test debug/recording and restored normal build mode.")
         self.app.pop_screen()
 
     async def action_toggle_timeline(self) -> None:
@@ -518,6 +516,10 @@ class TestDebuggerScreen(Screen[None]):
         self.test.compile_err_raw = b""
         self._line_frames_cache_key = None
         self._line_frames_cache = []
+        self._variables_cache.clear()
+        self._vars_tree_signature = None
+        self._vars_tree_scroll_by_frame.clear()
+        self._vars_tree_current_key = None
         self.selected_frame_index = -1
 
     async def action_toggle_debug(self) -> None:
@@ -559,14 +561,6 @@ class TestDebuggerScreen(Screen[None]):
             return
         await self._run_action(debug_continue_auto_trace(self.test), "Auto trace complete.")
 
-    def action_zoom_in(self) -> None:
-        self.zoom_level = min(64, self.zoom_level * 2)
-        self._refresh_view(force=True)
-
-    def action_zoom_out(self) -> None:
-        self.zoom_level = max(1, self.zoom_level // 2)
-        self._refresh_view(force=True)
-
     def action_timeline_prev(self) -> None:
         frames = self._line_frames()
         if not frames:
@@ -589,6 +583,14 @@ class TestDebuggerScreen(Screen[None]):
     def action_timeline_next_10(self) -> None:
         self._timeline_jump(10)
 
+    def action_toggle_variables(self) -> None:
+        self.variables_visible = not self.variables_visible
+        if self.variables_visible:
+            self._set_footer_text("Variables panel shown.")
+        else:
+            self._set_footer_text("Variables panel hidden.")
+        self._refresh_view(force=True)
+
     def _timeline_jump(self, offset: int) -> None:
         frames = self._line_frames()
         if not frames:
@@ -601,53 +603,7 @@ class TestDebuggerScreen(Screen[None]):
         self._refresh_view(force=True)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        if event.button != 1:
-            return
-        if self.timeline_overview_widget is None or self.timeline_detail_widget is None:
-            return
-
-        if event.widget == self.timeline_overview_widget:
-            index = self._mouse_to_overview_index(event)
-            if index is not None:
-                self.selected_frame_index = index
-                self._refresh_view(force=True)
-                event.prevent_default()
-                event.stop()
-            return
-
-        if event.widget == self.timeline_detail_widget:
-            index = self._mouse_to_detail_index(event)
-            if index is not None:
-                self.selected_frame_index = index
-                self._refresh_view(force=True)
-                event.prevent_default()
-                event.stop()
-
-    def _mouse_to_overview_index(self, event: events.MouseDown) -> int | None:
-        frames = self._line_frames()
-        if not frames or self.timeline_overview_widget is None:
-            return None
-        offset = event.get_content_offset(self.timeline_overview_widget)
-        if offset is None:
-            return None
-        width = max(1, self.timeline_overview_widget.size.width - 2)
-        x = min(max(int(offset.x), 0), width - 1)
-        denom = max(1, width - 1)
-        return int((x / denom) * (len(frames) - 1))
-
-    def _mouse_to_detail_index(self, event: events.MouseDown) -> int | None:
-        frames = self._line_frames()
-        if not frames or self.timeline_detail_widget is None:
-            return None
-        offset = event.get_content_offset(self.timeline_detail_widget)
-        if offset is None:
-            return None
-        window_start, window_end = self._timeline_window(len(frames))
-        count = max(1, window_end - window_start)
-        width = max(1, self.timeline_detail_widget.size.width - 2)
-        x = min(max(int(offset.x), 0), width - 1)
-        denom = max(1, width - 1)
-        return window_start + int((x / denom) * (count - 1))
+        pass
 
     async def _run_action(self, action_coro, success_message: str) -> None:
         if self._action_task is not None and not self._action_task.done():
@@ -700,7 +656,9 @@ class TestDebuggerScreen(Screen[None]):
             len(self.test.debug_logs),
             last_event_sig,
             self.selected_frame_index,
-            self.zoom_level,
+            len(self._variables_cache),
+            int(global_state.tsv_variables_height),
+            self.variables_visible,
         )
 
     def _base_footer_text(self) -> str:
@@ -709,7 +667,7 @@ class TestDebuggerScreen(Screen[None]):
                 "No story yet. Press R to run. Scrub: <-/-> or Ctrl+<- / Ctrl+->  D: debug"
             )
         return (
-            "Scrub: click or <-/-> or Ctrl+<- / Ctrl+->  Steps: N/I/O/C/K  A: auto trace  R: rerun/restart debug  D: debug"
+            "Scrub: click or <-/-> or Ctrl+<- / Ctrl+->  Steps: N/I/O/C/K  A: auto trace  R: rerun/restart debug  D: debug  V: variables"
         )
 
     def _set_footer_text(self, message: str | None = None, warning: bool = False) -> None:
@@ -728,6 +686,39 @@ class TestDebuggerScreen(Screen[None]):
     def _clear_footer_message(self) -> None:
         self._footer_timer = None
         self._set_footer_text()
+
+    def _ensure_vars_panel_height(self) -> None:
+        if self.vars_widget is None or self.vars_tree_widget is None:
+            return
+        min_target = max(3, int(global_state.tsv_variables_height))
+
+        if not self.variables_visible:
+            if self.vars_widget.styles.display != "none":
+                self.vars_widget.styles.display = "none"
+            if self.vars_tree_widget.styles.display != "none":
+                self.vars_tree_widget.styles.display = "none"
+            return
+
+        if self.vars_widget.styles.display == "none":
+            self.vars_widget.styles.display = "block"
+        if self.vars_tree_widget.styles.display == "none":
+            self.vars_tree_widget.styles.display = "block"
+
+        if self.vars_widget.styles.height != 1:
+            self.vars_widget.styles.height = 1
+
+        desired = min_target
+        if self.vars_tree_widget.styles.height != desired:
+            self.vars_tree_widget.styles.height = desired
+
+        available = self.size.height
+        fixed = 1 + 2 + 2 + 3 + 1 + 1
+        story_min = 8
+        max_tree_for_layout = max(min_target, available - fixed - story_min)
+        if desired > max_tree_for_layout:
+            desired = max(3, max_tree_for_layout)
+            if self.vars_tree_widget.styles.height != desired:
+                self.vars_tree_widget.styles.height = desired
 
     def _line_frames(self):
         skip_seq = max(1, int(global_state.tsv_skip_seq_lines))
@@ -793,6 +784,20 @@ class TestDebuggerScreen(Screen[None]):
         self._line_frames_cache = filtered
         return filtered
 
+    async def _fetch_expanded_variables_for_frame(self, selected_event) -> None:
+        if selected_event is None:
+            return
+
+        event_key = (selected_event.index, selected_event.file_path, selected_event.line)
+        if event_key in self._variables_cache:
+            return
+
+        if not is_debug_active(self.test):
+            return
+
+        self._variables_cache[event_key] = list(selected_event.variables or [])
+        self._refresh_view(force=True)
+
     def _event_has_useful_source_line(self, file_path: str, line_number: int) -> bool:
         if not file_path or line_number <= 0:
             return False
@@ -829,62 +834,6 @@ class TestDebuggerScreen(Screen[None]):
         if ext in {".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}:
             return "cpp"
         return "c"
-
-    def _timeline_window(self, total: int) -> tuple[int, int]:
-        if total <= 0:
-            return (0, 0)
-
-        self._ensure_selected_frame_index()
-        window_size = max(8, total // max(1, self.zoom_level))
-        window_size = min(total, window_size)
-
-        center = self.selected_frame_index
-        start = max(0, center - (window_size // 2))
-        end = start + window_size
-        if end > total:
-            end = total
-            start = max(0, end - window_size)
-        return (start, end)
-
-    def _build_overview_text(self, width: int, start: int, end: int) -> Text:
-        total = len(self._line_frames())
-        line = Text()
-        if total == 0:
-            line.append("(no line-execution frames yet)", style=self.STORY_HELP)
-            return line
-
-        for column in range(width):
-            bucket_start = int((column / width) * total)
-            bucket_end = int(((column + 1) / width) * total)
-            bucket_end = max(bucket_end, bucket_start + 1)
-            inside_window = not (bucket_end <= start or bucket_start >= end)
-            style = self.STORY_BAR_WINDOW if inside_window else self.STORY_BAR_BASE
-            if bucket_start <= self.selected_frame_index < bucket_end:
-                style = self.STORY_BAR_SELECTED
-            line.append("█", style=style)
-
-        return line
-
-    def _build_detail_text(self, width: int, start: int, end: int) -> Text:
-        total = len(self._line_frames())
-        line = Text()
-        if total == 0 or end <= start:
-            line.append("(no frame window)", style=self.STORY_HELP)
-            return line
-
-        count = end - start
-        for column in range(width):
-            event_start = start + int((column / width) * count)
-            event_end = start + int(((column + 1) / width) * count)
-            event_end = max(event_end, event_start + 1)
-            event_end = min(event_end, end)
-            style = self.STORY_BAR_ACTIVE
-            selected_here = event_start <= self.selected_frame_index < event_end
-            if selected_here:
-                style = f"{self.STORY_BAR_SELECTED} bold"
-            line.append("█", style=style)
-
-        return line
 
     def _load_source_lines(self, file_path: str) -> list[str]:
         cached = self._source_cache.get(file_path)
@@ -979,67 +928,124 @@ class TestDebuggerScreen(Screen[None]):
         return syntax
 
     def _render_variables_panel(self, selected_event) -> None:
-        if self.vars_widget is None:
+        if self.vars_widget is None or self.vars_tree_widget is None:
             return
+
+        if not self.variables_visible:
+            return
+
+        previous_key = self._vars_tree_current_key
+        if previous_key is not None:
+            self._vars_tree_scroll_by_frame[previous_key] = float(self.vars_tree_widget.scroll_y)
 
         if selected_event is None:
-            self.vars_widget.update(Text("Variables: (no selected frame)", style=self.STORY_HELP))
+            self.vars_widget.update(Text("Variables (no selected frame)", style=self.STORY_HELP))
+            tree = self.vars_tree_widget
+            tree.root.set_label("Variables")
+            tree.root.remove_children()
+            tree.root.expand()
+            tree.refresh()
+            self._vars_tree_current_key = None
+            self._vars_tree_signature = None
             return
 
-        vars_list = list(selected_event.variables or [])
+        event_key = (selected_event.index, selected_event.file_path, selected_event.line)
+        if is_debug_active(self.test):
+            vars_list = list(self._variables_cache.get(event_key, selected_event.variables or []))
+        else:
+            vars_list = list(selected_event.variables or [])
         if not vars_list:
-            self.vars_widget.update(Text("Variables: (none captured for this frame)", style=self.STORY_HELP))
+            self.vars_widget.update(Text("Variables (none captured for this frame)", style=self.STORY_HELP))
+            tree = self.vars_tree_widget
+            tree.root.set_label("Variables")
+            tree.root.remove_children()
+            tree.root.expand()
+            tree.refresh()
+            self._vars_tree_current_key = event_key
+            self._vars_tree_scroll_by_frame[event_key] = 0.0
+            self._vars_tree_signature = None
             return
 
-        panel_width = max(20, self.vars_widget.size.width - 2)
-        panel_height = max(1, self.vars_widget.size.height)
+        vars_signature = tuple(vars_list)
+        target_scroll = self._vars_tree_scroll_by_frame.get(event_key, 0.0)
+        if self._vars_tree_signature == vars_signature:
+            self.vars_tree_widget.scroll_to(y=target_scroll, animate=False, immediate=True)
+            self._vars_tree_current_key = event_key
+            return
 
-        items: list[Text] = []
-        max_item_width = 0
-        for name, value in vars_list:
-            entry = Text()
-            entry.append(f"{name}", style=self.STORY_META_HIGHLIGHT)
-            entry.append("=", style=self.STORY_HELP)
-            entry.append(value, style="#f8f8f2")
-            if len(entry.plain) > 48:
-                entry = Text(entry.plain[:45] + "...", style="#f8f8f2")
-            max_item_width = max(max_item_width, len(entry.plain))
-            items.append(entry)
+        class _Node:
+            __slots__ = ("name", "value", "children")
 
-        col_width = max(12, min(48, max_item_width + 2))
-        cols = max(1, panel_width // col_width)
-        data_rows = max(1, panel_height - 1)
-        capacity = cols * data_rows
+            def __init__(self, name: str):
+                self.name = name
+                self.value = ""
+                self.children: dict[str, _Node] = {}
 
-        shown = items[:capacity]
-        hidden_count = max(0, len(items) - len(shown))
+        root: dict[str, _Node] = {}
+        for full_name, value in vars_list:
+            parts = [part for part in full_name.split(".") if part]
+            if not parts:
+                continue
 
-        output = Text()
-        output.append("Variables", style=f"bold {self.STORY_META_SELECTED}")
-        output.append(f"  ({len(items)} in scope)", style=self.STORY_HELP)
-        output.append("\n")
+            head = parts[0]
+            node = root.get(head)
+            if node is None:
+                node = _Node(head)
+                root[head] = node
 
-        for row in range(data_rows):
-            row_entries: list[Text] = []
-            for col in range(cols):
-                idx = row * cols + col
-                if idx >= len(shown):
-                    break
-                cell = shown[idx].copy()
-                pad = col_width - len(cell.plain)
-                if pad > 0:
-                    cell.append(" " * pad)
-                row_entries.append(cell)
+            current = node
+            for part in parts[1:]:
+                nxt = current.children.get(part)
+                if nxt is None:
+                    nxt = _Node(part)
+                    current.children[part] = nxt
+                current = nxt
 
-            if row_entries:
-                for cell in row_entries:
-                    output.append_text(cell)
-                output.append("\n")
+            current.value = value if value not in {"", "{...}"} else "?"
 
-        if hidden_count > 0:
-            output.append(f"+{hidden_count} more", style=self.STORY_HELP)
+        self.vars_widget.update(
+            Text.assemble(
+                ("Variables", f"bold {self.STORY_META_SELECTED}"),
+                (f" ({len(root)} roots)", self.STORY_HELP),
+            )
+        )
 
-        self.vars_widget.update(output)
+        tree = self.vars_tree_widget
+        tree.root.set_label("Variables")
+        tree.root.remove_children()
+        tree.root.expand()
+
+        def _label(node: _Node) -> Text:
+            label = Text()
+            label.append(node.name, style=self.STORY_META_HIGHLIGHT)
+            if node.value:
+                val = node.value
+                if len(val) > 80:
+                    val = val[:77] + "..."
+                label.append(" = ", style=self.STORY_HELP)
+                label.append(val, style="#f8f8f2")
+            return label
+
+        def _append(tree_node, item: _Node) -> None:
+            allow_expand = bool(item.children)
+            label = _label(item)
+            child_tree = tree_node.add(
+                label,
+                expand=True,
+                allow_expand=allow_expand,
+            )
+            for name in sorted(item.children.keys()):
+                _append(child_tree, item.children[name])
+
+        for name in sorted(root.keys()):
+            _append(tree.root, root[name])
+
+        tree.root.expand_all()
+
+        self._vars_tree_current_key = event_key
+        self._vars_tree_signature = vars_signature
+        tree.refresh()
+        tree.scroll_to(y=target_scroll, animate=False, immediate=True)
 
     def _render_code_panel(self) -> None:
         if self.code_widget is None:
@@ -1122,12 +1128,13 @@ class TestDebuggerScreen(Screen[None]):
         if not force and signature == self.last_signature:
             return
 
+        self._ensure_vars_panel_height()
+
         frames = self._line_frames()
         total = len(frames)
         if total > 0 and is_debug_active(self.test):
             self.selected_frame_index = total - 1
         self._ensure_selected_frame_index()
-        window_start, window_end = self._timeline_window(total)
         selected = None
         if 0 <= self.selected_frame_index < total:
             selected = frames[self.selected_frame_index]
@@ -1138,45 +1145,19 @@ class TestDebuggerScreen(Screen[None]):
             timeline_status = "on" if self.test.timeline_capture_enabled or global_state.timeline_capture_enabled else "off"
             self.header_widget.update(
                 Text(
-                    f"Test Story: {self.test.name} [{status}]  Debug: {debug_status}  Recording: {timeline_status}  Zoom: {self.zoom_level}x"
+                    f"Test Story: {self.test.name} [{status}]  Debug: {debug_status}  Recording: {timeline_status}"
                 )
             )
-
-        overview_width = 80
-        if self.timeline_overview_widget is not None:
-            overview_width = max(8, self.timeline_overview_widget.size.width - 2)
-            overview = self._build_overview_text(overview_width, window_start, window_end)
-            self.timeline_overview_widget.update(overview)
-
-        if self.timeline_detail_widget is not None:
-            detail_width = max(8, self.timeline_detail_widget.size.width - 2)
-            detail = self._build_detail_text(detail_width, window_start, window_end)
-            self.timeline_detail_widget.update(detail)
-
-        if self.timeline_meta_widget is not None:
-            meta = Text()
-            meta.append(f"Steps {window_start + 1 if total else 0}-{window_end} / {total}    ")
-            if selected is not None:
-                meta.append(
-                    f"selected {self.selected_frame_index + 1}/{total}",
-                    style=f"bold {self.STORY_META_SELECTED}",
-                )
-                meta.append("\n")
-                meta.append(
-                    f"{self._display_path(selected.file_path)}:{selected.line}",
-                    style=self.STORY_META_HIGHLIGHT,
-                )
-                if selected.function:
-                    meta.append(f"  fn={selected.function}", style=self.STORY_META_HIGHLIGHT)
-            else:
-                meta.append("No line frame selected. Press R to run.", style=self.STORY_HELP)
-            meta.append("\n")
-            meta.append(
-                "Help: click bars or <-/-> or Ctrl+<- / Ctrl+-> to scrub, N/I/O/C/K to step, A auto-trace, R rerun/restart debug, D debug toggle",
-                style=self.STORY_HELP,
-            )
-            self.timeline_meta_widget.update(meta)
 
         self._render_code_panel()
         self._render_variables_panel(selected)
+
+        if selected is not None:
+            event_key = (selected.index, selected.file_path, selected.line)
+            if event_key not in self._variables_cache:
+                if self._variables_task is None or self._variables_task.done():
+                    self._variables_task = asyncio.create_task(
+                        self._fetch_expanded_variables_for_frame(selected)
+                    )
+
         self.last_signature = signature

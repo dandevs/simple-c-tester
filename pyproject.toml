@@ -10,6 +10,7 @@ dependencies = [
     "rich>=13.7.0",
     "watchdog>=3.0.0",
     "textual>=0.68.0",
+    "pygdbmi>=0.11.0",
 ]
 
 [project.scripts]

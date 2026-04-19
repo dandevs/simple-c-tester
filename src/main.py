@@ -67,6 +67,18 @@ def parse_args():
         default=10,
         help="Skip sequential same-file line frames in Test Story (default: 10)",
     )
+    parser.add_argument(
+        "--tsv-vars-depth",
+        type=int,
+        default=2,
+        help="Variable expansion depth for Test Story viewer (default: 2)",
+    )
+    parser.add_argument(
+        "--tsv-variables-height",
+        type=int,
+        default=10,
+        help="Variables panel height in Test Story viewer (default: 10)",
+    )
     return parser.parse_args()
 
 
@@ -77,6 +89,8 @@ async def _main():
     global_state.tsv_lines_above = max(0, int(args.tsv_lines_above))
     global_state.tsv_lines_below = max(0, int(args.tsv_lines_below))
     global_state.tsv_skip_seq_lines = max(1, int(args.tsv_skip_seq_lines))
+    global_state.tsv_vars_depth = max(1, int(args.tsv_vars_depth))
+    global_state.tsv_variables_height = max(3, int(args.tsv_variables_height))
 
     tests_dir = Path("tests")
     if not tests_dir.is_dir():

@@ -1,102 +1,25 @@
-import ast
 import asyncio
 import contextlib
 import os
-import re
 from dataclasses import dataclass
 
-
-_RESULT_RE = re.compile(r"^(\d+)\^(.*)$")
-_KV_STRING_RE = re.compile(r'([a-zA-Z0-9_-]+)="((?:\\.|[^"\\])*)"')
+from pygdbmi.gdbmiparser import parse_response
 
 
-def _decode_mi_c_string(raw: str) -> str:
-    if not raw:
-        return ""
+def _as_int(value, default: int = 0) -> int:
     try:
-        return ast.literal_eval(raw)
-    except Exception:
-        return raw.strip('"')
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
-def _extract_kv(line: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for match in _KV_STRING_RE.finditer(line):
-        key = match.group(1)
-        value = bytes(match.group(2), "utf-8").decode("unicode_escape", errors="replace")
-        values[key] = value
-    return values
-
-
-def _extract_list_payload(line: str, key: str) -> str:
-    marker = f"{key}=["
-    start = line.find(marker)
-    if start < 0:
-        return ""
-
-    i = start + len(marker)
-    payload_start = i
-    depth = 1
-    in_string = False
-    escaped = False
-
-    while i < len(line):
-        ch = line[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-        else:
-            if ch == '"':
-                in_string = True
-            elif ch == "[":
-                depth += 1
-            elif ch == "]":
-                depth -= 1
-                if depth == 0:
-                    return line[payload_start:i]
-        i += 1
-
-    return ""
-
-
-def _split_top_level_objects(payload: str) -> list[str]:
-    objects: list[str] = []
-    depth = 0
-    start = -1
-    in_string = False
-    escaped = False
-
-    for i, ch in enumerate(payload):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-            continue
-
-        if ch == '"':
-            in_string = True
-            continue
-
-        if ch == "{":
-            if depth == 0:
-                start = i + 1
-            depth += 1
-            continue
-
-        if ch == "}":
-            depth -= 1
-            if depth == 0 and start >= 0:
-                objects.append(payload[start:i])
-                start = -1
-
-    return objects
+def _as_token(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -115,7 +38,7 @@ class GdbMIController:
         self.binary_path = binary_path
         self.env = env
         self.proc: asyncio.subprocess.Process | None = None
-        self._pending: dict[int, asyncio.Future[str]] = {}
+        self._pending: dict[int, asyncio.Future[dict]] = {}
         self._token = 1
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
@@ -157,9 +80,7 @@ class GdbMIController:
             "/opt/*",
             "/nix/*",
         ):
-            await self._send_command(
-                f'-interpreter-exec console "skip file {path}"'
-            )
+            await self._send_command(f'-interpreter-exec console "skip file {path}"')
 
     async def break_main_and_run(self) -> DebugStopEvent:
         await self._send_command("-break-insert main")
@@ -181,26 +102,171 @@ class GdbMIController:
         return await self._run_until_stop("-exec-interrupt")
 
     async def list_simple_variables(self, timeout: float = 2.0) -> list[tuple[str, str]]:
-        line = await self._send_command("-stack-list-variables --simple-values", timeout=timeout)
-        if "^error" in line:
+        result = await self._send_command("-stack-list-variables --simple-values", timeout=timeout)
+        return self._parse_variable_list(result)
+
+    async def list_all_variables(self, timeout: float = 2.0) -> list[tuple[str, str]]:
+        result = await self._send_command("-stack-list-variables --all-values", timeout=timeout)
+        return self._parse_variable_list(result)
+
+    def _parse_variable_list(self, result: dict) -> list[tuple[str, str]]:
+        if result.get("message") == "error":
             return []
 
-        variables: list[tuple[str, str]] = []
-        payload = _extract_list_payload(line, "variables")
-        if not payload:
-            return variables
+        payload = result.get("payload")
+        if not isinstance(payload, dict):
+            return []
 
-        for obj in _split_top_level_objects(payload):
-            fields = _extract_kv(obj)
-            name = fields.get("name")
-            if not name:
+        variables = payload.get("variables")
+        if not isinstance(variables, list):
+            return []
+
+        parsed: list[tuple[str, str]] = []
+        for item in variables:
+            if not isinstance(item, dict):
                 continue
-            value = fields.get("value", "?")
+            name = item.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            value = item.get("value", "?")
+            if not isinstance(value, str):
+                value = str(value)
             if len(value) > 120:
                 value = value[:117] + "..."
-            variables.append((name, value))
+            parsed.append((name, value))
+        return parsed
 
-        return variables
+    async def var_create(
+        self,
+        expression: str,
+        frame: str = "*",
+        timeout: float = 2.0,
+    ) -> dict | None:
+        escaped = expression.replace("\\", "\\\\").replace('"', '\\"')
+        result = await self._send_command(
+            f'-var-create - {frame} "{escaped}"',
+            timeout=timeout,
+        )
+        if result.get("message") == "error":
+            return None
+
+        payload = result.get("payload")
+        if not isinstance(payload, dict):
+            return None
+
+        name = payload.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+
+        value = payload.get("value", "?")
+        if not isinstance(value, str):
+            value = str(value)
+
+        return {
+            "name": name,
+            "numchild": _as_int(payload.get("numchild"), 0),
+            "value": value,
+            "type": str(payload.get("type", "")),
+        }
+
+    async def var_list_children(
+        self,
+        var_name: str,
+        timeout: float = 2.0,
+    ) -> list[dict]:
+        result = await self._send_command(
+            f"-var-list-children --all-values {var_name}",
+            timeout=timeout,
+        )
+        if result.get("message") == "error":
+            return []
+
+        payload = result.get("payload")
+        if not isinstance(payload, dict):
+            return []
+
+        children = payload.get("children")
+        if not isinstance(children, list):
+            return []
+
+        normalized: list[dict] = []
+        for item in children:
+            if not isinstance(item, dict):
+                continue
+            child = item.get("child") if isinstance(item.get("child"), dict) else item
+            if not isinstance(child, dict):
+                continue
+
+            child_name = child.get("name")
+            if not isinstance(child_name, str) or not child_name:
+                continue
+
+            value = child.get("value", "?")
+            if not isinstance(value, str):
+                value = str(value)
+            if len(value) > 120:
+                value = value[:117] + "..."
+
+            normalized.append(
+                {
+                    "name": child_name,
+                    "exp": str(child.get("exp", "")),
+                    "value": value,
+                    "numchild": _as_int(child.get("numchild"), 0),
+                    "type": str(child.get("type", "")),
+                }
+            )
+
+        return normalized
+
+    async def var_delete(self, var_name: str, timeout: float = 1.0) -> None:
+        if not var_name:
+            return
+        try:
+            await self._send_command(f"-var-delete {var_name}", timeout=timeout)
+        except Exception:
+            pass
+
+    async def var_evaluate(self, var_name: str, timeout: float = 1.5) -> str | None:
+        if not var_name:
+            return None
+        result = await self._send_command(
+            f"-var-evaluate-expression {var_name}",
+            timeout=timeout,
+        )
+        if result.get("message") == "error":
+            return None
+
+        payload = result.get("payload")
+        if not isinstance(payload, dict):
+            return None
+
+        value = payload.get("value")
+        if not isinstance(value, str):
+            return None
+        if len(value) > 120:
+            value = value[:117] + "..."
+        return value
+
+    async def evaluate_expression(self, expression: str, timeout: float = 1.5) -> str | None:
+        escaped = expression.replace("\\", "\\\\").replace('"', '\\"')
+        result = await self._send_command(
+            f'-data-evaluate-expression "{escaped}"',
+            timeout=timeout,
+        )
+        if result.get("message") == "error":
+            return None
+
+        payload = result.get("payload")
+        if not isinstance(payload, dict):
+            return None
+
+        value = payload.get("value")
+        if not isinstance(value, str):
+            return None
+        if len(value) > 120:
+            value = value[:117] + "..."
+        return value
 
     async def shutdown(self) -> None:
         if self.proc is None:
@@ -229,22 +295,22 @@ class GdbMIController:
 
     async def _run_until_stop(self, command: str, timeout: float = 30.0) -> DebugStopEvent:
         async with self._command_lock:
-            result_line = await self._send_command(command, timeout=timeout)
-            if "^error" in result_line:
-                return DebugStopEvent(reason="error", raw=result_line)
+            result = await self._send_command(command, timeout=timeout)
+            if result.get("message") == "error":
+                return DebugStopEvent(reason="error", raw=str(result))
             try:
                 return await asyncio.wait_for(self._stop_events.get(), timeout=timeout)
             except asyncio.TimeoutError:
-                return DebugStopEvent(reason="timeout", raw=result_line)
+                return DebugStopEvent(reason="timeout", raw=str(result))
 
-    async def _send_command(self, command: str, timeout: float = 10.0) -> str:
+    async def _send_command(self, command: str, timeout: float = 10.0) -> dict:
         if self.proc is None or self.proc.stdin is None:
             raise RuntimeError("gdb process not started")
 
         token = self._token
         self._token += 1
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
+        future: asyncio.Future[dict] = loop.create_future()
         self._pending[token] = future
 
         payload = f"{token}{command}\n".encode()
@@ -266,31 +332,46 @@ class GdbMIController:
                 return
 
             text = line.decode(errors="replace").rstrip("\r\n")
-            if not text:
+            if not text or text == "(gdb)":
                 continue
 
-            match = _RESULT_RE.match(text)
-            if match:
-                token = int(match.group(1))
-                future = self._pending.get(token)
+            try:
+                record = parse_response(text)
+            except Exception:
+                record = None
+
+            if not isinstance(record, dict):
+                if self._console_output_callback is not None:
+                    self._console_output_callback(text)
+                continue
+
+            rtype = record.get("type")
+            message = record.get("message")
+            token = _as_token(record.get("token"))
+            payload = record.get("payload")
+
+            if rtype == "result":
+                future = self._pending.get(token) if token is not None else None
                 if future is not None and not future.done():
-                    future.set_result(text)
+                    future.set_result(record)
                 continue
 
-            if text.startswith("*stopped"):
-                await self._stop_events.put(self._parse_stop_event(text))
+            if rtype == "notify" and message == "stopped":
+                stop_event = self._parse_stop_event(payload, text)
+                await self._stop_events.put(stop_event)
                 continue
 
-            if text.startswith("@"):
-                chunk = _decode_mi_c_string(text[1:])
-                if self._target_output_callback is not None and chunk:
-                    self._target_output_callback(chunk)
+            if rtype in {"target", "output"}:
+                if self._target_output_callback is not None and isinstance(payload, str) and payload:
+                    self._target_output_callback(payload)
                 continue
 
-            if text.startswith("~") or text.startswith("&"):
-                chunk = _decode_mi_c_string(text[1:])
-                if self._console_output_callback is not None and chunk:
-                    self._console_output_callback(chunk)
+            if rtype in {"console", "log", "notify"}:
+                if self._console_output_callback is not None:
+                    if isinstance(payload, str) and payload:
+                        self._console_output_callback(payload)
+                    elif message:
+                        self._console_output_callback(str(message))
                 continue
 
             if self._console_output_callback is not None:
@@ -307,25 +388,23 @@ class GdbMIController:
             if text and self._console_output_callback is not None:
                 self._console_output_callback(text)
 
-    def _parse_stop_event(self, text: str) -> DebugStopEvent:
-        values = _extract_kv(text)
-        reason = values.get("reason", "")
-        file_path = values.get("fullname") or values.get("file", "")
-        function = values.get("func", "")
-        line_value = values.get("line", "0")
-        signal_name = values.get("signal-name", "")
+    def _parse_stop_event(self, payload, raw: str) -> DebugStopEvent:
+        payload_dict = payload if isinstance(payload, dict) else {}
+        reason = str(payload_dict.get("reason", ""))
+        signal_name = str(payload_dict.get("signal-name", ""))
+
+        frame = payload_dict.get("frame") if isinstance(payload_dict.get("frame"), dict) else {}
+        file_path = str(frame.get("fullname") or frame.get("file") or payload_dict.get("fullname") or payload_dict.get("file") or "")
+        function = str(frame.get("func") or payload_dict.get("func") or "")
+        line_number = _as_int(frame.get("line") or payload_dict.get("line"), 0)
+
         exit_code = None
-        exit_code_raw = values.get("exit-code")
+        exit_code_raw = payload_dict.get("exit-code")
         if exit_code_raw is not None:
             try:
-                exit_code = int(exit_code_raw, 0)
+                exit_code = int(str(exit_code_raw), 0)
             except ValueError:
                 exit_code = None
-
-        try:
-            line_number = int(line_value)
-        except ValueError:
-            line_number = 0
 
         if file_path and not os.path.isabs(file_path):
             file_path = os.path.abspath(file_path)
@@ -337,7 +416,7 @@ class GdbMIController:
             function=function,
             exit_code=exit_code,
             signal_name=signal_name,
-            raw=text,
+            raw=raw,
         )
 
 

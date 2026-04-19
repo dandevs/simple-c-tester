@@ -131,6 +131,7 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
         test.include_dirs = []
         if test.state == TestState.RUNNING:
             test.state = TestState.CANCELLED
+            test.cancelled_by_user = False
             test.time_state_changed = time.monotonic()
             process = active_processes.get(os.path.abspath(test.source_path))
             if process is not None and process.returncode is None:

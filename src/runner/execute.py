@@ -4,6 +4,7 @@ import shutil
 import time
 import asyncio
 import re
+from pathlib import Path
 from typing import Callable
 
 import state as global_state
@@ -21,9 +22,17 @@ from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
 MAX_TIMELINE_EVENTS = 12000
 MAX_DEBUG_LOG_LINES = 4000
 _debug_sessions: dict[str, GdbMIController] = {}
+_active_run_tasks: dict[str, asyncio.Task] = {}
 _source_line_cache: dict[str, list[str]] = {}
+_user_function_cache: set[str] = set()
+_user_function_cache_key: tuple[tuple[str, int], ...] | None = None
 
 _CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+_FUNC_DEF_RE = re.compile(
+    r"^\s*(?:static\s+)?(?:inline\s+)?(?:const\s+)?"
+    r"[A-Za-z_][\w\s\*]*?\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{",
+    re.MULTILINE,
+)
 _CONTROL_WORDS = {
     "if",
     "for",
@@ -40,6 +49,15 @@ _NON_USER_PREFIXES = (
     "/opt/",
     "/nix/",
 )
+
+
+def _looks_pointer_value(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if stripped in {"0x0", "(nil)", "nullptr"}:
+        return False
+    return stripped.startswith("0x")
 
 
 def _test_key(test: Test) -> str:
@@ -146,11 +164,60 @@ def _line_has_likely_call(file_path: str, line_number: int) -> bool:
     if not stripped or stripped.startswith("#"):
         return False
 
-    for match in _CALL_RE.finditer(stripped):
-        name = match.group(1)
-        if name not in _CONTROL_WORDS:
-            return True
-    return False
+    call_names = [
+        match.group(1)
+        for match in _CALL_RE.finditer(stripped)
+        if match.group(1) not in _CONTROL_WORDS
+    ]
+    if not call_names:
+        return False
+
+    user_functions = _discover_user_function_names()
+    if not user_functions:
+        return False
+
+    return any(name in user_functions for name in call_names)
+
+
+def _discover_user_function_names() -> set[str]:
+    global _user_function_cache_key
+    global _user_function_cache
+
+    tracked_files: list[tuple[str, int]] = []
+    source_files: list[str] = []
+    for root in ("src", "tests"):
+        root_path = Path(root)
+        if not root_path.is_dir():
+            continue
+        for file_path in root_path.rglob("*.c"):
+            abs_path = str(file_path.resolve())
+            source_files.append(abs_path)
+            try:
+                tracked_files.append((abs_path, int(file_path.stat().st_mtime_ns)))
+            except OSError:
+                tracked_files.append((abs_path, 0))
+
+    tracked_files.sort()
+    cache_key = tuple(tracked_files)
+    if _user_function_cache_key == cache_key:
+        return _user_function_cache
+
+    discovered: set[str] = set()
+    for abs_path in source_files:
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read()
+        except OSError:
+            continue
+
+        for match in _FUNC_DEF_RE.finditer(content):
+            name = match.group(1)
+            if name and name not in _CONTROL_WORDS:
+                discovered.add(name)
+
+    _user_function_cache_key = cache_key
+    _user_function_cache = discovered
+    return discovered
 
 
 def _is_user_code_path(file_path: str) -> bool:
@@ -191,8 +258,95 @@ def _stop_has_source_location(stop_event: DebugStopEvent) -> bool:
 
 
 async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[str, str]]:
+    async def _expand_children(
+        var_name: str,
+        label_prefix: str,
+        depth: int,
+        max_depth: int,
+    ) -> list[tuple[str, str]]:
+        if depth > max_depth:
+            return []
+
+        children = await controller.var_list_children(var_name)
+        expanded: list[tuple[str, str]] = []
+        for child in children:
+            child_var_name = str(child.get("name", ""))
+            child_exp = str(child.get("exp", "") or child_var_name)
+            if not child_var_name or not child_exp:
+                continue
+
+            child_value = str(child.get("value", "?"))
+            if child_value in {"?", "", "{...}"}:
+                evaluated = await controller.var_evaluate(child_var_name, timeout=1.0)
+                if evaluated is not None:
+                    child_value = evaluated
+            if child_value in {"", "{...}"}:
+                child_value = "?"
+            label = f"{label_prefix}.{child_exp}"
+            expanded.append((label, child_value))
+
+            child_numchild = int(child.get("numchild", 0))
+            if child_numchild > 0 and depth < max_depth:
+                expanded.extend(
+                    await _expand_children(
+                        child_var_name,
+                        label,
+                        depth + 1,
+                        max_depth,
+                    )
+                )
+
+        return expanded
+
+    async def _expand_variable(
+        name: str,
+        value: str,
+        max_depth: int,
+    ) -> list[tuple[str, str]]:
+        base = [(name, value)]
+
+        should_expand = value == "?" or _looks_pointer_value(value)
+        if not should_expand or max_depth <= 0:
+            return base
+
+        expression = name if value == "?" else f"*({name})"
+        created = await controller.var_create(expression, frame="*")
+        if created is None:
+            return base
+
+        try:
+            numchild = int(created.get("numchild", 0))
+            if numchild <= 0:
+                return base
+            expanded_children = await _expand_children(
+                str(created.get("name", "")),
+                name,
+                depth=1,
+                max_depth=max_depth,
+            )
+            return base + expanded_children if expanded_children else base
+        finally:
+            await controller.var_delete(str(created.get("name", "")))
+
     try:
-        return await controller.list_simple_variables(timeout=1.5)
+        simple_vars = await controller.list_simple_variables(timeout=1.5)
+        if not simple_vars:
+            simple_vars = await controller.list_all_variables(timeout=1.5)
+
+        max_depth = max(1, int(global_state.tsv_vars_depth))
+        flattened: list[tuple[str, str]] = []
+        for name, value in simple_vars:
+            flattened.extend(await _expand_variable(name, value, max_depth))
+
+        seen: set[str] = set()
+        deduped: list[tuple[str, str]] = []
+        for name, value in flattened:
+            if name in seen:
+                continue
+            seen.add(name)
+            deduped.append((name, value))
+
+        return deduped[:250]
     except Exception:
         return []
 
@@ -295,6 +449,10 @@ def _ensure_debug_build_mode(enabled: bool) -> None:
     refresh_dependency_graph()
 
 
+def restore_normal_build_mode() -> None:
+    _ensure_debug_build_mode(False)
+
+
 async def _terminate_active_processes() -> None:
     for controller in list(_debug_sessions.values()):
         try:
@@ -325,7 +483,8 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
 
     _append_timeline_event(test, "compile_start", f"compiling {binary_path}")
     make_args = ["make", "-f", "test_build/Makefile"]
-    if global_state.debug_build_enabled:
+    force_rebuild = test.force_rebuild_once
+    if global_state.debug_build_enabled or force_rebuild:
         make_args.append("-B")
     make_args.append(binary_path)
     make_proc = await asyncio.create_subprocess_exec(
@@ -334,6 +493,8 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
         stderr=asyncio.subprocess.PIPE,
         env=proc_env,
     )
+    if force_rebuild:
+        test.force_rebuild_once = False
     active_processes[process_key] = make_proc
     _, make_stderr = await make_proc.communicate()
     if active_processes.get(process_key) is make_proc:
@@ -505,6 +666,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
 
 async def run_test(test: Test, on_complete: Callable[[], None]):
     process_key = _test_key(test)
+    current_task = asyncio.current_task()
     try:
         if test.state == TestState.CANCELLED:
             return
@@ -545,6 +707,8 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             global_state.dep_graph_reason = "runner error"
             _append_timeline_event(test, "runner_error", str(e))
     finally:
+        if current_task is not None and _active_run_tasks.get(process_key) is current_task:
+            _active_run_tasks.pop(process_key, None)
         if test.state != TestState.CANCELLED:
             active_processes.pop(process_key, None)
         on_complete()
@@ -637,6 +801,55 @@ async def stop_debug_session(test: Test) -> None:
         global_state.active_debug_test_key = None
 
 
+async def cancel_test_and_restore_normal_build(test: Test) -> None:
+    test_key = _test_key(test)
+    run_task = _active_run_tasks.get(test_key)
+    has_active_run_task = run_task is not None and not run_task.done()
+
+    test.timeline_capture_enabled = False
+    if not any(t.timeline_capture_enabled for t in state.all_tests):
+        global_state.timeline_capture_enabled = False
+
+    test.cancelled_by_user = True
+    test.rerun_after_user_cancel = True
+    test.force_rebuild_once = True
+
+    await stop_debug_session(test)
+
+    process = active_processes.get(test_key)
+    if process is not None and process.returncode is None:
+        try:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), timeout=1.0)
+        except (ProcessLookupError, asyncio.TimeoutError):
+            try:
+                process.kill()
+                await process.wait()
+            except ProcessLookupError:
+                pass
+        finally:
+            active_processes.pop(test_key, None)
+
+    if has_active_run_task:
+        test.state = TestState.CANCELLED
+        test.time_state_changed = time.monotonic()
+        run_task.cancel()
+    else:
+        test.state = TestState.PENDING
+        test.time_start = 0.0
+        test.time_state_changed = time.monotonic()
+
+    test.debug_running = False
+    if not test.debug_exited:
+        test.debug_exited = True
+        test.debug_exit_code = None
+
+    restore_normal_build_mode()
+
+    if not has_active_run_task:
+        state_changed()
+
+
 async def _debug_step(test: Test, action: str) -> None:
     controller = _get_debug_session(test)
     if controller is None:
@@ -723,6 +936,10 @@ def is_debug_active(test: Test) -> bool:
     return _get_debug_session(test) is not None
 
 
+def get_debug_session(test: Test) -> GdbMIController | None:
+    return _get_debug_session(test)
+
+
 def state_changed():
     tests_to_run: list[Test] = []
     pending_tests = sorted(
@@ -743,12 +960,24 @@ def state_changed():
         def on_complete(completed_test: Test = test):
             state.available_runners += 1
             if completed_test.state == TestState.CANCELLED:
-                completed_test.state = TestState.PENDING
-                completed_test.time_start = 0.0
-                completed_test.time_state_changed = time.monotonic()
+                if completed_test.rerun_after_user_cancel:
+                    completed_test.state = TestState.PENDING
+                    completed_test.cancelled_by_user = False
+                    completed_test.rerun_after_user_cancel = False
+                    completed_test.time_start = 0.0
+                    completed_test.time_state_changed = time.monotonic()
+                elif completed_test.cancelled_by_user:
+                    completed_test.cancelled_by_user = False
+                    completed_test.time_start = 0.0
+                    completed_test.time_state_changed = time.monotonic()
+                else:
+                    completed_test.state = TestState.PENDING
+                    completed_test.time_start = 0.0
+                    completed_test.time_state_changed = time.monotonic()
             state_changed()
 
-        asyncio.ensure_future(run_test(test, on_complete))
+        run_task = asyncio.ensure_future(run_test(test, on_complete))
+        _active_run_tasks[_test_key(test)] = run_task
 
     if len(tests_to_run) > 0:
         state_changed()
