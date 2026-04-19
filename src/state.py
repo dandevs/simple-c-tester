@@ -11,3 +11,6 @@ dep_graph_reason = "dependency graph not initialized"
 debug_build_enabled = False
 timeline_capture_enabled = False
 active_debug_test_key: str | None = None
+tsv_lines_above = 4
+tsv_lines_below = 4
+tsv_skip_seq_lines = 10

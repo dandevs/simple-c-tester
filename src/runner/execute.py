@@ -64,6 +64,7 @@ def _append_timeline_event(
     line: int = 0,
     function: str = "",
     stream: str = "",
+    variables: list[tuple[str, str]] | None = None,
 ) -> None:
     event = TimelineEvent(
         index=len(test.timeline_events) + 1,
@@ -74,6 +75,7 @@ def _append_timeline_event(
         line=line,
         function=function,
         stream=stream,
+        variables=list(variables or []),
     )
     test.timeline_events.append(event)
     if len(test.timeline_events) > MAX_TIMELINE_EVENTS:
@@ -184,7 +186,62 @@ async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEve
     return next_event
 
 
-def _record_stop_event(test: Test, stop_event: DebugStopEvent) -> None:
+def _stop_has_source_location(stop_event: DebugStopEvent) -> bool:
+    return bool(stop_event.file_path) and stop_event.line > 0
+
+
+async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[str, str]]:
+    try:
+        return await controller.list_simple_variables(timeout=1.5)
+    except Exception:
+        return []
+
+
+class _SequentialVarCaptureDecider:
+    def __init__(self, skip_seq: int):
+        self.skip_seq = max(1, skip_seq)
+        self.prev_abs_path = ""
+        self.prev_function = ""
+        self.prev_line = 0
+        self.seq_since_emit = 0
+
+    def should_capture(self, stop_event: DebugStopEvent) -> bool:
+        if not _stop_has_source_location(stop_event):
+            return False
+
+        current_abs_path = os.path.abspath(stop_event.file_path)
+        if self.prev_line <= 0:
+            self.prev_abs_path = current_abs_path
+            self.prev_function = stop_event.function
+            self.prev_line = stop_event.line
+            self.seq_since_emit = 0
+            return True
+
+        same_file = current_abs_path == self.prev_abs_path
+        same_function = stop_event.function == self.prev_function
+        is_sequential = same_file and same_function and stop_event.line == (self.prev_line + 1)
+
+        include = False
+        if is_sequential:
+            self.seq_since_emit += 1
+            if self.seq_since_emit >= self.skip_seq:
+                include = True
+                self.seq_since_emit = 0
+        else:
+            include = True
+            self.seq_since_emit = 0
+
+        self.prev_abs_path = current_abs_path
+        self.prev_function = stop_event.function
+        self.prev_line = stop_event.line
+        return include
+
+
+def _record_stop_event(
+    test: Test,
+    stop_event: DebugStopEvent,
+    variables: list[tuple[str, str]] | None = None,
+) -> None:
     _append_timeline_event(
         test,
         "step",
@@ -192,6 +249,7 @@ def _record_stop_event(test: Test, stop_event: DebugStopEvent) -> None:
         file_path=stop_event.file_path,
         line=stop_event.line,
         function=stop_event.function,
+        variables=variables,
     )
 
 
@@ -225,9 +283,13 @@ def _debug_callbacks(test: Test):
 
 
 def _ensure_debug_build_mode(enabled: bool) -> None:
-    if global_state.debug_build_enabled == enabled:
+    desired = bool(enabled)
+    current = bool(global_state.debug_build_enabled)
+    global_state.debug_build_enabled = desired
+
+    if desired == current and not desired:
         return
-    global_state.debug_build_enabled = enabled
+
     generate_makefile()
     build_project_sources()
     refresh_dependency_graph()
@@ -262,11 +324,12 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
     binary_path = test_binary_path(test.source_path)
 
     _append_timeline_event(test, "compile_start", f"compiling {binary_path}")
+    make_args = ["make", "-f", "test_build/Makefile"]
+    if global_state.debug_build_enabled:
+        make_args.append("-B")
+    make_args.append(binary_path)
     make_proc = await asyncio.create_subprocess_exec(
-        "make",
-        "-f",
-        "test_build/Makefile",
-        binary_path,
+        *make_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=proc_env,
@@ -406,9 +469,11 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
     if controller.proc is not None:
         active_processes[process_key] = controller.proc
     await controller.configure()
+    var_capture = _SequentialVarCaptureDecider(global_state.tsv_skip_seq_lines)
 
     stop_event = await controller.break_main_and_run()
-    _record_stop_event(test, stop_event)
+    vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(stop_event) else []
+    _record_stop_event(test, stop_event, vars_for_event)
 
     max_steps = 50000
     step_count = 0
@@ -417,7 +482,8 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             _append_timeline_event(test, "debug_cancelled", "cancelled while tracing")
             return
         stop_event = await _auto_trace_step(controller, stop_event)
-        _record_stop_event(test, stop_event)
+        vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(stop_event) else []
+        _record_stop_event(test, stop_event, vars_for_event)
         step_count += 1
 
     if step_count >= max_steps and not stop_event_is_terminal(stop_event):
@@ -533,8 +599,10 @@ async def start_debug_session(test: Test, auto_trace: bool = True) -> None:
         if controller.proc is not None:
             active_processes[test_key] = controller.proc
         await controller.configure()
+        var_capture = _SequentialVarCaptureDecider(1)
         initial_stop = await controller.break_main_and_run()
-        _record_stop_event(test, initial_stop)
+        vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(initial_stop) else []
+        _record_stop_event(test, initial_stop, vars_for_event)
 
         if stop_event_is_terminal(initial_stop):
             _apply_terminal_stop(test, initial_stop)
@@ -587,7 +655,8 @@ async def _debug_step(test: Test, action: str) -> None:
     else:
         return
 
-    _record_stop_event(test, stop_event)
+    vars_for_event = await _capture_scope_variables(controller)
+    _record_stop_event(test, stop_event, vars_for_event)
     if stop_event_is_terminal(stop_event):
         _apply_terminal_stop(test, stop_event)
         _append_timeline_event(test, "debug_end", _stop_reason_message(stop_event))
@@ -622,6 +691,7 @@ async def debug_continue_auto_trace(test: Test) -> None:
         return None
 
     max_steps = 50000
+    var_capture = _SequentialVarCaptureDecider(global_state.tsv_skip_seq_lines)
     for _ in range(max_steps):
         if not test.debug_running:
             return
@@ -635,7 +705,8 @@ async def debug_continue_auto_trace(test: Test) -> None:
             function=latest_event.function if latest_event is not None else "",
         )
         stop_event = await _auto_trace_step(controller, current_stop)
-        _record_stop_event(test, stop_event)
+        vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(stop_event) else []
+        _record_stop_event(test, stop_event, vars_for_event)
         if stop_event_is_terminal(stop_event):
             _apply_terminal_stop(test, stop_event)
             _append_timeline_event(test, "debug_end", _stop_reason_message(stop_event))

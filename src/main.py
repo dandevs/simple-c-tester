@@ -49,6 +49,24 @@ def parse_args():
         action="store_true",
         help="Compile tests with debug flags (-g -O0)",
     )
+    parser.add_argument(
+        "--tsv-lines-above",
+        type=int,
+        default=4,
+        help="Test Story viewer lines shown above current line (default: 4)",
+    )
+    parser.add_argument(
+        "--tsv-lines-below",
+        type=int,
+        default=4,
+        help="Test Story viewer lines shown below current line (default: 4)",
+    )
+    parser.add_argument(
+        "--tsv-skip-seq-lines",
+        type=int,
+        default=10,
+        help="Skip sequential same-file line frames in Test Story (default: 10)",
+    )
     return parser.parse_args()
 
 
@@ -56,6 +74,9 @@ async def _main():
     args = parse_args()
     global_state.timeline_capture_enabled = bool(args.timeline)
     global_state.debug_build_enabled = bool(args.debug_build or args.timeline)
+    global_state.tsv_lines_above = max(0, int(args.tsv_lines_above))
+    global_state.tsv_lines_below = max(0, int(args.tsv_lines_below))
+    global_state.tsv_skip_seq_lines = max(1, int(args.tsv_skip_seq_lines))
 
     tests_dir = Path("tests")
     if not tests_dir.is_dir():

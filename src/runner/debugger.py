@@ -28,6 +28,77 @@ def _extract_kv(line: str) -> dict[str, str]:
     return values
 
 
+def _extract_list_payload(line: str, key: str) -> str:
+    marker = f"{key}=["
+    start = line.find(marker)
+    if start < 0:
+        return ""
+
+    i = start + len(marker)
+    payload_start = i
+    depth = 1
+    in_string = False
+    escaped = False
+
+    while i < len(line):
+        ch = line[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    return line[payload_start:i]
+        i += 1
+
+    return ""
+
+
+def _split_top_level_objects(payload: str) -> list[str]:
+    objects: list[str] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+
+    for i, ch in enumerate(payload):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+
+        if ch == "{":
+            if depth == 0:
+                start = i + 1
+            depth += 1
+            continue
+
+        if ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                objects.append(payload[start:i])
+                start = -1
+
+    return objects
+
+
 @dataclass
 class DebugStopEvent:
     reason: str = ""
@@ -108,6 +179,28 @@ class GdbMIController:
 
     async def interrupt(self) -> DebugStopEvent:
         return await self._run_until_stop("-exec-interrupt")
+
+    async def list_simple_variables(self, timeout: float = 2.0) -> list[tuple[str, str]]:
+        line = await self._send_command("-stack-list-variables --simple-values", timeout=timeout)
+        if "^error" in line:
+            return []
+
+        variables: list[tuple[str, str]] = []
+        payload = _extract_list_payload(line, "variables")
+        if not payload:
+            return variables
+
+        for obj in _split_top_level_objects(payload):
+            fields = _extract_kv(obj)
+            name = fields.get("name")
+            if not name:
+                continue
+            value = fields.get("value", "?")
+            if len(value) > 120:
+                value = value[:117] + "..."
+            variables.append((name, value))
+
+        return variables
 
     async def shutdown(self) -> None:
         if self.proc is None:

@@ -13,6 +13,7 @@ class TimelineEvent:
     line: int = 0
     function: str = ""
     stream: str = ""
+    variables: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass

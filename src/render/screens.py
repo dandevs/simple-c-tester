@@ -4,6 +4,7 @@ import os
 import asyncio
 import time
 from rich.console import Group
+from rich.syntax import Syntax
 
 from rich.text import Text
 from rich.cells import cell_len
@@ -391,16 +392,11 @@ class TestDebuggerScreen(Screen[None]):
         border: none;
         padding: 0 1;
     }
-    #debug-log {
-        height: 8;
-        min-height: 6;
+    #vars-panel {
+        height: 4;
+        min-height: 3;
+        padding: 0 1;
         border: none;
-        scrollbar-size-vertical: 0;
-        scrollbar-size-horizontal: 0;
-        scrollbar-color: transparent;
-        scrollbar-background: transparent;
-        scrollbar-background-hover: transparent;
-        scrollbar-background-active: transparent;
     }
     #debug-footer {
         height: 1;
@@ -418,7 +414,9 @@ class TestDebuggerScreen(Screen[None]):
     STORY_META_SELECTED = "#ffd166"
     STORY_HELP = "#7f8a9d"
     STORY_LINE_MARKER = "#ff6b6b"
-    STORY_CURRENT_LINE = "#263238"
+    STORY_CODE_BG = "#272822"
+    STORY_CURRENT_LINE = "#34352d"
+    STORY_CURRENT_LINE_SELECTED = "#49483e"
 
     BINDINGS = [
         Binding("escape", "close", "Back"),
@@ -448,16 +446,17 @@ class TestDebuggerScreen(Screen[None]):
         self.timeline_detail_widget: Static | None = None
         self.timeline_meta_widget: Static | None = None
         self.code_widget: Static | None = None
-        self.log_widget: RichLog | None = None
+        self.vars_widget: Static | None = None
         self.footer_widget: Static | None = None
         self.last_signature: tuple | None = None
         self.selected_frame_index = -1
         self.zoom_level = 1
         self._source_cache: dict[str, list[str]] = {}
+        self._line_frames_cache_key: tuple | None = None
+        self._line_frames_cache: list = []
         self._footer_timer = None
         self._action_task: asyncio.Task | None = None
         self._last_log_count = -1
-        self._follow_latest_frames = True
 
     def compose(self) -> ComposeResult:
         yield Static("", id="debug-header")
@@ -465,13 +464,7 @@ class TestDebuggerScreen(Screen[None]):
         yield Static("", id="timeline-detail")
         yield Static("", id="timeline-meta")
         yield Static("", id="story-code")
-        yield RichLog(
-            id="debug-log",
-            wrap=False,
-            markup=False,
-            highlight=False,
-            auto_scroll=True,
-        )
+        yield Static("", id="vars-panel")
         yield Static("", id="debug-footer")
 
     async def on_mount(self) -> None:
@@ -480,7 +473,7 @@ class TestDebuggerScreen(Screen[None]):
         self.timeline_detail_widget = self.query_one("#timeline-detail", Static)
         self.timeline_meta_widget = self.query_one("#timeline-meta", Static)
         self.code_widget = self.query_one("#story-code", Static)
-        self.log_widget = self.query_one("#debug-log", RichLog)
+        self.vars_widget = self.query_one("#vars-panel", Static)
         self.footer_widget = self.query_one("#debug-footer", Static)
         self.test.timeline_capture_enabled = True
         self._set_footer_text()
@@ -523,7 +516,8 @@ class TestDebuggerScreen(Screen[None]):
         self.test.stderr_raw = b""
         self.test.compile_err = ""
         self.test.compile_err_raw = b""
-        self._follow_latest_frames = True
+        self._line_frames_cache_key = None
+        self._line_frames_cache = []
         self.selected_frame_index = -1
 
     async def action_toggle_debug(self) -> None:
@@ -579,7 +573,6 @@ class TestDebuggerScreen(Screen[None]):
             return
         self._ensure_selected_frame_index()
         self.selected_frame_index = max(0, self.selected_frame_index - 1)
-        self._follow_latest_frames = False
         self._refresh_view(force=True)
 
     def action_timeline_next(self) -> None:
@@ -588,7 +581,6 @@ class TestDebuggerScreen(Screen[None]):
             return
         self._ensure_selected_frame_index()
         self.selected_frame_index = min(len(frames) - 1, self.selected_frame_index + 1)
-        self._follow_latest_frames = self.selected_frame_index >= len(frames) - 1
         self._refresh_view(force=True)
 
     def action_timeline_prev_10(self) -> None:
@@ -606,7 +598,6 @@ class TestDebuggerScreen(Screen[None]):
             len(frames) - 1,
             max(0, self.selected_frame_index + offset),
         )
-        self._follow_latest_frames = self.selected_frame_index >= len(frames) - 1
         self._refresh_view(force=True)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
@@ -619,7 +610,6 @@ class TestDebuggerScreen(Screen[None]):
             index = self._mouse_to_overview_index(event)
             if index is not None:
                 self.selected_frame_index = index
-                self._follow_latest_frames = False
                 self._refresh_view(force=True)
                 event.prevent_default()
                 event.stop()
@@ -629,7 +619,6 @@ class TestDebuggerScreen(Screen[None]):
             index = self._mouse_to_detail_index(event)
             if index is not None:
                 self.selected_frame_index = index
-                self._follow_latest_frames = False
                 self._refresh_view(force=True)
                 event.prevent_default()
                 event.stop()
@@ -712,7 +701,6 @@ class TestDebuggerScreen(Screen[None]):
             last_event_sig,
             self.selected_frame_index,
             self.zoom_level,
-            self._follow_latest_frames,
         )
 
     def _base_footer_text(self) -> str:
@@ -742,11 +730,68 @@ class TestDebuggerScreen(Screen[None]):
         self._set_footer_text()
 
     def _line_frames(self):
-        return [
+        skip_seq = max(1, int(global_state.tsv_skip_seq_lines))
+        debug_mode = is_debug_active(self.test) or self.test.debug_running
+        cache_key = (
+            id(self.test.timeline_events),
+            len(self.test.timeline_events),
+            self.test.time_state_changed,
+            skip_seq,
+            debug_mode,
+        )
+        if self._line_frames_cache_key == cache_key:
+            return self._line_frames_cache
+
+        frames = [
             event
             for event in self.test.timeline_events
             if self._event_has_useful_source_line(event.file_path, event.line)
         ]
+
+        if len(frames) <= 1:
+            self._line_frames_cache_key = cache_key
+            self._line_frames_cache = frames
+            return frames
+
+        if debug_mode:
+            self._line_frames_cache_key = cache_key
+            self._line_frames_cache = frames
+            return frames
+
+        if skip_seq <= 1:
+            self._line_frames_cache_key = cache_key
+            self._line_frames_cache = frames
+            return frames
+
+        filtered = [frames[0]]
+        seq_since_emit = 0
+        prev = frames[0]
+        prev_abs_path = os.path.abspath(prev.file_path)
+
+        for frame in frames[1:]:
+            frame_abs_path = os.path.abspath(frame.file_path)
+            same_file = frame_abs_path == prev_abs_path
+            same_function = frame.function == prev.function
+            is_sequential = same_file and same_function and frame.line == (prev.line + 1)
+
+            if is_sequential:
+                seq_since_emit += 1
+                if seq_since_emit >= skip_seq:
+                    filtered.append(frame)
+                    seq_since_emit = 0
+            else:
+                filtered.append(frame)
+                seq_since_emit = 0
+
+            prev = frame
+            prev_abs_path = frame_abs_path
+
+        if filtered[-1] != frames[-1]:
+            filtered.append(frames[-1])
+
+        self._line_frames_cache_key = cache_key
+        self._line_frames_cache = filtered
+        return filtered
 
     def _event_has_useful_source_line(self, file_path: str, line_number: int) -> bool:
         if not file_path or line_number <= 0:
@@ -765,6 +810,25 @@ class TestDebuggerScreen(Screen[None]):
 
         if self.selected_frame_index < 0 or self.selected_frame_index >= total:
             self.selected_frame_index = total - 1
+
+    def _display_path(self, file_path: str) -> str:
+        if not file_path:
+            return ""
+
+        abs_path = os.path.abspath(file_path)
+        try:
+            rel_path = os.path.relpath(abs_path, os.getcwd())
+            if rel_path.startswith(".."):
+                return abs_path
+            return rel_path
+        except ValueError:
+            return abs_path
+
+    def _detect_language(self, file_path: str) -> str:
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in {".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}:
+            return "cpp"
+        return "c"
 
     def _timeline_window(self, total: int) -> tuple[int, int]:
         if total <= 0:
@@ -845,8 +909,11 @@ class TestDebuggerScreen(Screen[None]):
         if self.code_widget is not None:
             height = max(1, self.code_widget.size.height)
 
-        card_height = 5
-        card_count = max(1, height // card_height)
+        lines_above = max(0, int(global_state.tsv_lines_above))
+        lines_below = max(0, int(global_state.tsv_lines_below))
+        code_line_count = 1 + lines_above + lines_below
+        card_height = 1 + code_line_count
+        card_count = max(1, (height + 1) // (card_height + 1))
         card_count = min(total, card_count)
 
         center = self.selected_frame_index
@@ -859,31 +926,120 @@ class TestDebuggerScreen(Screen[None]):
 
     def _build_frame_snippet(
         self,
+        source_path: str,
         source_lines: list[str],
         line_number: int,
         snippet_start: int,
         snippet_end: int,
         selected: bool,
-    ) -> Text:
-        snippet = Text()
-        number_width = len(str(max(1, snippet_end)))
-        current_line_style = f"on {self.STORY_CURRENT_LINE}"
+        code_width: int,
+    ) -> Syntax:
+        padded_width = max(1, code_width)
+        snippet_lines = [
+            source_lines[line_no - 1].ljust(padded_width)
+            for line_no in range(snippet_start, snippet_end + 1)
+        ]
+        snippet_text = "\n".join(snippet_lines)
+        line_count = len(snippet_lines)
+        syntax = Syntax(
+            snippet_text,
+            self._detect_language(source_path),
+            line_numbers=True,
+            start_line=snippet_start,
+            highlight_lines={line_number},
+            code_width=padded_width,
+            word_wrap=False,
+            theme="monokai",
+            background_color=self.STORY_CODE_BG,
+        )
+
+        if not selected:
+            for local_line in range(1, line_count + 1):
+                syntax.stylize_range(
+                    "#9aa0a6",
+                    (local_line, 0),
+                    (local_line, padded_width),
+                )
+
+        local_line = (line_number - snippet_start) + 1
+        line_length = padded_width
+        highlight_bg = self.STORY_CURRENT_LINE_SELECTED if selected else self.STORY_CURRENT_LINE
+        syntax.stylize_range(
+            f"on {highlight_bg}",
+            (local_line, 0),
+            (local_line, line_length),
+        )
         if selected:
-            current_line_style = f"bold {self.STORY_LINE_MARKER} on {self.STORY_CURRENT_LINE}"
+            syntax.stylize_range(
+                "bold",
+                (local_line, 0),
+                (local_line, line_length),
+            )
 
-        for render_line in range(snippet_start, snippet_end + 1):
-            code = source_lines[render_line - 1]
-            if render_line == line_number:
-                snippet.append(f"{render_line:>{number_width}} | ", style=current_line_style)
-                snippet.append(code if code else " ", style=current_line_style)
-            else:
-                snippet.append(f"{render_line:>{number_width}} | ", style=self.STORY_HELP)
-                snippet.append(code, style="default")
+        return syntax
 
-            if render_line < snippet_end:
-                snippet.append("\n")
+    def _render_variables_panel(self, selected_event) -> None:
+        if self.vars_widget is None:
+            return
 
-        return snippet
+        if selected_event is None:
+            self.vars_widget.update(Text("Variables: (no selected frame)", style=self.STORY_HELP))
+            return
+
+        vars_list = list(selected_event.variables or [])
+        if not vars_list:
+            self.vars_widget.update(Text("Variables: (none captured for this frame)", style=self.STORY_HELP))
+            return
+
+        panel_width = max(20, self.vars_widget.size.width - 2)
+        panel_height = max(1, self.vars_widget.size.height)
+
+        items: list[Text] = []
+        max_item_width = 0
+        for name, value in vars_list:
+            entry = Text()
+            entry.append(f"{name}", style=self.STORY_META_HIGHLIGHT)
+            entry.append("=", style=self.STORY_HELP)
+            entry.append(value, style="#f8f8f2")
+            if len(entry.plain) > 48:
+                entry = Text(entry.plain[:45] + "...", style="#f8f8f2")
+            max_item_width = max(max_item_width, len(entry.plain))
+            items.append(entry)
+
+        col_width = max(12, min(48, max_item_width + 2))
+        cols = max(1, panel_width // col_width)
+        data_rows = max(1, panel_height - 1)
+        capacity = cols * data_rows
+
+        shown = items[:capacity]
+        hidden_count = max(0, len(items) - len(shown))
+
+        output = Text()
+        output.append("Variables", style=f"bold {self.STORY_META_SELECTED}")
+        output.append(f"  ({len(items)} in scope)", style=self.STORY_HELP)
+        output.append("\n")
+
+        for row in range(data_rows):
+            row_entries: list[Text] = []
+            for col in range(cols):
+                idx = row * cols + col
+                if idx >= len(shown):
+                    break
+                cell = shown[idx].copy()
+                pad = col_width - len(cell.plain)
+                if pad > 0:
+                    cell.append(" " * pad)
+                row_entries.append(cell)
+
+            if row_entries:
+                for cell in row_entries:
+                    output.append_text(cell)
+                output.append("\n")
+
+        if hidden_count > 0:
+            output.append(f"+{hidden_count} more", style=self.STORY_HELP)
+
+        self.vars_widget.update(output)
 
     def _render_code_panel(self) -> None:
         if self.code_widget is None:
@@ -903,6 +1059,8 @@ class TestDebuggerScreen(Screen[None]):
         start_index, end_index = self._frame_cards_window(total)
         width = max(8, self.code_widget.size.width - 2)
         renderables = []
+        lines_above = max(0, int(global_state.tsv_lines_above))
+        lines_below = max(0, int(global_state.tsv_lines_below))
 
         for index in range(start_index, end_index):
             event = frames[index]
@@ -912,56 +1070,52 @@ class TestDebuggerScreen(Screen[None]):
                 continue
 
             line_number = event.line
-            snippet_start = max(1, line_number - 1)
-            snippet_end = min(len(source_lines), line_number + 1)
+            snippet_start = max(1, line_number - lines_above)
+            snippet_end = min(len(source_lines), line_number + lines_below)
             selected = index == self.selected_frame_index
+            path_text = self._display_path(source_path)
 
             title = Text()
             if selected:
                 title.append(">> ", style=f"bold {self.STORY_META_SELECTED}")
-                title.append(
-                    f"Frame {index + 1}/{total} (current)",
-                    style=f"bold {self.STORY_META_SELECTED}",
-                )
+                title.append(path_text, style=f"bold {self.STORY_META_SELECTED}")
             else:
-                title.append("   ", style=self.STORY_HELP)
-                title.append(f"Frame {index + 1}/{total}", style=self.STORY_META_HIGHLIGHT)
-            title.append("  ")
-            title.append(f"{event.file_path}:{line_number}", style=self.STORY_META_HIGHLIGHT)
+                title.append("   ", style="#7f868d")
+                title.append(path_text, style="#95a3aa")
+            title.append(":")
+            if selected:
+                title.append(str(line_number), style=self.STORY_META_HIGHLIGHT)
+            else:
+                title.append(str(line_number), style="#95a3aa")
             if event.function:
-                title.append(f"  fn={event.function}", style=self.STORY_HELP)
+                if selected:
+                    title.append(f"  fn={event.function}", style=self.STORY_HELP)
+                else:
+                    title.append(f"  fn={event.function}", style="#7f868d")
 
+            number_width = len(str(max(1, snippet_end)))
+            code_width = max(1, width - (number_width + 5))
             snippet_text = self._build_frame_snippet(
+                source_path,
                 source_lines,
                 line_number,
                 snippet_start,
                 snippet_end,
                 selected,
+                code_width,
             )
 
             renderables.append(title)
             renderables.append(snippet_text)
             if index < end_index - 1:
-                renderables.append(Text("-" * width, style=self.STORY_BAR_BASE))
+                sep_style = self.STORY_BAR_BASE if selected else "#3a3f4b"
+                renderables.append(Text("-" * width, style=sep_style))
 
         if not renderables:
             self.code_widget.update(Text("No renderable story frames.", style=self.STORY_HELP))
             return
 
         self.code_widget.update(Group(*renderables))
-
-    def _render_log_panel(self) -> None:
-        if self.log_widget is None:
-            return
-        if len(self.test.debug_logs) == self._last_log_count:
-            return
-
-        log = self.log_widget
-        log.clear()
-        for line in self.test.debug_logs[-200:]:
-            log.write(line)
-        log.scroll_end(animate=False, immediate=True)
-        self._last_log_count = len(self.test.debug_logs)
 
     def _refresh_view(self, force: bool = False) -> None:
         signature = self._signature()
@@ -970,9 +1124,7 @@ class TestDebuggerScreen(Screen[None]):
 
         frames = self._line_frames()
         total = len(frames)
-        if self._follow_latest_frames and total > 0 and (
-            self.test.debug_running or is_debug_active(self.test) or self.test.state == TestState.RUNNING
-        ):
+        if total > 0 and is_debug_active(self.test):
             self.selected_frame_index = total - 1
         self._ensure_selected_frame_index()
         window_start, window_end = self._timeline_window(total)
@@ -1003,14 +1155,17 @@ class TestDebuggerScreen(Screen[None]):
 
         if self.timeline_meta_widget is not None:
             meta = Text()
-            meta.append(f"Frame {window_start + 1 if total else 0}-{window_end} / {total}    ")
+            meta.append(f"Steps {window_start + 1 if total else 0}-{window_end} / {total}    ")
             if selected is not None:
                 meta.append(
                     f"selected {self.selected_frame_index + 1}/{total}",
                     style=f"bold {self.STORY_META_SELECTED}",
                 )
                 meta.append("\n")
-                meta.append(f"{selected.file_path}:{selected.line}", style=self.STORY_META_HIGHLIGHT)
+                meta.append(
+                    f"{self._display_path(selected.file_path)}:{selected.line}",
+                    style=self.STORY_META_HIGHLIGHT,
+                )
                 if selected.function:
                     meta.append(f"  fn={selected.function}", style=self.STORY_META_HIGHLIGHT)
             else:
@@ -1023,5 +1178,5 @@ class TestDebuggerScreen(Screen[None]):
             self.timeline_meta_widget.update(meta)
 
         self._render_code_panel()
-        self._render_log_panel()
+        self._render_variables_panel(selected)
         self.last_signature = signature
