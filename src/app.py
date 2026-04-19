@@ -69,7 +69,13 @@ class TestRunnerApp(App[None]):
             self.theme = "textual-ansi"
 
     def compose(self) -> ComposeResult:
-        yield RichLog(id="tree-view", wrap=False, markup=False, highlight=False)
+        yield RichLog(
+            id="tree-view",
+            wrap=False,
+            markup=False,
+            highlight=False,
+            auto_scroll=False,
+        )
         if self.watch_mode:
             yield Static("", id="dep-warning")
             yield Static("Tests  |  Ctrl+C: Exit", id="controls-footer")
@@ -192,10 +198,24 @@ class TestRunnerApp(App[None]):
             return
 
         log = self.log_widget
+        previous_scroll_x = log.scroll_x
+        previous_scroll_y = log.scroll_y
+        near_bottom = (log.max_scroll_y - log.scroll_y) <= 1
+
         log.clear()
         self.rendered_output_boxes = render_tree(
             log, self.output_max_lines, max(20, log.size.width or self.size.width or 80)
         )
+
+        if near_bottom:
+            log.scroll_end(animate=False, immediate=True)
+        else:
+            log.scroll_to(
+                x=previous_scroll_x,
+                y=previous_scroll_y,
+                animate=False,
+                immediate=True,
+            )
 
     def _update_dep_warning(self) -> None:
         if not self.watch_mode:
