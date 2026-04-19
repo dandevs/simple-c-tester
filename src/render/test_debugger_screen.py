@@ -127,11 +127,20 @@ class TestDebuggerScreen(Screen[None]):
         padding: 0 1;
         text-style: bold;
     }
+    #debug-body {
+        height: 1fr;
+        min-height: 1;
+        layout: vertical;
+    }
     #story-code {
         height: 1fr;
         min-height: 1;
         border: none;
         padding: 0 1;
+    }
+    #vars-column {
+        layout: vertical;
+        width: 1fr;
     }
     #vars-panel {
         height: 1;
@@ -164,6 +173,7 @@ class TestDebuggerScreen(Screen[None]):
     STORY_CODE_BG = "#272822"
     STORY_CURRENT_LINE = "#34352d"
     STORY_CURRENT_LINE_SELECTED = "#49483e"
+    SIDE_VARS_MIN_WIDTH = 100
 
     BINDINGS = [
         Binding("escape", "close", "Back"),
@@ -193,7 +203,9 @@ class TestDebuggerScreen(Screen[None]):
         super().__init__()
         self.test = test
         self.header_widget: Static | None = None
+        self.body_widget: Container | None = None
         self.code_widget: Static | None = None
+        self.vars_container: Container | None = None
         self.vars_widget: Static | None = None
         self.vars_tree_widget: TextualTree | None = None
         self.footer_widget: Static | None = None
@@ -217,14 +229,21 @@ class TestDebuggerScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="debug-header")
-        yield Static("", id="story-code")
-        yield Static(Text("Variables", style=f"bold {self.STORY_META_SELECTED}"), id="vars-panel")
-        yield TextualTree("Variables", id="vars-tree")
+        with Container(id="debug-body"):
+            yield Static("", id="story-code")
+            with Container(id="vars-column"):
+                yield Static(
+                    Text("Variables", style=f"bold {self.STORY_META_SELECTED}"),
+                    id="vars-panel",
+                )
+                yield TextualTree("Variables", id="vars-tree")
         yield Static("", id="debug-footer")
 
     async def on_mount(self) -> None:
         self.header_widget = self.query_one("#debug-header", Static)
+        self.body_widget = self.query_one("#debug-body", Container)
         self.code_widget = self.query_one("#story-code", Static)
+        self.vars_container = self.query_one("#vars-column", Container)
         self.vars_widget = self.query_one("#vars-panel", Static)
         self.vars_tree_widget = self.query_one("#vars-tree", TextualTree)
         self.footer_widget = self.query_one("#debug-footer", Static)
@@ -233,8 +252,8 @@ class TestDebuggerScreen(Screen[None]):
         self.test.timeline_capture_enabled = True
         self._set_footer_text()
         self._refresh_view(force=True)
-        if not self._line_frames() and self.test.state != TestState.RUNNING and not is_debug_active(self.test):
-            self._set_footer_text("No Test Story yet. Recording is on; press R to run.")
+        if self.test.state != TestState.RUNNING and not is_debug_active(self.test):
+            await self.action_rerun_test()
         self.set_interval(0.1, self._tick)
 
     async def action_close(self) -> None:
@@ -261,11 +280,12 @@ class TestDebuggerScreen(Screen[None]):
             return
 
         self._reset_story_state()
+        self._follow_latest_frame = False
         self.test.state = TestState.PENDING
         self.test.time_start = 0.0
         self.test.time_state_changed = time.monotonic()
         state_changed()
-        self._set_footer_text("Queued test rerun.")
+        self._set_footer_text("Auto-started story capture.")
 
     async def _restart_debug_session(self) -> None:
         await stop_debug_session(self.test)
@@ -468,6 +488,10 @@ class TestDebuggerScreen(Screen[None]):
         )
         self._refresh_view(force=True)
 
+    def on_resize(self, event: events.Resize) -> None:
+        self._line_frames_cache_key = None
+        self._refresh_view(force=True)
+
     def on_mouse_down(self, event: events.MouseDown) -> None:
         pass
 
@@ -544,6 +568,9 @@ class TestDebuggerScreen(Screen[None]):
             len(self._variables_cache),
             int(global_state.tsv_variables_height),
             self.variables_visible,
+            int(self.size.width),
+            int(self.size.height),
+            self.full_file_view,
         )
 
     def _base_footer_text(self) -> str:
@@ -577,22 +604,31 @@ class TestDebuggerScreen(Screen[None]):
         self._set_footer_text()
 
     def _ensure_vars_panel_height(self) -> None:
-        if self.vars_widget is None or self.vars_tree_widget is None:
+        if (
+            self.body_widget is None
+            or self.code_widget is None
+            or self.vars_container is None
+            or self.vars_widget is None
+            or self.vars_tree_widget is None
+        ):
             return
+
+        side_layout = int(self.size.width) >= self.SIDE_VARS_MIN_WIDTH
+        desired_layout = "horizontal" if side_layout else "vertical"
+        if self.body_widget.styles.layout != desired_layout:
+            self.body_widget.styles.layout = desired_layout
+            self._line_frames_cache_key = None
+            self.set_timer(0.05, lambda: self._refresh_view(force=True))
 
         if not self.variables_visible:
-            if self.vars_widget.styles.display != "none":
-                self.vars_widget.styles.display = "none"
-            if self.vars_tree_widget.styles.display != "none":
-                self.vars_tree_widget.styles.display = "none"
-            if self.code_widget is not None:
-                self.code_widget.styles.height = "1fr"
+            if self.vars_container.styles.display != "none":
+                self.vars_container.styles.display = "none"
+            self.code_widget.styles.height = "1fr"
+            self.code_widget.styles.width = "1fr"
             return
 
-        if self.vars_widget.styles.display == "none":
-            self.vars_widget.styles.display = "block"
-        if self.vars_tree_widget.styles.display == "none":
-            self.vars_tree_widget.styles.display = "block"
+        if self.vars_container.styles.display == "none":
+            self.vars_container.styles.display = "block"
 
         if self.vars_widget.styles.height != 1:
             self.vars_widget.styles.height = 1
@@ -602,6 +638,27 @@ class TestDebuggerScreen(Screen[None]):
         footer_height = 1
         vars_label_height = 1
         body_height = max(3, available - header_height - footer_height)
+
+        if side_layout:
+            total_width = max(40, int(self.size.width))
+            vars_width = max(30, int(total_width * 0.34))
+            max_vars_width = max(30, total_width - 40)
+            vars_width = min(vars_width, max_vars_width)
+
+            self.code_widget.styles.height = "1fr"
+            self.code_widget.styles.width = "1fr"
+            if self.vars_container.styles.width != vars_width:
+                self.vars_container.styles.width = vars_width
+            self.vars_container.styles.height = "1fr"
+
+            vars_tree_height = max(3, body_height - vars_label_height)
+            if self.vars_tree_widget.styles.height != vars_tree_height:
+                self.vars_tree_widget.styles.height = vars_tree_height
+            return
+
+        self.code_widget.styles.width = "1fr"
+        self.vars_container.styles.width = "1fr"
+        self.vars_container.styles.height = "auto"
 
         story_height = max(1, int(body_height * 0.7))
         vars_total_height = max(2, body_height - story_height)
@@ -756,7 +813,7 @@ class TestDebuggerScreen(Screen[None]):
 
         frames = self._line_frames()
         total = len(frames)
-        if total > 0 and self._follow_latest_frame:
+        if total > 0 and self._follow_latest_frame and is_debug_active(self.test):
             self.selected_frame_index = total - 1
         self.selected_frame_index = ensure_selected_frame_index(
             self.selected_frame_index, total
