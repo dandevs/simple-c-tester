@@ -91,24 +91,7 @@ class TestRunnerApp(App[None]):
             loop = asyncio.get_running_loop()
             handler = DebounceHandler(loop)
             observer = Observer()
-            watched_dirs = set()
-            tests_dir = os.path.abspath("tests")
-            src_dir = os.path.abspath("src")
-            watched_dirs.add(tests_dir)
-            watched_dirs.add(src_dir)
-            for test in state.all_tests:
-                for dep in test.dependencies:
-                    dep_dir = os.path.dirname(dep)
-                    if dep_dir not in watched_dirs:
-                        watched_dirs.add(dep_dir)
-                for inc_dir in test.include_dirs:
-                    abs_inc = os.path.abspath(inc_dir)
-                    if abs_inc not in watched_dirs:
-                        watched_dirs.add(abs_inc)
-            for d in watched_dirs:
-                if not os.path.isdir(d):
-                    continue
-                observer.schedule(handler, d, recursive=True)
+            observer.schedule(handler, os.path.abspath("."), recursive=True)
             observer.daemon = True
             observer.start()
             self.observer = observer

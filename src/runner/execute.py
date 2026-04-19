@@ -5,6 +5,7 @@ import time
 import asyncio
 from typing import Callable
 
+import state as global_state
 from state import state, active_processes, subprocess_columns
 from models import Test, TestState
 from .makefile import refresh_dependency_graph
@@ -61,6 +62,8 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             test.compile_err_raw = make_stderr
             test.state = TestState.FAILED
             test.time_state_changed = time.monotonic()
+            global_state.dep_graph_ready = False
+            global_state.dep_graph_reason = "compile errors present"
             return
 
         test.compile_err = ""
@@ -166,6 +169,8 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             test.stderr_raw = b""
             test.state = TestState.FAILED
             test.time_state_changed = time.monotonic()
+            global_state.dep_graph_ready = False
+            global_state.dep_graph_reason = "runner error"
     finally:
         if test.state != TestState.CANCELLED:
             active_processes.pop(process_key, None)

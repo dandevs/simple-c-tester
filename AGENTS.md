@@ -1,112 +1,84 @@
 # AGENTS.md
 
 ## Project
-C test runner written in Python. Scans `c/tests/` for `*.c` files, compiles each with gcc via a generated Makefile, runs the executable, and reports results. Uses Textual TUI with a single RichLog widget that renders the full test tree as styled text — suites and tests shown with Unicode box-drawing characters (`├──`, `└──`, `│`), and test output displayed inline in bordered boxes (`╭─╮`, `│`, `╰─╯`) beneath each test that has output.
+C test runner with a Textual TUI. Discovers `*.c` files under `c/tests/`, compiles each via a generated Makefile, runs the binary, and renders live results in a Unicode tree view.
 
-## Installation
+## Running
+```bash
+# Must run from c/ — the app resolves tests/ and test_build/ relative to CWD
+cd c
+python3 ../src/main.py
+```
+- Do **NOT** use `python3 -m src.main` — imports are bare (`from models import ...`) and rely on `sys.path` manipulation in `main.py`
+- No positional source-dir argument; test path is hardcoded as `tests`
+
+## CLI Flags
+- `--parallel N` (default 4)
+- `--watch` — file change monitoring, re-runs affected tests
+- `--output-lines N` (default 10) — max lines in inline output boxes
+- `--theme ansi|default` (default `ansi`)
+
+## Setup
 ```bash
 pip install -r requirements.txt
 ```
+Requires Python 3.9+, gcc, and make on PATH.
 
-## Commands
-- **Run**: `python3 src/main.py` from repo root
-- **NOT** `python3 -m src.main` — imports use `from models import ...` which only works when running the file directly (Python adds `src/` to `sys.path`)
+## Build (PEX)
+```bash
+./build.sh   # → out/ctester.pex
+```
+Cross-platform (Linux/macOS/Windows, CPython 3.9). Run from `c/`: `../out/ctester.pex`.
 
-## Build
-- **Build**: `./build.sh` — creates a self-contained `out/ctester.pex` executable using pex
-- The `.pex` file is built for multiple platforms (Linux x86_64/aarch64, macOS x86_64/arm64, Windows x64) targeting Python 3.9
-- After building, copy to `c/ctester.pex` for distribution
-
-## CLI Flags
-- `--parallel N` — number of concurrent test runners (default 4)
-- `--watch` — watch for file changes, re-run affected tests
-- `--theme ansi|default` — UI theme (default: `ansi`). `ansi` uses Textual's `textual-ansi` theme which blends with the terminal's native colors. `default` uses Textual's standard `textual-dark` theme.
-
-There is **no** positional source-dir argument; the test path is hardcoded as `c/tests`.
+## Lint / Typecheck / Tests
+- No linter, formatter, or typechecker is configured in this repo
+- No Python test suite exists — the "tests" are C files in `c/tests/`
+- Verification: run the app itself against the C tests
 
 ## Architecture
-- `src/main.py` — entry point: `parse_args()`, `main()`, sys.path setup
-- `src/state.py` — shared mutable state: `state` (AppState), `dep_index`, `active_processes`, `subprocess_columns`, `dep_graph_ready`, `dep_graph_reason`
-- `src/app.py` — `TestRunnerApp` Textual TUI class (tree rendering delegates to `render/`, test dispatch delegates to `runner/`, file watching delegates to `watch/`; watches `tests/`, resolved include dirs, and dependency dirs in watch mode)
-- `src/models/` — `Test`, `Suite`, `AppState` dataclasses and `TestState` enum
-- `src/render/` — all UI rendering logic
-  - `styles.py` — style constant strings, `OutputBoxRenderMeta`, `OutputBoxRegion` dataclasses
+```
+src/main.py        entry, argparse, asyncio.run
+src/app.py         TestRunnerApp (Textual)
+src/state.py       global mutable state singleton
+src/models/        Test, Suite, AppState, TestState
+src/render/        tree/box rendering, labels, screens
+src/runner/        makefile generation, test execution, dep graph
+src/watch/         watchdog debounce handler
+src/runner/artifacts.py  path/name mangling for build artifacts
+```
 
-  - `labels.py` — elapsed time helpers, `suite_label()`, `test_label()` with spinner
-  - `output.py` — `get_test_output()`, `render_output_box()`, text wrapping/stripping helpers
-  - `tree.py` — `render_tree()`, `render_node()` standalone functions that walk the suite tree and write to RichLog
-  - `screens.py` — `TestOutputScreen` for full test output view
-- `src/runner/` — test execution and build logic
-  - `makefile.py` — `generate_makefile()`, `rebuild_dep_index()`, `resolve_include_dirs()`,
-    `discover_project_sources()`, `build_project_sources()`, dependency DB helpers, `refresh_dependency_graph()`
-  - `execute.py` — `run_test()`, `state_changed()`, `_terminate_active_processes()`; refreshes dependency graph after each compile attempt
-  - `state.py` — `all_tests_finished()`, `has_active_tests()`, `display_state_signature()`
-- `src/watch/` — file system watching
-  - `handler.py` — `DebounceHandler` (watchdog), `handle_file_changes()`; unmapped `src/` changes fall back to rerunning all tests
-- `test_build/` — compiled executables, `.d` dependency files, and a generated `Makefile` (build artifact, gitignored)
-  - `db.json` — dependency cache used to warm watch mode across runs
+- `src/runner/makefile.py` — `generate_makefile()`, include path resolution (`resolve_include_dirs` via iterative `gcc -E`), project source discovery and `libproject.a` build
+- `src/runner/execute.py` — `run_test()` invokes `make` then the binary; `state_changed()` dispatches tests via `asyncio.ensure_future()`
+- `src/runner/state.py` — helpers for checking completion state
+- All intra-src imports are bare (no `src.` prefix) — the package is not installed, `main.py` adds its own directory to `sys.path`
 
-## Textual UI
-- Single full-screen `RichLog` widget rendering the test tree with Unicode box-drawing characters
-- Suite and test nodes displayed with `├──`/`└──`/`│` tree guides
-- Inline output boxes (`╭─╮`, `│`, `╰─╯`) beneath tests that have compile errors, stderr, or stdout
-- Box borders colored red for failures, white for passes; tree guides styled white
-- Test names colored green (passed), bold red (failed), yellow with spinner (pending/running)
-- Elapsed time `[Xms]` shown after each node in `bright_black`
-- Header: app title and status
-- Watch mode footer includes a fixed warning line when the dependency graph is incomplete
-- Footer: keyboard bindings (q to quit)
-- Spinner animation for pending/running tests using Unicode braille characters
-- Elapsed timing updates on all nodes
-- `render_tree()` clears and redraws the full tree on each tick (100ms) when state changes
-- `render_node()` recursively walks suites/tests, computing tree prefix continuations
-- `render_output_box()` draws the bordered output box with proper tree continuation lines
-- `get_test_output()` collects compile_err, stderr, stdout as Rich Text lines (preserves ANSI colors)
+## Key Behaviors
+- Compilation goes through `make -f test_build/Makefile`, not direct `gcc` — enables incremental builds via `.d` dependency files
+- `.d` files are parsed after each make run to populate the dependency index for watch mode; persisted to `test_build/db.json`
+- Project `.c` files (excluding `main.c`, `tests/`, `test_build/`) are auto-discovered from resolved include dirs, compiled into `test_build/libproject.a`, and linked into each test — pre-built synchronously to avoid parallel race conditions
+- Artifact names use a readable + hash scheme: `test_artifact_stem()` in `src/runner/artifacts.py`
+- UI redraws the full tree every 100ms tick when state changes (single `RichLog` widget)
+- `state_changed()` is sync, uses `asyncio.ensure_future()` to schedule async work
 
-## Compilation Flow
-- `generate_makefile()` writes `test_build/Makefile` with one rule per test. Called after `populate_suites()` and when new tests are discovered in watch mode.
-- `generate_makefile()` uses the current console width (`subprocess_columns`) for `-fmessage-length` and is regenerated after resize before the next run.
-- `run_test()` calls `make -f test_build/Makefile test_build/<name>` — **not** direct `gcc`. Make handles incremental builds: if the binary is newer than its source and all `.d`-tracked header dependencies, compilation is skipped.
-- `.d` files are parsed **after** make returns — dependencies populate regardless of pass/fail and feed the `dep_index` used by watch mode.
-- Watch dependency data is merged from test `.d` files and project source/object `.d` files, then persisted to `test_build/db.json`.
-- Exit code 0 from make + exit code 0 from binary = PASSED. Non-zero from either = FAILED.
+## Watch Mode Details
+- Observes repo root (`.`) recursively — no need to pre-build watched directory lists
+- File change handling is serialized via an `asyncio.Lock` in `handle_file_changes()` to prevent overlapping/racy requeue passes during rapid saves
+- DebounceHandler tracks event kinds per-path (`dict[str, set[str]]`) and supports `modified`, `created`, `deleted`, `moved` events
+- Directory-only `modified` events are filtered as noise (editors touching directory metadata should not trigger reruns)
+- `tests/*.c` changes use precision reruns:
+  - existing test file edited → rerun only that test (via dependency mapping or direct source match)
+  - new test file created → add and run only that test
+  - test file deleted → remove that test from state and suite tree
+  - test file moved → treated as delete at old path + create at new path
+- Conservative rerun-all fallback only for genuinely uncertain dependency cases:
+  - unmapped changes under `src/`
+  - unmapped `.c`/`.h` files outside `tests/`
+  - directory create/delete/move events under `src/`
+- Dependency graph readiness (`dep_graph_ready`) is invalidated when:
+  - any test has a compile error (checked in `update_dep_graph_readiness()` and set in `run_test()`)
+  - a runner error occurs
+  - This prevents stale "ready" state from suppressing necessary rebuilds during error recovery
 
-## Include Path Resolution
-
-- `resolve_include_dirs()` auto-discovers `-I` flags per test using iterative `gcc -E`:
-  1. Run `gcc -E <test.c>` with current `-I` flags
-  2. If exit 0 → preprocessing succeeded, done
-  3. If stderr contains `fatal error: <header.h>: No such file or directory`:
-     - Search project tree for `<header.h>` (excluding `test_build/`)
-     - Add containing directory as `-I<dir>`
-     - Retry from step 1
-  4. Max 20 iterations; returns discovered include dirs
-- Results cached on `Test.include_dirs`; cleared in watch mode when sources change
-
-## Project Source Linking
-
-- `discover_project_sources()` scans resolved include dirs for `.c` files:
-  - Excludes `main.c` (program entry point convention)
-  - Excludes files in `tests/` or `test_build/`
-  - Returns sorted unique list of implementation sources
-- `generate_makefile()` generates:
-  - Object rules: `test_build/obj/<name>.o` from each project source (flattened path names with `__` separator)
-  - Library rule: `test_build/libproject.a` archives all objects (`ar rcs`)
-  - Test rules: each test links against `libproject.a`
-- `build_project_sources()` pre-builds library synchronously before test dispatch
-  - Avoids race condition when parallel tests try to build library simultaneously
-- Watch mode rebuilds library when project sources change
-- Watch mode shows a degraded warning when dependency coverage is incomplete; selective reruns become available after a clean successful pass.
-
-## Concurrency Notes
-- `state_changed()` is a **sync** function (not async) — it uses `asyncio.ensure_future()` to schedule `run_test()` and recurses to drain the pending queue
-- `available_runners` counter (not a semaphore) limits dispatch
-- Watchdog handler uses `threading.Timer` / `threading.Lock` for debouncing, then calls `loop.call_soon_threadsafe` back into the async loop
-- Textual app runs in async context; `_tick()` callback refreshes UI at 100ms intervals when active or state changes
-
-## Tooling
-- **Textual** (>=0.68.0) for interactive TUI with scrollable widgets
-- **Rich** (>=13.7.0) for ANSI/markup text styling in Textual widgets
-- **gcc** for C compilation (invoked via generated Makefile)
-- **watchdog** (>=3.0.0) for file system watching
-- Dependencies listed in `requirements.txt`
+## Gotchas
+- `requirements.txt` includes `pyperclip` for clipboard support in the output screen, but it's not listed in `pyproject.toml` dependencies — the app handles `ImportError` gracefully
+- The pex entry point is `main:entry` (not `src.main:entry`)

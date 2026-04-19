@@ -191,6 +191,11 @@ def update_dep_graph_readiness() -> None:
         global_state.dep_graph_reason = "no tests discovered"
         return
 
+    if any(test.compile_err.strip() for test in tests):
+        global_state.dep_graph_ready = False
+        global_state.dep_graph_reason = "compile errors present"
+        return
+
     if any(len(test.dependencies) == 0 for test in tests):
         global_state.dep_graph_ready = False
         global_state.dep_graph_reason = "tests missing dependencies"
