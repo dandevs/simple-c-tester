@@ -121,7 +121,7 @@ def render_code_panel(
         selected_frame_index, total, code_widget_height
     )
     width = max(8, code_widget.size.width - 2)
-    renderables = []
+    renderables = [_build_timeline_progress_bar(total, selected_frame_index, start_index, end_index, width)]
     lines_above = max(0, int(global_state.tsv_lines_above))
     lines_below = max(0, int(global_state.tsv_lines_below))
 
@@ -162,6 +162,36 @@ def render_code_panel(
         return
 
     code_widget.update(Group(*renderables))
+
+
+def _build_timeline_progress_bar(total, selected_index, start_index, end_index, width):
+    if width <= 0:
+        return Text()
+
+    selected = max(0, min(total - 1, selected_index)) if total > 0 else 0
+    visible_start = max(0, start_index)
+    visible_end = max(visible_start, end_index - 1)
+
+    def _idx_to_col(index):
+        if total <= 1:
+            return 0
+        ratio = index / (total - 1)
+        return max(0, min(width - 1, int(round(ratio * (width - 1)))))
+
+    selected_col = _idx_to_col(selected)
+    window_start_col = _idx_to_col(visible_start)
+    window_end_col = _idx_to_col(visible_end)
+
+    bar = Text()
+    for col in range(width):
+        if col == selected_col:
+            bar.append("◆", style=f"bold {STORY_META_SELECTED}")
+        elif window_start_col <= col <= window_end_col:
+            bar.append("━", style="#6ea8fe")
+        else:
+            bar.append("─", style=STORY_BAR_BASE)
+
+    return bar
 
 
 def render_full_file_panel(

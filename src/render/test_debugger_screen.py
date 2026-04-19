@@ -281,13 +281,21 @@ class TestDebuggerScreen(Screen[None]):
             await self._run_action(self._restart_debug_session(), "Debugger restarted.")
             return
 
+        self._queue_story_capture("Auto-started story capture.")
+
+    def _queue_story_capture(self, footer_message: str | None = None) -> None:
         self._reset_story_state()
         self._follow_latest_frame = False
         self.test.state = TestState.PENDING
         self.test.time_start = 0.0
         self.test.time_state_changed = time.monotonic()
         state_changed()
-        self._set_footer_text("Auto-started story capture.")
+        if footer_message:
+            self._set_footer_text(footer_message)
+
+    async def _stop_debug_and_resume_story_capture(self) -> None:
+        await stop_debug_session(self.test)
+        self._queue_story_capture()
 
     async def _restart_debug_session(self) -> None:
         await stop_debug_session(self.test)
@@ -343,7 +351,10 @@ class TestDebuggerScreen(Screen[None]):
 
     async def action_toggle_debug(self) -> None:
         if is_debug_active(self.test):
-            await self._run_action(stop_debug_session(self.test), "Debugger stopped.")
+            await self._run_action(
+                self._stop_debug_and_resume_story_capture(),
+                "Debugger stopped. Auto-started story capture.",
+            )
             return
 
         if self._variables_task is not None and not self._variables_task.done():
@@ -623,7 +634,6 @@ class TestDebuggerScreen(Screen[None]):
         if self.body_widget.styles.layout != desired_layout:
             self.body_widget.styles.layout = desired_layout
             self._line_frames_cache_key = None
-            self.set_timer(0.05, lambda: self._refresh_view(force=True))
 
         if not self.variables_visible:
             if self.vars_container.styles.display != "none":
