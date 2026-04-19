@@ -48,7 +48,10 @@ src/main.py        entry, argparse, asyncio.run
 src/app.py         TestRunnerApp (Textual)
 src/state.py       global mutable state singleton
 src/models/        Test, Suite, AppState, TestState
-src/render/        tree/box rendering, labels, screens, Test Story UI
+src/render/        tree/box rendering, labels, screen classes, Test Story UI
+src/render/test_output_screen.py   TestOutputScreen class
+src/render/test_debugger_screen.py  TestDebuggerScreen class
+src/render/test_debugger_screen_utils/  utilities: source_utils, frame_utils, render_utils
 src/runner/        makefile generation, test execution, dep graph, gdb/MI debugger
 src/watch/         watchdog debounce handler
 src/runner/artifacts.py  path/name mangling for build artifacts

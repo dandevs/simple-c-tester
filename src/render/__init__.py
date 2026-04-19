@@ -14,7 +14,8 @@ from .output import (
     render_output_box,
 )
 from .tree import render_tree, render_node, render_tree_stdout
-from .screens import TestOutputScreen, TestDebuggerScreen
+from .test_output_screen import TestOutputScreen
+from .test_debugger_screen import TestDebuggerScreen
 
 __all__ = [
     "OutputBoxRenderMeta",
