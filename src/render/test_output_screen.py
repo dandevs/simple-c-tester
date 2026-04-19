@@ -26,7 +26,6 @@ from runner import (
     debug_step_out,
     debug_continue,
     debug_interrupt,
-    debug_continue_auto_trace,
     is_debug_active,
     get_debug_session,
     cancel_test_and_restore_normal_build,

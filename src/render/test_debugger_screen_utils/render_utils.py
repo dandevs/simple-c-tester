@@ -164,6 +164,71 @@ def render_code_panel(
     code_widget.update(Group(*renderables))
 
 
+def render_full_file_panel(
+    code_widget,
+    frames,
+    selected_frame_index,
+    source_cache,
+):
+    if code_widget is None:
+        return
+
+    total = len(frames)
+    if total == 0:
+        hint = Text()
+        hint.append("No Test Story frames yet. ", style=STORY_HELP)
+        hint.append("Recording is on. ", style=STORY_META_HIGHLIGHT)
+        hint.append(
+            "Press R to run and capture a story.", style=f"bold {STORY_META_SELECTED}"
+        )
+        code_widget.update(hint)
+        return
+
+    selected = selected_frame_index
+    if selected < 0 or selected >= total:
+        selected = total - 1
+    event = frames[selected]
+
+    source_path = os.path.abspath(event.file_path)
+    source_lines = load_source_lines(source_path, source_cache)
+    if not source_lines:
+        code_widget.update(Text("Source unavailable for selected frame.", style=STORY_HELP))
+        return
+
+    line_number = max(1, min(len(source_lines), int(event.line)))
+    width = max(8, code_widget.size.width - 2)
+    available_height = max(3, code_widget.size.height)
+    code_height = max(1, available_height - 1)
+
+    half = code_height // 2
+    snippet_start = max(1, line_number - half)
+    snippet_end = min(len(source_lines), snippet_start + code_height - 1)
+    if (snippet_end - snippet_start + 1) < code_height:
+        snippet_start = max(1, snippet_end - code_height + 1)
+
+    number_width = len(str(max(1, snippet_end)))
+    code_width = max(1, width - (number_width + 5))
+    snippet = build_frame_snippet(
+        source_path,
+        source_lines,
+        line_number,
+        snippet_start,
+        snippet_end,
+        True,
+        code_width,
+    )
+
+    title = Text()
+    title.append("Full File ", style=f"bold {STORY_META_SELECTED}")
+    title.append(display_path(source_path), style=f"bold {STORY_META_SELECTED}")
+    title.append(":", style=STORY_HELP)
+    title.append(str(line_number), style=STORY_META_HIGHLIGHT)
+    if event.function:
+        title.append(f"  fn={event.function}", style=STORY_HELP)
+
+    code_widget.update(Group(title, snippet))
+
+
 def _compute_frame_cards_window(selected_frame_index, total, height):
     if total <= 0:
         return (0, 0)
