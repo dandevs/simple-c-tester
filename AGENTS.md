@@ -71,6 +71,11 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 - UI redraws the full tree every 100ms tick when state changes (single `RichLog` widget)
 - `state_changed()` is sync, uses `asyncio.ensure_future()` to schedule async work
 - Test Story opens a per-test debug page with code frames and a variables tree; exiting a running story cancels the test, restores normal build mode, and reruns it normally
+- The debug page now has two stepping precisions: `loose` uses smart/heuristic stepping, while `precise` keeps the older scheduler-locking style; `P` toggles precision and restarts the debugger from the beginning
+- `R` force-restarts a running debugger from the beginning if a step is in flight; `K` can interrupt even while another debug action is pending
+- `Ctrl+Enter` toggles full-file code view, replacing the timeline card stack with an editor-style view centered on the selected line
+- `?` opens a controls modal in the debug page; the footer now keeps only a short `? - Help` hint
+- In debug mode, left/right history navigation is still available, and debug steps re-follow the latest frame while arrow scrubbing keeps the current history position
 - Variables expansion is driven by gdb MI (`pygdbmi`) and is frame-aware; expand/collapse state and per-frame scroll position are preserved in the viewer
 
 ## Watch Mode Details
