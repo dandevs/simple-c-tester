@@ -30,7 +30,6 @@ from .test_debugger_screen_utils import (
     detect_language,
     load_source_lines,
     event_has_useful_source_line,
-    filter_line_frames,
     ensure_selected_frame_index,
     compute_frame_cards_window,
     build_frame_snippet,
@@ -214,6 +213,9 @@ class TestDebuggerScreen(Screen[None]):
         self._source_cache: dict[str, list[str]] = {}
         self._line_frames_cache_key: tuple | None = None
         self._line_frames_cache: list = []
+        self._line_frames_last_event_count = 0
+        self._line_frames_last_skip_seq = max(1, int(global_state.tsv_skip_seq_lines))
+        self._line_frames_last_debug_mode = False
         self._variables_cache: dict[tuple[int, str, int], list[tuple[str, str]]] = {}
         self._variables_task: asyncio.Task | None = None
         self._vars_tree_signature: tuple | None = None
@@ -329,6 +331,9 @@ class TestDebuggerScreen(Screen[None]):
         self.test.compile_err_raw = b""
         self._line_frames_cache_key = None
         self._line_frames_cache = []
+        self._line_frames_last_event_count = 0
+        self._line_frames_last_skip_seq = max(1, int(global_state.tsv_skip_seq_lines))
+        self._line_frames_last_debug_mode = False
         self._variables_cache.clear()
         self._vars_tree_signature = None
         self._vars_tree_scroll_by_frame.clear()
@@ -680,28 +685,89 @@ class TestDebuggerScreen(Screen[None]):
             or self.test.debug_running
             or self._is_manual_debug_story()
         )
-        cache_key = (
-            id(self.test.timeline_events),
-            len(self.test.timeline_events),
-            self.test.time_state_changed,
-            skip_seq,
-            debug_mode,
+        events = self.test.timeline_events
+        event_count = len(events)
+
+        same_settings = (
+            self._line_frames_last_skip_seq == skip_seq
+            and self._line_frames_last_debug_mode == debug_mode
         )
-        if self._line_frames_cache_key == cache_key:
+
+        if same_settings and event_count == self._line_frames_last_event_count:
             return self._line_frames_cache
 
-        frames = filter_line_frames(
-            self.test.timeline_events,
-            self.test.time_state_changed,
-            self._source_cache,
-            debug_mode,
-            cache_key,
-            self._line_frames_cache_key,
-            self._line_frames_cache,
-        )
+        if not same_settings:
+            frames = [
+                event
+                for event in events
+                if event_has_useful_source_line(event.file_path, event.line, self._source_cache)
+            ]
+            if not debug_mode and skip_seq > 1 and len(frames) > 1:
+                filtered = [frames[0]]
+                seq_since_emit = 0
+                prev = frames[0]
+                prev_abs_path = os.path.abspath(prev.file_path)
+                for frame in frames[1:]:
+                    frame_abs_path = os.path.abspath(frame.file_path)
+                    same_file = frame_abs_path == prev_abs_path
+                    same_function = frame.function == prev.function
+                    is_sequential = (
+                        same_file and same_function and frame.line == (prev.line + 1)
+                    )
 
-        self._line_frames_cache_key = cache_key
+                    if is_sequential:
+                        seq_since_emit += 1
+                        if seq_since_emit >= skip_seq:
+                            filtered.append(frame)
+                            seq_since_emit = 0
+                    else:
+                        filtered.append(frame)
+                        seq_since_emit = 0
+
+                    prev = frame
+                    prev_abs_path = frame_abs_path
+
+                if filtered[-1] != frames[-1]:
+                    filtered.append(frames[-1])
+                frames = filtered
+
+            self._line_frames_cache = frames
+            self._line_frames_last_event_count = event_count
+            self._line_frames_last_skip_seq = skip_seq
+            self._line_frames_last_debug_mode = debug_mode
+            return frames
+
+        appended = events[self._line_frames_last_event_count :]
+        if not appended:
+            return self._line_frames_cache
+
+        frames = self._line_frames_cache
+        for event in appended:
+            if not event_has_useful_source_line(event.file_path, event.line, self._source_cache):
+                continue
+
+            if debug_mode or skip_seq <= 1 or not frames:
+                frames.append(event)
+                continue
+
+            prev = frames[-1]
+            prev_abs_path = os.path.abspath(prev.file_path)
+            event_abs_path = os.path.abspath(event.file_path)
+            same_file = event_abs_path == prev_abs_path
+            same_function = event.function == prev.function
+            is_sequential = same_file and same_function and event.line == (prev.line + 1)
+            if not is_sequential:
+                frames.append(event)
+                continue
+
+            # Keep sequence thinning lightweight while ensuring progress.
+            if len(frames) % skip_seq == 0:
+                frames.append(event)
+
         self._line_frames_cache = frames
+        self._line_frames_last_event_count = event_count
+        self._line_frames_last_skip_seq = skip_seq
+        self._line_frames_last_debug_mode = debug_mode
         return frames
 
     def _is_manual_debug_story(self) -> bool:
