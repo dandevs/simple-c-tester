@@ -253,6 +253,13 @@ async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEve
     return next_event
 
 
+def _latest_source_timeline_event(test: Test) -> TimelineEvent | None:
+    for event in reversed(test.timeline_events):
+        if event.file_path and event.line > 0:
+            return event
+    return None
+
+
 def _stop_has_source_location(stop_event: DebugStopEvent) -> bool:
     return bool(stop_event.file_path) and stop_event.line > 0
 
@@ -614,6 +621,35 @@ async def _run_plain_binary(test: Test, binary_path: str, proc_env: dict[str, st
     test.time_state_changed = time.monotonic()
 
 
+async def _cancel_active_run_for_manual_debug(test: Test) -> None:
+    test_key = _test_key(test)
+    run_task = _active_run_tasks.get(test_key)
+    if run_task is None or run_task.done():
+        return
+
+    process = active_processes.get(test_key)
+    if process is not None and process.returncode is None:
+        try:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), timeout=1.0)
+        except (ProcessLookupError, asyncio.TimeoutError):
+            try:
+                process.kill()
+                await process.wait()
+            except ProcessLookupError:
+                pass
+        finally:
+            active_processes.pop(test_key, None)
+
+    run_task.cancel()
+    try:
+        await run_task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+
 async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str, str]) -> None:
     process_key = _test_key(test)
     controller = GdbMIController(f"./{binary_path}", env=proc_env)
@@ -718,7 +754,7 @@ def _get_debug_session(test: Test) -> GdbMIController | None:
     return _debug_sessions.get(_test_key(test))
 
 
-async def start_debug_session(test: Test, auto_trace: bool = True) -> None:
+async def start_debug_session(test: Test, precision_mode: str = "loose") -> None:
     test_key = _test_key(test)
     existing = _debug_sessions.get(test_key)
     if existing is not None:
@@ -726,6 +762,8 @@ async def start_debug_session(test: Test, auto_trace: bool = True) -> None:
 
     if global_state.active_debug_test_key and global_state.active_debug_test_key != test_key:
         return
+
+    await _cancel_active_run_for_manual_debug(test)
 
     _ensure_debug_build_mode(True)
 
@@ -740,6 +778,7 @@ async def start_debug_session(test: Test, auto_trace: bool = True) -> None:
     test.debug_running = True
     test.debug_exited = False
     test.debug_exit_code = None
+    test.debug_precision_mode = "precise" if precision_mode == "precise" else "loose"
     _start_timeline_run(test, "manual debug")
 
     proc_env = os.environ.copy()
@@ -763,6 +802,8 @@ async def start_debug_session(test: Test, auto_trace: bool = True) -> None:
         if controller.proc is not None:
             active_processes[test_key] = controller.proc
         await controller.configure()
+        if test.debug_precision_mode == "precise":
+            await controller.configure_manual_stepping()
         var_capture = _SequentialVarCaptureDecider(1)
         initial_stop = await controller.break_main_and_run()
         vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(initial_stop) else []
@@ -774,8 +815,6 @@ async def start_debug_session(test: Test, auto_trace: bool = True) -> None:
             await stop_debug_session(test)
             return
 
-        if auto_trace:
-            await debug_continue_auto_trace(test)
     except Exception as e:
         _append_timeline_event(test, "debug_error", str(e))
         test.stderr = f"debug error: {e}"
@@ -850,13 +889,26 @@ async def cancel_test_and_restore_normal_build(test: Test) -> None:
         state_changed()
 
 
-async def _debug_step(test: Test, action: str) -> None:
+async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
     controller = _get_debug_session(test)
     if controller is None:
         return
 
+    precise_mode = test.debug_precision_mode == "precise"
+
     if action == "next":
         stop_event = await controller.next()
+    elif action == "auto":
+        if precise_mode:
+            stop_event = await controller.next()
+        else:
+            latest_event = _latest_source_timeline_event(test)
+            current_stop = DebugStopEvent(
+                file_path=latest_event.file_path if latest_event is not None else "",
+                line=latest_event.line if latest_event is not None else 0,
+                function=latest_event.function if latest_event is not None else "",
+            )
+            stop_event = await _auto_trace_step(controller, current_stop)
     elif action == "step_in":
         stop_event = await controller.step_in()
     elif action == "step_out":
@@ -866,70 +918,44 @@ async def _debug_step(test: Test, action: str) -> None:
     elif action == "interrupt":
         stop_event = await controller.interrupt()
     else:
-        return
+        return None
 
-    vars_for_event = await _capture_scope_variables(controller)
+    vars_for_event: list[tuple[str, str]] = []
+    if _stop_has_source_location(stop_event):
+        vars_for_event = await _capture_scope_variables(controller)
     _record_stop_event(test, stop_event, vars_for_event)
     if stop_event_is_terminal(stop_event):
         _apply_terminal_stop(test, stop_event)
         _append_timeline_event(test, "debug_end", _stop_reason_message(stop_event))
         await stop_debug_session(test)
+    return stop_event
 
 
-async def debug_step_next(test: Test) -> None:
-    await _debug_step(test, "next")
+async def debug_step_next(test: Test) -> DebugStopEvent | None:
+    return await _debug_step(test, "auto")
 
 
-async def debug_step_in(test: Test) -> None:
-    await _debug_step(test, "step_in")
+async def debug_step_in(test: Test) -> DebugStopEvent | None:
+    return await _debug_step(test, "step_in")
 
 
-async def debug_step_out(test: Test) -> None:
-    await _debug_step(test, "step_out")
+async def debug_step_out(test: Test) -> DebugStopEvent | None:
+    return await _debug_step(test, "step_out")
 
 
-async def debug_continue(test: Test) -> None:
-    await _debug_step(test, "continue")
+async def debug_continue(test: Test) -> DebugStopEvent | None:
+    return await _debug_step(test, "continue")
 
 
-async def debug_interrupt(test: Test) -> None:
-    await _debug_step(test, "interrupt")
+async def debug_interrupt(test: Test) -> DebugStopEvent | None:
+    return await _debug_step(test, "interrupt")
 
 
-async def debug_continue_auto_trace(test: Test) -> None:
-    def _latest_line_event() -> TimelineEvent | None:
-        for event in reversed(test.timeline_events):
-            if event.file_path and event.line > 0:
-                return event
-        return None
-
-    max_steps = 50000
-    var_capture = _SequentialVarCaptureDecider(global_state.tsv_skip_seq_lines)
-    for _ in range(max_steps):
-        if not test.debug_running:
-            return
-        controller = _get_debug_session(test)
-        if controller is None:
-            return
-        latest_event = _latest_line_event()
-        current_stop = DebugStopEvent(
-            file_path=latest_event.file_path if latest_event is not None else "",
-            line=latest_event.line if latest_event is not None else 0,
-            function=latest_event.function if latest_event is not None else "",
-        )
-        stop_event = await _auto_trace_step(controller, current_stop)
-        vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(stop_event) else []
-        _record_stop_event(test, stop_event, vars_for_event)
-        if stop_event_is_terminal(stop_event):
-            _apply_terminal_stop(test, stop_event)
-            _append_timeline_event(test, "debug_end", _stop_reason_message(stop_event))
-            await stop_debug_session(test)
-            return
-
-    _append_timeline_event(test, "debug_limit", f"step cap reached ({max_steps})")
-    test.state = TestState.FAILED
-    test.time_state_changed = time.monotonic()
-    await stop_debug_session(test)
+async def debug_interrupt_nowait(test: Test) -> None:
+    controller = _get_debug_session(test)
+    if controller is None:
+        return
+    await controller.interrupt_nowait()
 
 
 def is_debug_active(test: Test) -> bool:

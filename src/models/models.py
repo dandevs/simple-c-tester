@@ -41,6 +41,7 @@ class Test:
     cancelled_by_user: bool = False
     rerun_after_user_cancel: bool = False
     force_rebuild_once: bool = False
+    debug_precision_mode: str = "loose"
 
 
 @dataclass

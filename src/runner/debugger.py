@@ -82,6 +82,9 @@ class GdbMIController:
         ):
             await self._send_command(f'-interpreter-exec console "skip file {path}"')
 
+    async def configure_manual_stepping(self) -> None:
+        await self._send_command('-interpreter-exec console "set scheduler-locking step"')
+
     async def break_main_and_run(self) -> DebugStopEvent:
         await self._send_command("-break-insert main")
         return await self._run_until_stop("-exec-run")
@@ -100,6 +103,9 @@ class GdbMIController:
 
     async def interrupt(self) -> DebugStopEvent:
         return await self._run_until_stop("-exec-interrupt")
+
+    async def interrupt_nowait(self) -> None:
+        await self._send_command_no_wait("-exec-interrupt")
 
     async def list_simple_variables(self, timeout: float = 2.0) -> list[tuple[str, str]]:
         result = await self._send_command("-stack-list-variables --simple-values", timeout=timeout)
@@ -295,13 +301,26 @@ class GdbMIController:
 
     async def _run_until_stop(self, command: str, timeout: float = 30.0) -> DebugStopEvent:
         async with self._command_lock:
-            result = await self._send_command(command, timeout=timeout)
+            try:
+                result = await self._send_command(command, timeout=timeout)
+            except asyncio.TimeoutError:
+                return DebugStopEvent(reason="timeout", raw=f"{command} timed out")
             if result.get("message") == "error":
                 return DebugStopEvent(reason="error", raw=str(result))
             try:
                 return await asyncio.wait_for(self._stop_events.get(), timeout=timeout)
             except asyncio.TimeoutError:
                 return DebugStopEvent(reason="timeout", raw=str(result))
+
+    async def _send_command_no_wait(self, command: str) -> None:
+        if self.proc is None or self.proc.stdin is None:
+            raise RuntimeError("gdb process not started")
+
+        token = self._token
+        self._token += 1
+        payload = f"{token}{command}\n".encode()
+        self.proc.stdin.write(payload)
+        await self.proc.stdin.drain()
 
     async def _send_command(self, command: str, timeout: float = 10.0) -> dict:
         if self.proc is None or self.proc.stdin is None:
@@ -421,8 +440,9 @@ class GdbMIController:
 
 
 def stop_event_is_terminal(stop_event: DebugStopEvent) -> bool:
+    if stop_event.reason == "signal-received" and stop_event.signal_name == "SIGINT":
+        return False
     return stop_event.reason.startswith("exited") or stop_event.reason in {
         "signal-received",
         "error",
-        "timeout",
     }
