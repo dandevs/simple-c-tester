@@ -1,0 +1,55 @@
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-pex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pex
+        run: pip install pex
+
+      - name: Build PEX
+        run: bash build_pex.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctester-pex
+          path: out/ctester.pex
+
+  build-standalone:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            binary: ctester
+          - os: macos-latest
+            binary: ctester
+          - os: windows-latest
+            binary: ctester.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build standalone
+        run: bash build_standalone.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctester-${{ matrix.os }}
+          path: out/${{ matrix.binary }}
