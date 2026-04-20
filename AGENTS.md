@@ -58,31 +58,37 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 ```
 
 - `src/runner/makefile.py` — `generate_makefile()`, include path resolution (`resolve_include_dirs` via iterative `gcc -E`), project source discovery and `libproject.a` build
-- `src/runner/execute.py` — `run_test()` invokes `make` then the binary; `state_changed()` dispatches tests via `asyncio.ensure_future()`; also owns Test Story/debug session orchestration and cancellation/rebuild restore flow
+- `src/runner/execute.py` — `run_test()` invokes `make` then the binary; `state_changed()` dispatches tests via `asyncio.ensure_future()`; also owns Test Story/debug session orchestration, editor-breakpoint cache loading, and cancellation/rebuild restore flow
 - `src/runner/debugger.py` — gdb MI controller used for Test Story capture and variable expansion
 - `src/runner/state.py` — helpers for checking completion state
 - All intra-src imports are bare (no `src.` prefix) — the package is not installed, `main.py` adds its own directory to `sys.path`
 
 ## Key Behaviors
 - Compilation goes through `make -f test_build/Makefile`, not direct `gcc` — enables incremental builds via `.d` dependency files
-- `.d` files are parsed after each make run to populate the dependency index for watch mode; persisted to `test_build/db.json`
+- `.d` files are parsed after each make run to populate the dependency index for watch mode; persisted to `test_build/db.json` (which also stores user preferences like debug precision mode)
 - Project `.c` files (excluding `main.c`, `tests/`, `test_build/`) are auto-discovered from resolved include dirs, compiled into `test_build/libproject.a`, and linked into each test — pre-built synchronously to avoid parallel race conditions
 - Artifact names use a readable + hash scheme: `test_artifact_stem()` in `src/runner/artifacts.py`
 - UI redraws the full tree every 100ms tick when state changes (single `RichLog` widget)
 - `state_changed()` is sync, uses `asyncio.ensure_future()` to schedule async work
 - Test Story opens a per-test debug page with code frames and a variables tree; exiting a running story cancels the test, restores normal build mode, and reruns it normally
 - The debug page now has two stepping precisions: `loose` uses smart/heuristic stepping, while `precise` keeps the older scheduler-locking style; `P` toggles precision and restarts the debugger from the beginning
+- The selected precision mode (`loose`/`precise`) is persisted in `test_build/db.json` under `preferences.debug_precision_mode`, applied on startup, and used as the default for newly discovered tests
+- Manual debug startup loads breakpoints from `test_build/breakpoints.json` (override with `CTESTER_BREAKPOINTS_FILE`), filters to `.c`/`.cpp`, and if any are valid starts at the first breakpoint hit; otherwise it falls back to `main`
 - `R` force-restarts a running debugger from the beginning if a step is in flight; `K` can interrupt even while another debug action is pending
+- After a manual debug session exits, pressing `R` restarts manual debug mode (it no longer falls back to auto story capture)
 - `Ctrl+Enter` toggles full-file code view, replacing the timeline card stack with an editor-style view centered on the selected line
 - `?` opens a controls modal in the debug page; the footer now keeps only a short `? - Help` hint
 - In debug mode, left/right history navigation is still available, and debug steps re-follow the latest frame while arrow scrubbing keeps the current history position
 - Variables expansion is driven by gdb MI (`pygdbmi`) and is frame-aware; expand/collapse state and per-frame scroll position are preserved in the viewer
+- In non-manual story mode, initial frame selection now starts at the first frame/card (index `0`) when no prior selection is valid
 
 ## Watch Mode Details
 - Observes repo root (`.`) recursively — no need to pre-build watched directory lists
 - File change handling is serialized via an `asyncio.Lock` in `handle_file_changes()` to prevent overlapping/racy requeue passes during rapid saves
 - DebounceHandler tracks event kinds per-path (`dict[str, set[str]]`) and supports `modified`, `created`, `deleted`, `moved` events
 - Directory-only `modified` events are filtered as noise (editors touching directory metadata should not trigger reruns)
+- `test_build/breakpoints.json` updates refresh the in-memory editor-breakpoint cache for manual debug without forcing pro
+ject rebuilds
 - `tests/*.c` changes use precision reruns:
   - existing test file edited → rerun only that test (via dependency mapping or direct source match)
   - new test file created → add and run only that test

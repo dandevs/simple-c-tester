@@ -55,6 +55,10 @@ python3 ../src/main.py [--parallel N] [--watch] [--output-lines N] [--theme ansi
 - In the full output screen:
   - Escape returns to the tree.
   - Ctrl+C also returns to the tree.
+- In the Test Story screen:
+  - `D` starts/stops manual debug for the selected test.
+  - `P` toggles stepping precision (`loose`/`precise`) and persists that preference in `test_build/db.json`.
+  - `R` restarts manual debug after a manual session exits.
 
 ## Test Layout
 
@@ -97,6 +101,29 @@ With --watch, the runner monitors:
 - dependency file directories tracked by prior runs
 
 On change, affected tests are re-queued. If a test is currently running, it is cancelled and restarted.
+
+When `test_build/breakpoints.json` changes, the app refreshes editor breakpoint data used by manual debug (without forcing a full project rebuild).
+
+## Manual Debug Breakpoints
+
+Manual debug can read breakpoints exported from VS Code extension tooling via:
+
+- `test_build/breakpoints.json` (default)
+- `CTESTER_BREAKPOINTS_FILE` (optional override path)
+
+Expected JSON shape:
+
+```json
+[
+  { "filepath": "/abs/path/to/file.c", "line_number": 42 }
+]
+```
+
+Behavior:
+
+- Only `.c` and `.cpp` breakpoints are used.
+- If any breakpoints are valid, manual debug starts with normal run and stops at the first breakpoint hit.
+- If none are valid/available, manual debug falls back to `main`.
 
 ## Project Structure
 
