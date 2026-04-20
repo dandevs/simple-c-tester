@@ -75,36 +75,36 @@ if [ -n "${PYINSTALLER_EXCLUDE_MODULES:-}" ]; then
     done
 fi
 
-EXCLUDE_ARGS=()
-for module in "${EXCLUDES[@]}"; do
-    EXCLUDE_ARGS+=(--exclude-module "$module")
-done
+PYINSTALLER_ARGS=(
+    --onefile
+    --console
+    --clean
+    --noconfirm
+    --name "$APP_NAME"
+    --paths "$SCRIPT_DIR/src"
+    --distpath "$DIST_DIR"
+    --workpath "$BUILD_DIR/work"
+    --specpath "$BUILD_DIR/spec"
+)
 
-ICON_ARGS=()
 if [ -n "${PYINSTALLER_ICON:-}" ]; then
     if [ ! -f "$PYINSTALLER_ICON" ]; then
         echo "Error: icon file not found: $PYINSTALLER_ICON" >&2
         exit 1
     fi
-    ICON_ARGS=(--icon "$PYINSTALLER_ICON")
+    PYINSTALLER_ARGS+=(--icon "$PYINSTALLER_ICON")
 fi
+
+for module in "${EXCLUDES[@]}"; do
+    PYINSTALLER_ARGS+=(--exclude-module "$module")
+done
+
+PYINSTALLER_ARGS+=("$ENTRYPOINT")
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/work" "$BUILD_DIR/spec"
 
-"$PYTHON" -m PyInstaller \
-    --onefile \
-    --console \
-    --clean \
-    --noconfirm \
-    --name "$APP_NAME" \
-    --paths "$SCRIPT_DIR/src" \
-    --distpath "$DIST_DIR" \
-    --workpath "$BUILD_DIR/work" \
-    --specpath "$BUILD_DIR/spec" \
-    "${ICON_ARGS[@]}" \
-    "${EXCLUDE_ARGS[@]}" \
-    "$ENTRYPOINT"
+"$PYTHON" -m PyInstaller "${PYINSTALLER_ARGS[@]}"
 
 BINARY="$DIST_DIR/$APP_NAME"
 if [ -f "$BINARY.exe" ]; then
