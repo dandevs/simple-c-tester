@@ -30,8 +30,7 @@ jobs:
           path: out/ctester.pex
 
   build-standalone-linux:
-    runs-on: ubuntu-latest
-    container: ghcr.io/catthehacker/ubuntu:full-20.04
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v6
