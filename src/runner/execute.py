@@ -856,6 +856,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         if test.timeline_capture_enabled or global_state.timeline_capture_enabled:
             _ensure_debug_build_mode(True)
 
+        test.timeline_events = []
         _start_timeline_run(test, "scheduled")
         compiled, binary_path = await _compile_binary_for_test(test, proc_env)
         if test.state == TestState.CANCELLED:

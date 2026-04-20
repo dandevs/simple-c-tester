@@ -1,6 +1,9 @@
 import os
 
 
+_source_mtime_cache: dict[str, int | None] = {}
+
+
 def display_path(file_path: str) -> str:
     if not file_path:
         return ""
@@ -23,17 +26,24 @@ def detect_language(file_path: str) -> str:
 
 
 def load_source_lines(file_path: str, source_cache: dict[str, list[str]]) -> list[str]:
-    cached = source_cache.get(file_path)
-    if cached is not None:
+    source_path = os.path.abspath(file_path)
+    try:
+        mtime_ns: int | None = os.stat(source_path).st_mtime_ns
+    except OSError:
+        mtime_ns = None
+
+    cached = source_cache.get(source_path)
+    if cached is not None and _source_mtime_cache.get(source_path) == mtime_ns:
         return cached
 
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+        with open(source_path, "r", encoding="utf-8", errors="replace") as handle:
             lines = handle.read().splitlines()
     except OSError:
         lines = []
 
-    source_cache[file_path] = lines
+    source_cache[source_path] = lines
+    _source_mtime_cache[source_path] = mtime_ns
     return lines
 
 

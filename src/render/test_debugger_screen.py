@@ -272,6 +272,8 @@ class TestDebuggerScreen(Screen[None]):
         self._line_frames_last_event_count = 0
         self._line_frames_last_skip_seq = max(1, int(global_state.tsv_skip_seq_lines))
         self._line_frames_last_debug_mode = False
+        self._line_frames_last_time_start = 0.0
+        self._line_frames_last_events_id = 0
         self._variables_cache: dict[tuple[int, str, int], list[tuple[str, str]]] = {}
         self._variables_task: asyncio.Task | None = None
         self._vars_tree_signature: tuple | None = None
@@ -406,10 +408,14 @@ class TestDebuggerScreen(Screen[None]):
         self._line_frames_last_event_count = 0
         self._line_frames_last_skip_seq = max(1, int(global_state.tsv_skip_seq_lines))
         self._line_frames_last_debug_mode = False
+        self._line_frames_last_time_start = 0.0
+        self._line_frames_last_events_id = 0
+        self._source_cache.clear()
         self._variables_cache.clear()
         self._vars_tree_signature = None
         self._vars_tree_scroll_by_frame.clear()
         self._vars_tree_current_key = None
+        self.last_signature = None
         self.selected_frame_index = -1
         self._follow_latest_frame = True
 
@@ -854,12 +860,14 @@ class TestDebuggerScreen(Screen[None]):
         same_settings = (
             self._line_frames_last_skip_seq == skip_seq
             and self._line_frames_last_debug_mode == debug_mode
+            and self._line_frames_last_time_start == self.test.time_start
+            and self._line_frames_last_events_id == id(events)
         )
 
         if same_settings and event_count == self._line_frames_last_event_count:
             return self._line_frames_cache
 
-        if not same_settings:
+        if not same_settings or event_count < self._line_frames_last_event_count:
             frames = [
                 event
                 for event in events
@@ -904,6 +912,8 @@ class TestDebuggerScreen(Screen[None]):
             self._line_frames_last_event_count = event_count
             self._line_frames_last_skip_seq = skip_seq
             self._line_frames_last_debug_mode = debug_mode
+            self._line_frames_last_time_start = self.test.time_start
+            self._line_frames_last_events_id = id(events)
             return frames
 
         appended = events[self._line_frames_last_event_count :]
@@ -940,6 +950,8 @@ class TestDebuggerScreen(Screen[None]):
         self._line_frames_last_event_count = event_count
         self._line_frames_last_skip_seq = skip_seq
         self._line_frames_last_debug_mode = debug_mode
+        self._line_frames_last_time_start = self.test.time_start
+        self._line_frames_last_events_id = id(events)
         return frames
 
     def _is_manual_debug_story(self) -> bool:
