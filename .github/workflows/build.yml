@@ -1,0 +1,102 @@
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-pex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install pex
+        run: pip install pex
+
+      - name: Build PEX
+        run: bash build_pex.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ctester-pex
+          path: out/ctester.pex
+
+  build-standalone-linux:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Build standalone
+        shell: bash
+        env:
+          APP_NAME: ctester-linux
+        run: bash build_standalone.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ctester-linux
+          path: out/ctester-linux
+
+  build-standalone:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            app_name: ctester-macos
+            asset_name: ctester-macos
+          - os: windows-latest
+            app_name: ctester-windows
+            asset_name: ctester-windows.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Build standalone
+        shell: bash
+        env:
+          APP_NAME: ${{ matrix.app_name }}
+        run: bash build_standalone.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset_name }}
+          path: out/${{ matrix.asset_name }}
+
+  create-release:
+    needs: [build-pex, build-standalone-linux, build-standalone]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: artifacts/*
+          generate_release_notes: true
