@@ -19,11 +19,13 @@ python3 ../src/main.py
 - `--theme ansi|default` (default `ansi`)
 - `--timeline` — enable per-line Test Story capture with gdb
 - `--debug-build` — compile tests with debug flags (`-g -O0`)
+- `--story-filter-profile minimal|balanced|all` (default `balanced`) — selects Test Story stop/filter profile
 - `--tsv-lines-above N` (default 4) — source lines shown above current frame
 - `--tsv-lines-below N` (default 4) — source lines shown below current frame
 - `--tsv-skip-seq-lines N` (default 10) — thin out sequential same-file frames in record mode
 - `--tsv-vars-depth N` (default 2) — variable expansion depth in the Test Story viewer
 - `--tsv-variables-height N` (default 10) — minimum height for the variables panel
+- `--tsv-show-reason-about` — shows verbose trigger "reason/about" detail text in card titles (hidden by default)
 
 ## Setup
 ```bash
@@ -53,12 +55,14 @@ src/render/test_output_screen.py   TestOutputScreen class
 src/render/test_debugger_screen.py  TestDebuggerScreen class
 src/render/test_debugger_screen_utils/  utilities: source_utils, frame_utils, render_utils
 src/runner/        makefile generation, test execution, dep graph, gdb/MI debugger
+src/runner/story_filters/ modular Test Story stop/filter engine + trigger heuristics
 src/watch/         watchdog debounce handler
 src/runner/artifacts.py  path/name mangling for build artifacts
 ```
 
 - `src/runner/makefile.py` — `generate_makefile()`, include path resolution (`resolve_include_dirs` via iterative `gcc -E`), project source discovery and `libproject.a` build
 - `src/runner/execute.py` — `run_test()` invokes `make` then the binary; `state_changed()` dispatches tests via `asyncio.ensure_future()`; also owns Test Story/debug session orchestration, editor-breakpoint cache loading, and cancellation/rebuild restore flow
+- `src/runner/story_filters/` — profile config (`minimal`/`balanced`/`all`), trigger matcher set (function enter/exit, branch, loop milestones, goto, assert, anomaly, sync, first-hit), and decision engine
 - `src/runner/debugger.py` — gdb MI controller used for Test Story capture and variable expansion
 - `src/runner/state.py` — helpers for checking completion state
 - All intra-src imports are bare (no `src.` prefix) — the package is not installed, `main.py` adds its own directory to `sys.path`
@@ -78,6 +82,9 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 - After a manual debug session exits, pressing `R` restarts manual debug mode (it no longer falls back to auto story capture)
 - `Ctrl+Enter` toggles full-file code view, replacing the timeline card stack with an editor-style view centered on the selected line
 - `?` opens a controls modal in the debug page; the footer now keeps only a short `? - Help` hint
+- Controls modal now includes a 3-button story filter profile row (`Minimal`, `Balanced`, `All`) that updates defaults live and persists to `test_build/db.json` as `preferences.story_filter_profile`
+- In auto story capture mode, cards are now emitted from modular trigger decisions instead of only line-thinning; capture records only trigger-matching source stops
+- Trigger badges are shown on cards; verbose trigger "reason/about" text is hidden by default and can be shown with `--tsv-show-reason-about`
 - In debug mode, left/right history navigation is still available, and debug steps re-follow the latest frame while arrow scrubbing keeps the current history position
 - Variables expansion is driven by gdb MI (`pygdbmi`) and is frame-aware; expand/collapse state and per-frame scroll position are preserved in the viewer
 - In non-manual story mode, initial frame selection now starts at the first frame/card (index `0`) when no prior selection is valid

@@ -14,6 +14,10 @@ class TimelineEvent:
     function: str = ""
     stream: str = ""
     variables: list[tuple[str, str]] = field(default_factory=list)
+    primary_trigger: str = ""
+    trigger_ids: list[str] = field(default_factory=list)
+    trigger_label: str = ""
+    trigger_message: str = ""
 
 
 @dataclass
@@ -42,6 +46,7 @@ class Test:
     rerun_after_user_cancel: bool = False
     force_rebuild_once: bool = False
     debug_precision_mode: str = "loose"
+    story_filter_profile: str = "balanced"
 
 
 @dataclass
@@ -70,6 +75,7 @@ class AppState:
                     name=entry.stem,
                     source_path=str(entry),
                     debug_precision_mode=global_state.debug_precision_mode_preference,
+                    story_filter_profile=global_state.story_filter_profile_preference,
                 )
                 self.root_suite.tests.append(test)
                 self.all_tests.append(test)
@@ -87,6 +93,7 @@ class AppState:
                     name=entry.stem,
                     source_path=str(entry),
                     debug_precision_mode=global_state.debug_precision_mode_preference,
+                    story_filter_profile=global_state.story_filter_profile_preference,
                 )
                 suite.tests.append(test)
                 self.all_tests.append(test)

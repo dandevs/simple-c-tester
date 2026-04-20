@@ -8,9 +8,10 @@ from textual.binding import Binding
 from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.screen import Screen
-from textual.widgets import Static, Tree as TextualTree
+from textual.widgets import Button, Static, Tree as TextualTree
 
 import state as global_state
+from state import state
 from models import Test, TestState
 from runner import (
     start_debug_session,
@@ -26,6 +27,7 @@ from runner import (
     state_changed,
     persist_user_preferences,
 )
+from runner.story_filters import normalized_story_filter_profile
 from .test_debugger_screen_utils import (
     display_path,
     detect_language,
@@ -73,6 +75,23 @@ class DebugControlsModal(ModalScreen[None]):
         color: #7f8a9d;
         margin: 1 0 0 0;
     }
+    #profile-title {
+        text-style: bold;
+        color: #ffd166;
+        margin: 1 0 0 0;
+    }
+    #profile-row {
+        layout: horizontal;
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    .profile-button {
+        width: 1fr;
+        margin: 0 1 0 0;
+    }
+    #profile-all {
+        margin: 0;
+    }
     """
 
     BINDINGS = [
@@ -80,6 +99,21 @@ class DebugControlsModal(ModalScreen[None]):
         Binding("enter", "close", "Close"),
         Binding("question_mark", "close", "Close"),
     ]
+
+    def __init__(self, selected_profile: str, on_profile_selected):
+        super().__init__()
+        self.selected_profile = normalized_story_filter_profile(selected_profile)
+        self.on_profile_selected = on_profile_selected
+
+    def _button_label(self, profile: str) -> str:
+        name = profile.capitalize()
+        return f"[*] {name}" if profile == self.selected_profile else f"[ ] {name}"
+
+    def _refresh_profile_buttons(self) -> None:
+        for profile in ("minimal", "balanced", "all"):
+            button = self.query_one(f"#profile-{profile}", Button)
+            button.label = self._button_label(profile)
+            button.variant = "primary" if profile == self.selected_profile else "default"
 
     def compose(self) -> ComposeResult:
         controls = [
@@ -111,9 +145,30 @@ class DebugControlsModal(ModalScreen[None]):
         yield Container(
             Static("Debug Controls", id="controls-title"),
             Static(body, id="controls-body"),
+            Static("Story Filter Profile", id="profile-title"),
+            Container(
+                Button(self._button_label("minimal"), id="profile-minimal", classes="profile-button"),
+                Button(self._button_label("balanced"), id="profile-balanced", classes="profile-button"),
+                Button(self._button_label("all"), id="profile-all", classes="profile-button"),
+                id="profile-row",
+            ),
             Static("Press Esc, Enter, or ? to close", id="controls-hint"),
             id="controls-modal",
         )
+
+    def on_mount(self) -> None:
+        self._refresh_profile_buttons()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if not button_id.startswith("profile-"):
+            return
+        profile = button_id.replace("profile-", "", 1)
+        normalized = normalized_story_filter_profile(profile)
+        self.selected_profile = normalized
+        self._refresh_profile_buttons()
+        if callable(self.on_profile_selected):
+            self.on_profile_selected(normalized)
 
     def action_close(self) -> None:
         self.app.pop_screen()
@@ -436,7 +491,21 @@ class TestDebuggerScreen(Screen[None]):
         await self._run_action(debug_interrupt(self.test), "Sent interrupt.")
 
     def action_show_controls(self) -> None:
-        self.app.push_screen(DebugControlsModal())
+        self.app.push_screen(
+            DebugControlsModal(
+                selected_profile=self.test.story_filter_profile,
+                on_profile_selected=self._set_story_filter_profile,
+            )
+        )
+
+    def _set_story_filter_profile(self, profile: str) -> None:
+        normalized = normalized_story_filter_profile(profile)
+        global_state.story_filter_profile_preference = normalized
+        for test in state.all_tests:
+            test.story_filter_profile = normalized
+        persist_user_preferences()
+        self._set_footer_text(f"Story filter profile set to {normalized}.")
+        self._refresh_view(force=True)
 
     async def action_toggle_precision(self) -> None:
         if not is_debug_active(self.test):
@@ -670,6 +739,7 @@ class TestDebuggerScreen(Screen[None]):
             int(self.size.width),
             int(self.size.height),
             self.full_file_view,
+            self.test.story_filter_profile,
         )
 
     def _base_footer_text(self) -> str:
@@ -804,6 +874,12 @@ class TestDebuggerScreen(Screen[None]):
                     frame_abs_path = os.path.abspath(frame.file_path)
                     same_file = frame_abs_path == prev_abs_path
                     same_function = frame.function == prev.function
+                    if frame.trigger_ids or prev.trigger_ids:
+                        filtered.append(frame)
+                        seq_since_emit = 0
+                        prev = frame
+                        prev_abs_path = frame_abs_path
+                        continue
                     is_sequential = (
                         same_file and same_function and frame.line == (prev.line + 1)
                     )
@@ -848,6 +924,9 @@ class TestDebuggerScreen(Screen[None]):
             event_abs_path = os.path.abspath(event.file_path)
             same_file = event_abs_path == prev_abs_path
             same_function = event.function == prev.function
+            if event.trigger_ids or prev.trigger_ids:
+                frames.append(event)
+                continue
             is_sequential = same_file and same_function and event.line == (prev.line + 1)
             if not is_sequential:
                 frames.append(event)
@@ -986,9 +1065,10 @@ class TestDebuggerScreen(Screen[None]):
             debug_status = "active" if is_debug_active(self.test) else "idle"
             timeline_status = "on" if self.test.timeline_capture_enabled or global_state.timeline_capture_enabled else "off"
             precision = self.test.debug_precision_mode
+            profile = self.test.story_filter_profile
             self.header_widget.update(
                 Text(
-                    f"Test Story: {self.test.name} [{status}]  Debug: {debug_status} ({precision})  Recording: {timeline_status}"
+                    f"Test Story: {self.test.name} [{status}]  Debug: {debug_status} ({precision})  Recording: {timeline_status}  Filter: {profile}"
                 )
             )
 

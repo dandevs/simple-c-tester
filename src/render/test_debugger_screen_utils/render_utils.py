@@ -93,6 +93,18 @@ def build_frame_title(event, selected):
         else:
             title.append(f"  fn={event.function}", style="#7f868d")
 
+    if event.trigger_label:
+        badge_style = f"bold {STORY_META_SELECTED}" if selected else "#9cb9c7"
+        title.append("  [", style=STORY_HELP if selected else "#7f868d")
+        title.append(event.trigger_label, style=badge_style)
+        title.append("]",
+            style=STORY_HELP if selected else "#7f868d",
+        )
+
+    if event.trigger_message and bool(global_state.tsv_show_reason_about):
+        detail_style = STORY_HELP if selected else "#7f868d"
+        title.append(f"  {event.trigger_message}", style=detail_style)
+
     return title
 
 

@@ -181,6 +181,7 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
             name=os.path.splitext(os.path.basename(abs_path))[0],
             source_path=source_path,
             debug_precision_mode=global_state.debug_precision_mode_preference,
+            story_filter_profile=global_state.story_filter_profile_preference,
         )
         state.root_suite.tests.append(test)
         state.all_tests.append(test)

@@ -20,6 +20,7 @@ from runner import (
     _terminate_active_processes,
 )
 from app import TestRunnerApp
+from runner.story_filters import normalized_story_filter_profile
 
 
 def parse_args():
@@ -51,6 +52,12 @@ def parse_args():
         help="Compile tests with debug flags (-g -O0)",
     )
     parser.add_argument(
+        "--story-filter-profile",
+        choices=["minimal", "balanced", "all"],
+        default="balanced",
+        help="Test Story card filter profile (default: balanced)",
+    )
+    parser.add_argument(
         "--tsv-lines-above",
         type=int,
         default=4,
@@ -80,6 +87,11 @@ def parse_args():
         default=10,
         help="Variables panel height in Test Story viewer (default: 10)",
     )
+    parser.add_argument(
+        "--tsv-show-reason-about",
+        action="store_true",
+        help="Show [Reason] About details in Test Story cards",
+    )
     return parser.parse_args()
 
 
@@ -92,6 +104,10 @@ async def _main():
     global_state.tsv_skip_seq_lines = max(1, int(args.tsv_skip_seq_lines))
     global_state.tsv_vars_depth = max(1, int(args.tsv_vars_depth))
     global_state.tsv_variables_height = max(3, int(args.tsv_variables_height))
+    global_state.tsv_show_reason_about = bool(args.tsv_show_reason_about)
+    global_state.story_filter_profile_preference = normalized_story_filter_profile(
+        args.story_filter_profile
+    )
 
     tests_dir = Path("tests")
     if not tests_dir.is_dir():

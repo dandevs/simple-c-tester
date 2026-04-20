@@ -6,6 +6,7 @@ import json
 from state import state, dep_index
 import state as global_state
 from .artifacts import test_binary_path, test_dep_path, test_map_path
+from .story_filters.config import normalized_story_filter_profile
 
 
 _MISSING_HEADER_RE = re.compile(r"fatal error:\s+(\S+):\s+No such file or directory")
@@ -254,8 +255,12 @@ def load_dependency_db() -> dict[str, dict]:
         global_state.debug_precision_mode_preference = _normalized_precision_mode(
             prefs_payload.get("debug_precision_mode")
         )
+        global_state.story_filter_profile_preference = normalized_story_filter_profile(
+            prefs_payload.get("story_filter_profile")
+        )
     else:
         global_state.debug_precision_mode_preference = "loose"
+        global_state.story_filter_profile_preference = "balanced"
 
     try:
         _last_db_mtime_ns = os.stat(DB_PATH).st_mtime_ns
@@ -301,7 +306,10 @@ def save_dependency_db(changed_test_keys: set[str] | None = None) -> None:
     payload["preferences"] = {
         "debug_precision_mode": _normalized_precision_mode(
             global_state.debug_precision_mode_preference
-        )
+        ),
+        "story_filter_profile": normalized_story_filter_profile(
+            global_state.story_filter_profile_preference
+        ),
     }
     new_content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     os.makedirs("test_build", exist_ok=True)
@@ -322,6 +330,9 @@ def hydrate_dependencies_from_db() -> None:
     for test in state.all_tests:
         test.debug_precision_mode = _normalized_precision_mode(
             global_state.debug_precision_mode_preference
+        )
+        test.story_filter_profile = normalized_story_filter_profile(
+            global_state.story_filter_profile_preference
         )
     if not db:
         update_dep_graph_readiness()

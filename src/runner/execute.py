@@ -19,6 +19,7 @@ from .makefile import (
 )
 from .artifacts import test_binary_path
 from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
+from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_filter_profile
 
 
 MAX_TIMELINE_EVENTS = 12000
@@ -92,6 +93,10 @@ def _append_timeline_event(
     function: str = "",
     stream: str = "",
     variables: list[tuple[str, str]] | None = None,
+    primary_trigger: str = "",
+    trigger_ids: list[str] | None = None,
+    trigger_label: str = "",
+    trigger_message: str = "",
 ) -> None:
     event = TimelineEvent(
         index=len(test.timeline_events) + 1,
@@ -103,6 +108,10 @@ def _append_timeline_event(
         function=function,
         stream=stream,
         variables=list(variables or []),
+        primary_trigger=primary_trigger,
+        trigger_ids=list(trigger_ids or []),
+        trigger_label=trigger_label,
+        trigger_message=trigger_message,
     )
     test.timeline_events.append(event)
     if len(test.timeline_events) > MAX_TIMELINE_EVENTS:
@@ -487,59 +496,42 @@ async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[st
         return []
 
 
-class _SequentialVarCaptureDecider:
-    def __init__(self, skip_seq: int):
-        self.skip_seq = max(1, skip_seq)
-        self.prev_abs_path = ""
-        self.prev_function = ""
-        self.prev_line = 0
-        self.seq_since_emit = 0
-
-    def should_capture(self, stop_event: DebugStopEvent) -> bool:
-        if not _stop_has_source_location(stop_event):
-            return False
-
-        current_abs_path = os.path.abspath(stop_event.file_path)
-        if self.prev_line <= 0:
-            self.prev_abs_path = current_abs_path
-            self.prev_function = stop_event.function
-            self.prev_line = stop_event.line
-            self.seq_since_emit = 0
-            return True
-
-        same_file = current_abs_path == self.prev_abs_path
-        same_function = stop_event.function == self.prev_function
-        is_sequential = same_file and same_function and stop_event.line == (self.prev_line + 1)
-
-        include = False
-        if is_sequential:
-            self.seq_since_emit += 1
-            if self.seq_since_emit >= self.skip_seq:
-                include = True
-                self.seq_since_emit = 0
-        else:
-            include = True
-            self.seq_since_emit = 0
-
-        self.prev_abs_path = current_abs_path
-        self.prev_function = stop_event.function
-        self.prev_line = stop_event.line
-        return include
+def _merge_trigger_matches(
+    base_matches: list[TriggerMatch],
+    extra_matches: list[TriggerMatch],
+) -> list[TriggerMatch]:
+    merged: list[TriggerMatch] = list(base_matches)
+    seen = {(match.trigger_id, match.message) for match in merged}
+    for match in extra_matches:
+        key = (match.trigger_id, match.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(match)
+    return merged
 
 
 def _record_stop_event(
     test: Test,
     stop_event: DebugStopEvent,
     variables: list[tuple[str, str]] | None = None,
+    trigger_matches: list[TriggerMatch] | None = None,
 ) -> None:
+    matches = list(trigger_matches or [])
+    primary = matches[0] if matches else None
+    message = primary.message if primary is not None else _stop_reason_message(stop_event)
     _append_timeline_event(
         test,
         "step",
-        _stop_reason_message(stop_event),
+        message,
         file_path=stop_event.file_path,
         line=stop_event.line,
         function=stop_event.function,
         variables=variables,
+        primary_trigger=primary.trigger_id if primary is not None else "",
+        trigger_ids=[match.trigger_id for match in matches],
+        trigger_label=primary.label if primary is not None else "",
+        trigger_message=primary.message if primary is not None else "",
     )
 
 
@@ -795,11 +787,34 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
     if controller.proc is not None:
         active_processes[process_key] = controller.proc
     await controller.configure()
-    var_capture = _SequentialVarCaptureDecider(global_state.tsv_skip_seq_lines)
+    test.story_filter_profile = normalized_story_filter_profile(test.story_filter_profile)
+    story_filters = StoryFilterEngine.from_profile(test.story_filter_profile)
+
+    async def _capture_story_stop(stop_event: DebugStopEvent) -> None:
+        if not _stop_has_source_location(stop_event):
+            story_filters.mark_processed(stop_event)
+            return
+
+        early_decision = story_filters.evaluate_without_variables(stop_event)
+        matches = list(early_decision.matches)
+        variables: list[tuple[str, str]] = []
+
+        if early_decision.need_variables:
+            variables = await _capture_scope_variables(controller)
+            var_decision = story_filters.evaluate_with_variables(stop_event, variables)
+            matches = _merge_trigger_matches(matches, var_decision.matches)
+
+        if matches:
+            _record_stop_event(
+                test,
+                stop_event,
+                variables=variables,
+                trigger_matches=matches,
+            )
+        story_filters.mark_processed(stop_event)
 
     stop_event = await controller.break_main_and_run()
-    vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(stop_event) else []
-    _record_stop_event(test, stop_event, vars_for_event)
+    await _capture_story_stop(stop_event)
 
     max_steps = 50000
     step_count = 0
@@ -808,8 +823,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             _append_timeline_event(test, "debug_cancelled", "cancelled while tracing")
             return
         stop_event = await _auto_trace_step(controller, stop_event)
-        vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(stop_event) else []
-        _record_stop_event(test, stop_event, vars_for_event)
+        await _capture_story_stop(stop_event)
         step_count += 1
 
     if step_count >= max_steps and not stop_event_is_terminal(stop_event):
@@ -933,7 +947,6 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
         await controller.configure()
         if test.debug_precision_mode == "precise":
             await controller.configure_manual_stepping()
-        var_capture = _SequentialVarCaptureDecider(1)
         editor_breakpoints, fetch_error = refresh_editor_breakpoints_cache()
         inserted_breakpoints = 0
         for file_path, line in editor_breakpoints:
@@ -971,7 +984,9 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
                     "no editor breakpoints found; starting at main()",
                 )
             initial_stop = await controller.break_main_and_run()
-        vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(initial_stop) else []
+        vars_for_event: list[tuple[str, str]] = []
+        if _stop_has_source_location(initial_stop):
+            vars_for_event = await _capture_scope_variables(controller)
         _record_stop_event(test, initial_stop, vars_for_event)
 
         if stop_event_is_terminal(initial_stop):
