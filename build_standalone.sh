@@ -109,6 +109,8 @@ mkdir -p "$BUILD_DIR/work" "$BUILD_DIR/spec"
 BINARY="$DIST_DIR/$APP_NAME"
 if [ -f "$BINARY.exe" ]; then
     BINARY="$BINARY.exe"
+elif [ -f "$BINARY" ]; then
+    BINARY="$BINARY"
 fi
 
 chmod +x "$BINARY" 2>/dev/null || true

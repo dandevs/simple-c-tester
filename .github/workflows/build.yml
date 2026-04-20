@@ -34,12 +34,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            binary: ctester
+          - os: ubuntu-20.04
+            app_name: ctester-linux
+            asset_name: ctester-linux
           - os: macos-latest
-            binary: ctester
+            app_name: ctester-macos
+            asset_name: ctester-macos
           - os: windows-latest
-            binary: ctester.exe
+            app_name: ctester-windows
+            asset_name: ctester-windows.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -51,12 +54,15 @@ jobs:
           python-version: '3.13'
 
       - name: Build standalone
+        shell: bash
+        env:
+          APP_NAME: ${{ matrix.app_name }}
         run: bash build_standalone.sh
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ctester-${{ matrix.os }}
-          path: out/${{ matrix.binary }}
+          name: ${{ matrix.asset_name }}
+          path: out/${{ matrix.asset_name }}
 
   create-release:
     needs: [build-pex, build-standalone]
