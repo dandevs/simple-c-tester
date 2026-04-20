@@ -228,6 +228,7 @@ class TestDebuggerScreen(Screen[None]):
         self._last_log_count = -1
         self.full_file_view = False
         self._follow_latest_frame = True
+        self._mouse_dragging = False
 
     def compose(self) -> ComposeResult:
         yield Static("", id="debug-header")
@@ -509,7 +510,79 @@ class TestDebuggerScreen(Screen[None]):
         self._refresh_view(force=True)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        pass
+        self._handle_timeline_click(event)
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._mouse_dragging:
+            self._handle_timeline_drag(event)
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        self._mouse_dragging = False
+
+    def _index_from_column(self, col: int, width: int, total: int) -> int:
+        if total <= 1:
+            return 0
+        if width <= 1:
+            return 0
+        ratio = col / (width - 1)
+        return max(0, min(total - 1, int(round(ratio * (total - 1)))))
+
+    def _handle_timeline_click(self, event: events.MouseDown) -> None:
+        frames = self._line_frames()
+        if not frames:
+            return
+
+        if self.code_widget is None:
+            return
+
+        content_region = self.code_widget.content_region
+        sx, sy = event.screen_x, event.screen_y
+
+        if content_region.height == 0:
+            return
+        if self.code_widget.scroll_y > 0:
+            return
+
+        if sy != content_region.y:
+            return
+
+        bar_width = max(8, content_region.width - 2)
+        col = sx - content_region.x
+        if col < 0 or col >= bar_width:
+            return
+
+        total = len(frames)
+        new_index = self._index_from_column(col, bar_width, total)
+
+        self._follow_latest_frame = False
+        self._mouse_dragging = True
+        self.selected_frame_index = ensure_selected_frame_index(new_index, total)
+        self._refresh_view(force=True)
+
+    def _handle_timeline_drag(self, event: events.MouseMove) -> None:
+        frames = self._line_frames()
+        if not frames:
+            return
+
+        if self.code_widget is None:
+            return
+
+        content_region = self.code_widget.content_region
+        sx, sy = event.screen_x, event.screen_y
+
+        if sy != content_region.y:
+            return
+
+        bar_width = max(8, content_region.width - 2)
+        col = sx - content_region.x
+        if col < 0 or col >= bar_width:
+            return
+
+        total = len(frames)
+        new_index = self._index_from_column(col, bar_width, total)
+
+        self.selected_frame_index = ensure_selected_frame_index(new_index, total)
+        self._refresh_view(force=True)
 
     async def _run_action(
         self,
