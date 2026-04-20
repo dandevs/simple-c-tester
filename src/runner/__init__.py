@@ -2,6 +2,9 @@ from .execute import (
     run_test,
     state_changed,
     _terminate_active_processes,
+    prime_editor_breakpoints_cache,
+    refresh_editor_breakpoints_cache,
+    is_editor_breakpoints_file_path,
     start_debug_session,
     stop_debug_session,
     debug_step_next,
@@ -21,6 +24,7 @@ from .makefile import (
     build_project_sources,
     hydrate_dependencies_from_db,
     refresh_dependency_graph,
+    persist_user_preferences,
 )
 from .state import all_tests_finished, has_active_tests, display_state_signature
 
@@ -28,6 +32,9 @@ __all__ = [
     "run_test",
     "state_changed",
     "_terminate_active_processes",
+    "prime_editor_breakpoints_cache",
+    "refresh_editor_breakpoints_cache",
+    "is_editor_breakpoints_file_path",
     "start_debug_session",
     "stop_debug_session",
     "debug_step_next",
@@ -45,6 +52,7 @@ __all__ = [
     "build_project_sources",
     "hydrate_dependencies_from_db",
     "refresh_dependency_graph",
+    "persist_user_preferences",
     "all_tests_finished",
     "has_active_tests",
     "display_state_signature",

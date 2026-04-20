@@ -16,3 +16,4 @@ tsv_lines_below = 4
 tsv_skip_seq_lines = 10
 tsv_vars_depth = 2
 tsv_variables_height = 10
+debug_precision_mode_preference = "loose"

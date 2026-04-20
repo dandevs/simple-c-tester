@@ -17,6 +17,7 @@ from runner import (
     all_tests_finished,
     has_active_tests,
     display_state_signature,
+    refresh_editor_breakpoints_cache,
 )
 from watch import DebounceHandler
 
@@ -197,6 +198,8 @@ class TestRunnerApp(App[None]):
         self.observer = None
 
     def _tick(self) -> None:
+        refresh_editor_breakpoints_cache()
+
         if self._pending_makefile_regen and not has_active_tests():
             generate_makefile()
             self._pending_makefile_regen = False

@@ -4,8 +4,10 @@ import shutil
 import time
 import asyncio
 import re
+import json
 from pathlib import Path
 from typing import Callable
+from urllib import parse as urllib_parse
 
 import state as global_state
 from state import state, active_processes, subprocess_columns
@@ -49,6 +51,13 @@ _NON_USER_PREFIXES = (
     "/opt/",
     "/nix/",
 )
+_BREAKPOINT_SOURCE_EXTENSIONS = {".c", ".cpp"}
+_BREAKPOINTS_FILE_PATH = os.environ.get(
+    "CTESTER_BREAKPOINTS_FILE",
+    os.path.join("test_build", "breakpoints.json"),
+)
+_editor_breakpoints_cache: list[tuple[str, int]] = []
+_editor_breakpoints_mtime_ns: int | None = None
 
 
 def _looks_pointer_value(value: str) -> bool:
@@ -231,6 +240,126 @@ def _is_user_code_path(file_path: str) -> bool:
     tests_root = os.path.abspath("tests") + os.sep
     src_root = os.path.abspath("src") + os.sep
     return abs_path.startswith(cwd) or abs_path.startswith(tests_root) or abs_path.startswith(src_root)
+
+
+def _looks_like_windows_abs_path(path: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", path)) or path.startswith("\\\\")
+
+
+def _normalize_breakpoint_path(file_path: str) -> str:
+    value = file_path.strip()
+    if not value:
+        return ""
+
+    if value.lower().startswith("file://"):
+        parsed = urllib_parse.urlparse(value)
+        value = urllib_parse.unquote(parsed.path or "")
+        if os.name == "nt" and len(value) >= 3 and value[0] == "/" and value[2] == ":":
+            value = value[1:]
+
+    if _looks_like_windows_abs_path(value):
+        return value.replace("\\", "/")
+
+    if not os.path.isabs(value):
+        direct = os.path.abspath(value)
+        if os.path.exists(direct):
+            value = direct
+        else:
+            parent_based = os.path.abspath(os.path.join("..", value))
+            value = parent_based if os.path.exists(parent_based) else direct
+
+    return os.path.normpath(value)
+
+
+def _normalized_abs_path(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def editor_breakpoints_file_path() -> str:
+    configured = _BREAKPOINTS_FILE_PATH.strip()
+    if not configured:
+        configured = os.path.join("test_build", "breakpoints.json")
+    return os.path.abspath(configured)
+
+
+def is_editor_breakpoints_file_path(path: str) -> bool:
+    return _normalized_abs_path(path) == _normalized_abs_path(editor_breakpoints_file_path())
+
+
+def _parse_editor_breakpoints_payload(payload) -> tuple[list[tuple[str, int]], str]:
+    if not isinstance(payload, list):
+        return [], "breakpoints file returned unexpected payload"
+
+    breakpoints: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filepath") or item.get("filename")
+        line_number = item.get("line_number")
+        if not isinstance(filename, str):
+            continue
+        try:
+            line = int(line_number)
+        except (TypeError, ValueError):
+            continue
+        if line <= 0:
+            continue
+
+        normalized = _normalize_breakpoint_path(filename)
+        if not normalized:
+            continue
+        ext = os.path.splitext(normalized)[1].lower()
+        if ext not in _BREAKPOINT_SOURCE_EXTENSIONS:
+            continue
+        if not os.path.exists(normalized):
+            continue
+
+        key = (normalized, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        breakpoints.append(key)
+
+    breakpoints.sort(key=lambda item: (item[0], item[1]))
+    return breakpoints, ""
+
+
+def refresh_editor_breakpoints_cache(force: bool = False) -> tuple[list[tuple[str, int]], str]:
+    global _editor_breakpoints_cache
+    global _editor_breakpoints_mtime_ns
+
+    breakpoints_file = editor_breakpoints_file_path()
+
+    try:
+        file_stat = os.stat(breakpoints_file)
+        file_mtime_ns = int(file_stat.st_mtime_ns)
+    except FileNotFoundError:
+        _editor_breakpoints_cache = []
+        _editor_breakpoints_mtime_ns = None
+        return [], f"breakpoints file not found: {breakpoints_file}"
+    except OSError as error:
+        return list(_editor_breakpoints_cache), f"unable to stat breakpoints file: {error}"
+
+    if not force and _editor_breakpoints_mtime_ns == file_mtime_ns:
+        return list(_editor_breakpoints_cache), ""
+
+    try:
+        with open(breakpoints_file, "r", encoding="utf-8", errors="replace") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError:
+        return list(_editor_breakpoints_cache), "breakpoints file contains invalid JSON"
+    except OSError as error:
+        return list(_editor_breakpoints_cache), f"unable to read breakpoints file: {error}"
+
+    parsed_breakpoints, parse_error = _parse_editor_breakpoints_payload(payload)
+    _editor_breakpoints_cache = parsed_breakpoints
+    _editor_breakpoints_mtime_ns = file_mtime_ns
+    return list(_editor_breakpoints_cache), parse_error
+
+
+def prime_editor_breakpoints_cache() -> None:
+    refresh_editor_breakpoints_cache(force=True)
 
 
 async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEvent) -> DebugStopEvent:
@@ -805,7 +934,43 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
         if test.debug_precision_mode == "precise":
             await controller.configure_manual_stepping()
         var_capture = _SequentialVarCaptureDecider(1)
-        initial_stop = await controller.break_main_and_run()
+        editor_breakpoints, fetch_error = refresh_editor_breakpoints_cache()
+        inserted_breakpoints = 0
+        for file_path, line in editor_breakpoints:
+            try:
+                inserted = await controller.insert_breakpoint(file_path, line)
+            except Exception:
+                inserted = False
+            if inserted:
+                inserted_breakpoints += 1
+
+        if inserted_breakpoints > 0:
+            _append_timeline_event(
+                test,
+                "debug_info",
+                f"loaded {inserted_breakpoints} editor breakpoints",
+            )
+            initial_stop = await controller.run()
+        else:
+            if editor_breakpoints:
+                _append_timeline_event(
+                    test,
+                    "debug_info",
+                    "editor breakpoints found, but none were valid in gdb; starting at main()",
+                )
+            elif fetch_error:
+                _append_timeline_event(
+                    test,
+                    "debug_info",
+                    f"{fetch_error}; starting at main()",
+                )
+            else:
+                _append_timeline_event(
+                    test,
+                    "debug_info",
+                    "no editor breakpoints found; starting at main()",
+                )
+            initial_stop = await controller.break_main_and_run()
         vars_for_event = await _capture_scope_variables(controller) if var_capture.should_capture(initial_stop) else []
         _record_stop_event(test, initial_stop, vars_for_event)
 

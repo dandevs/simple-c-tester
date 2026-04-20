@@ -24,6 +24,7 @@ from runner import (
     is_debug_active,
     cancel_test_and_restore_normal_build,
     state_changed,
+    persist_user_preferences,
 )
 from .test_debugger_screen_utils import (
     display_path,
@@ -282,6 +283,13 @@ class TestDebuggerScreen(Screen[None]):
             await self._run_action(self._restart_debug_session(), "Debugger restarted.")
             return
 
+        if self._is_manual_debug_story():
+            await self._run_action(
+                self._restart_debug_session(),
+                "Debugger restarted.",
+            )
+            return
+
         self._queue_story_capture("Auto-started story capture.")
 
     def _queue_story_capture(self, footer_message: str | None = None) -> None:
@@ -367,7 +375,7 @@ class TestDebuggerScreen(Screen[None]):
 
         await self._run_action(
             start_debug_session(self.test, precision_mode=self.test.debug_precision_mode),
-            "Debugger started at main().",
+            "Debugger started.",
         )
 
     async def action_step_next(self) -> None:
@@ -438,6 +446,8 @@ class TestDebuggerScreen(Screen[None]):
         self.test.debug_precision_mode = (
             "precise" if self.test.debug_precision_mode != "precise" else "loose"
         )
+        global_state.debug_precision_mode_preference = self.test.debug_precision_mode
+        persist_user_preferences()
         mode = self.test.debug_precision_mode
 
         if self._variables_task is not None and not self._variables_task.done():

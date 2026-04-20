@@ -89,6 +89,16 @@ class GdbMIController:
         await self._send_command("-break-insert main")
         return await self._run_until_stop("-exec-run")
 
+    async def insert_breakpoint(self, file_path: str, line: int) -> bool:
+        if not file_path or line <= 0:
+            return False
+        escaped_path = file_path.replace("\\", "\\\\").replace('"', '\\"')
+        result = await self._send_command(f'-break-insert "{escaped_path}:{line}"')
+        return result.get("message") != "error"
+
+    async def run(self) -> DebugStopEvent:
+        return await self._run_until_stop("-exec-run")
+
     async def next(self) -> DebugStopEvent:
         return await self._run_until_stop("-exec-next")
 

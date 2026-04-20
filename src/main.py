@@ -16,6 +16,7 @@ from runner import (
     build_project_sources,
     hydrate_dependencies_from_db,
     refresh_dependency_graph,
+    prime_editor_breakpoints_cache,
     _terminate_active_processes,
 )
 from app import TestRunnerApp
@@ -101,6 +102,7 @@ async def _main():
     generate_makefile()
     build_project_sources()
     refresh_dependency_graph()
+    prime_editor_breakpoints_cache()
     state.available_runners = args.parallel
 
     app = TestRunnerApp(args.watch, args.output_lines, args.theme, args.timeline)

@@ -10,7 +10,11 @@ import state as global_state
 from state import state, dep_index, active_processes
 from models import Test, TestState, Suite
 from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph
-from runner.execute import state_changed
+from runner.execute import (
+    state_changed,
+    is_editor_breakpoints_file_path,
+    refresh_editor_breakpoints_cache,
+)
 
 
 _change_lock = asyncio.Lock()
@@ -75,6 +79,8 @@ def _remove_test(abs_source_path: str) -> None:
 
 
 async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
+    breakpoints_changed = False
+    relevant_code_changes = False
     affected: dict[str, Test] = {}
     rerun_all = False
     src_dir = os.path.abspath("src")
@@ -83,8 +89,19 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
 
     for path, event_kinds in changed_paths.items():
         abs_path = os.path.abspath(path)
+
+        if is_editor_breakpoints_file_path(abs_path):
+            if "deleted" in event_kinds:
+                refresh_editor_breakpoints_cache(force=True)
+            elif event_kinds & {"created", "modified", "moved"}:
+                refresh_editor_breakpoints_cache(force=True)
+            breakpoints_changed = True
+            continue
+
         if _is_in_test_build(abs_path):
             continue
+
+        relevant_code_changes = True
 
         in_src = _is_under(abs_path, src_dir)
         in_tests = _is_under(abs_path, tests_dir)
@@ -144,6 +161,7 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
             test.time_state_changed = time.monotonic()
 
     existing_sources = {os.path.abspath(t.source_path) for t in state.all_tests}
+    added_tests = 0
     for path, event_kinds in changed_paths.items():
         if "deleted" in event_kinds:
             continue
@@ -162,13 +180,21 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
         test = Test(
             name=os.path.splitext(os.path.basename(abs_path))[0],
             source_path=source_path,
+            debug_precision_mode=global_state.debug_precision_mode_preference,
         )
         state.root_suite.tests.append(test)
         state.all_tests.append(test)
+        added_tests += 1
 
-    generate_makefile()
-    build_project_sources()
-    refresh_dependency_graph()
+    has_rebuild_inputs = bool(affected) or rerun_all or bool(removed_tests) or added_tests > 0
+    if has_rebuild_inputs:
+        generate_makefile()
+        build_project_sources()
+        refresh_dependency_graph()
+
+    if breakpoints_changed or relevant_code_changes:
+        state_changed()
+        return
     state_changed()
 
 

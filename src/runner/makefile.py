@@ -34,6 +34,12 @@ def _normalize_dep_path(path: str) -> str:
     return os.path.abspath(os.path.normpath(path))
 
 
+def _normalized_precision_mode(value) -> str:
+    if isinstance(value, str) and value.lower() == "precise":
+        return "precise"
+    return "loose"
+
+
 def _parse_dep_file(dep_file: str) -> list[str]:
     if not os.path.exists(dep_file):
         return []
@@ -222,7 +228,7 @@ def rebuild_dep_index():
             dep_index.setdefault(dep, []).append(test)
 
 
-def load_dependency_db() -> dict[str, dict[str, list[str]]]:
+def load_dependency_db() -> dict[str, dict]:
     global _last_db_mtime_ns
     if not os.path.exists(DB_PATH):
         _last_db_mtime_ns = None
@@ -235,17 +241,28 @@ def load_dependency_db() -> dict[str, dict[str, list[str]]]:
         _last_db_mtime_ns = None
         return {}
 
-    tests_data = data.get("tests") if isinstance(data, dict) else None
-    if not isinstance(tests_data, dict):
+    if not isinstance(data, dict):
         _last_db_mtime_ns = None
         return {}
+
+    tests_data = data.get("tests")
+    if not isinstance(tests_data, dict):
+        tests_data = {}
+
+    prefs_payload = data.get("preferences")
+    if isinstance(prefs_payload, dict):
+        global_state.debug_precision_mode_preference = _normalized_precision_mode(
+            prefs_payload.get("debug_precision_mode")
+        )
+    else:
+        global_state.debug_precision_mode_preference = "loose"
 
     try:
         _last_db_mtime_ns = os.stat(DB_PATH).st_mtime_ns
     except OSError:
         _last_db_mtime_ns = None
 
-    hydrated: dict[str, dict[str, list[str]]] = {}
+    hydrated: dict[str, dict] = {}
     for test_key, payload in tests_data.items():
         if not isinstance(test_key, str) or not isinstance(payload, dict):
             continue
@@ -281,6 +298,11 @@ def save_dependency_db(changed_test_keys: set[str] | None = None) -> None:
         }
 
     payload = {"tests": tests_payload}
+    payload["preferences"] = {
+        "debug_precision_mode": _normalized_precision_mode(
+            global_state.debug_precision_mode_preference
+        )
+    }
     new_content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     os.makedirs("test_build", exist_ok=True)
     with open(DB_PATH, "w", encoding="utf-8") as f:
@@ -291,8 +313,16 @@ def save_dependency_db(changed_test_keys: set[str] | None = None) -> None:
         _last_db_mtime_ns = None
 
 
+def persist_user_preferences() -> None:
+    save_dependency_db(changed_test_keys=None)
+
+
 def hydrate_dependencies_from_db() -> None:
     db = load_dependency_db()
+    for test in state.all_tests:
+        test.debug_precision_mode = _normalized_precision_mode(
+            global_state.debug_precision_mode_preference
+        )
     if not db:
         update_dep_graph_readiness()
         return

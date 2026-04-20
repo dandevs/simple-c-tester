@@ -67,7 +67,7 @@ def ensure_selected_frame_index(selected_frame_index, total_frames):
         return -1
 
     if selected_frame_index < 0 or selected_frame_index >= total_frames:
-        return total_frames - 1
+        return 0
 
     return selected_frame_index
 

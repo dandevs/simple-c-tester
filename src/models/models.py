@@ -64,7 +64,13 @@ class AppState:
             if entry.is_dir():
                 self.root_suite.children.append(self._build_suite(entry, path))
             elif entry.suffix == ".c":
-                test = Test(name=entry.stem, source_path=str(entry))
+                import state as global_state
+
+                test = Test(
+                    name=entry.stem,
+                    source_path=str(entry),
+                    debug_precision_mode=global_state.debug_precision_mode_preference,
+                )
                 self.root_suite.tests.append(test)
                 self.all_tests.append(test)
 
@@ -75,7 +81,13 @@ class AppState:
             if entry.is_dir():
                 suite.children.append(self._build_suite(entry, base_path))
             elif entry.suffix == ".c":
-                test = Test(name=entry.stem, source_path=str(entry))
+                import state as global_state
+
+                test = Test(
+                    name=entry.stem,
+                    source_path=str(entry),
+                    debug_precision_mode=global_state.debug_precision_mode_preference,
+                )
                 suite.tests.append(test)
                 self.all_tests.append(test)
         return suite
