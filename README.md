@@ -60,6 +60,11 @@ python3 ../src/main.py [--parallel N] [--watch] [--output-lines N] [--theme ansi
   - `P` toggles stepping precision (`loose`/`precise`) and persists that preference in `test_build/db.json`.
   - `R` restarts manual debug after a manual session exits.
 
+Precision modes:
+
+- `loose`: smart stepping optimized for source-level flow; it heuristically chooses step-over vs step-in and quickly steps out of non-user/library code.
+- `precise`: stricter GDB stepping behavior (`scheduler-locking step`) for line-by-line control with fewer heuristics.
+
 ## Test Layout
 
 The app scans tests/ recursively for .c files. Directory structure becomes suite structure in the UI.

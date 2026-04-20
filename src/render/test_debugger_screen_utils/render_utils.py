@@ -140,7 +140,7 @@ def render_code_panel(
         title = build_frame_title(event, selected)
 
         number_width = len(str(max(1, snippet_end)))
-        code_width = max(1, width - (number_width + 5))
+        code_width = max(1, width - (number_width + 3))
         snippet_text = build_frame_snippet(
             source_path,
             source_lines,
@@ -237,7 +237,7 @@ def render_full_file_panel(
         snippet_start = max(1, snippet_end - code_height + 1)
 
     number_width = len(str(max(1, snippet_end)))
-    code_width = max(1, width - (number_width + 5))
+    code_width = max(1, width - (number_width + 3))
     snippet = build_frame_snippet(
         source_path,
         source_lines,
