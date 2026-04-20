@@ -116,6 +116,8 @@ Manual debug can read breakpoints exported from VS Code extension tooling via:
 - `test_build/breakpoints.json` (default)
 - `CTESTER_BREAKPOINTS_FILE` (optional override path)
 
+To enable breakpoint support from VS Code, install the [vsc-simple-c-test-support](https://github.com/dandevs/vsc-simple-c-test-support) extension.
+
 Expected JSON shape:
 
 ```json
