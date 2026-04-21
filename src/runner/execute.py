@@ -171,7 +171,7 @@ def _is_manual_debug_mode(test: Test) -> bool:
 
 
 def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
-    annotations_by_file: dict[str, dict[int, str]] = {}
+    annotations_by_file: dict[str, dict[int, list[str]]] = {}
     events = test.timeline_events
     boundary = test.timeline_selected_event_index
     if boundary >= 0 and _is_manual_debug_mode(test):
@@ -191,12 +191,12 @@ def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
         file_path = os.path.abspath(event.file_path)
         if file_path not in annotations_by_file:
             annotations_by_file[file_path] = {}
-        annotations_by_file[file_path][event.line] = inline_str
+        annotations_by_file[file_path].setdefault(event.line, []).append(inline_str)
 
     result: dict[str, list[list]] = {}
     for file_path, line_map in annotations_by_file.items():
         sorted_lines = sorted(line_map.items())
-        result[file_path] = [[line, s] for line, s in sorted_lines]
+        result[file_path] = [[line, arr] for line, arr in sorted_lines]
     return result
 
 
