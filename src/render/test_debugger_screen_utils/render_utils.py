@@ -116,14 +116,11 @@ def build_frame_snippet(
     snippet_lines = []
     for line_no in range(snippet_start, snippet_end + 1):
         line_text = source_lines[line_no - 1]
-        if resolved_annotations is not None:
-            annotation = (
-                _build_resolved_annotations(resolved_annotations)
-                if line_no == line_number
-                else ""
-            )
-        else:
-            annotation = _build_line_annotations(line_text, variables or [])
+        annotation = ""
+        if line_no == line_number and resolved_annotations:
+            annotation = _build_resolved_annotations(resolved_annotations)
+        if not annotation and variables:
+            annotation = _build_line_annotations(line_text, variables)
         if annotation:
             line_text = f"{line_text}  {annotation}"
         snippet_lines.append(line_text.ljust(padded_width))

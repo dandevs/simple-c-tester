@@ -196,7 +196,10 @@ def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
     result: dict[str, list[list]] = {}
     for file_path, line_map in annotations_by_file.items():
         sorted_lines = sorted(line_map.items())
-        result[file_path] = [[line, arr] for line, arr in sorted_lines]
+        result[file_path] = [
+            [_line_text(file_path, line).strip(), line, arr]
+            for line, arr in sorted_lines
+        ]
     return result
 
 

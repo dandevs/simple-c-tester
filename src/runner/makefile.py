@@ -328,7 +328,7 @@ def persist_user_preferences() -> None:
     save_dependency_db(changed_test_keys=None)
 
 
-def save_story_annotations(test_key: str, annotations: dict[str, list[list]]) -> None:  # {abs_path: [[line, [str, ...]], ...]}
+def save_story_annotations(test_key: str, annotations: dict[str, list[list]]) -> None:  # {abs_path: [[lineText, line, [str, ...]], ...]}
     for test in state.all_tests:
         if _normalize_dep_path(test.source_path) == test_key:
             test.story_annotations = dict(annotations)
