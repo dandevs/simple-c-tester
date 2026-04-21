@@ -319,13 +319,19 @@ class TestDebuggerScreen(Screen[None]):
             await self.action_rerun_test()
         self.set_interval(0.1, self._tick)
 
-    async def action_close(self) -> None:
+    def on_unmount(self) -> None:
         if self._variables_task is not None and not self._variables_task.done():
             self._variables_task.cancel()
 
-        await cancel_test_and_restore_normal_build(self.test)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(cancel_test_and_restore_normal_build(self.test))
+        except RuntimeError:
+            pass
+
         save_story_annotations(os.path.abspath(self.test.source_path), {})
-        self._set_footer_text("Cancelled test debug/recording and restored normal build mode.")
+
+    async def action_close(self) -> None:
         self.app.pop_screen()
 
     async def action_toggle_timeline(self) -> None:
