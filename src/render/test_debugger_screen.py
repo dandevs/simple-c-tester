@@ -323,7 +323,7 @@ class TestDebuggerScreen(Screen[None]):
             self._variables_task.cancel()
 
         await cancel_test_and_restore_normal_build(self.test)
-        save_story_annotations(self.test.source_path, {})
+        save_story_annotations(os.path.abspath(self.test.source_path), {})
         self._set_footer_text("Cancelled test debug/recording and restored normal build mode.")
         self.app.pop_screen()
 
