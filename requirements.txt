@@ -3,3 +3,4 @@ watchdog>=3.0.0
 textual>=0.68.0
 pyperclip>=1.8.2
 pygdbmi>=0.11.0
+pyelftools>=0.31

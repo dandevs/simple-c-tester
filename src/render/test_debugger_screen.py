@@ -26,6 +26,8 @@ from runner import (
     cancel_test_and_restore_normal_build,
     state_changed,
     persist_user_preferences,
+    save_story_annotations,
+    _schedule_story_annotations_persist,
 )
 from runner.story_filters import normalized_story_filter_profile
 from .test_debugger_screen_utils import (
@@ -317,12 +319,19 @@ class TestDebuggerScreen(Screen[None]):
             await self.action_rerun_test()
         self.set_interval(0.1, self._tick)
 
-    async def action_close(self) -> None:
+    def on_unmount(self) -> None:
         if self._variables_task is not None and not self._variables_task.done():
             self._variables_task.cancel()
 
-        await cancel_test_and_restore_normal_build(self.test)
-        self._set_footer_text("Cancelled test debug/recording and restored normal build mode.")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(cancel_test_and_restore_normal_build(self.test))
+        except RuntimeError:
+            pass
+
+        save_story_annotations(os.path.abspath(self.test.source_path), {})
+
+    async def action_close(self) -> None:
         self.app.pop_screen()
 
     async def action_toggle_timeline(self) -> None:
@@ -537,6 +546,17 @@ class TestDebuggerScreen(Screen[None]):
             f"Precision set to {mode}. Debugger restarted.",
         )
 
+    def _update_selected_event_index_from_frame(self, frame) -> None:
+        try:
+            idx = self.test.timeline_events.index(frame)
+        except ValueError:
+            idx = -1
+        if not self._is_manual_debug_story() and self.selected_frame_index == 0:
+            self.test.timeline_selected_event_index = -1
+        else:
+            self.test.timeline_selected_event_index = idx
+        _schedule_story_annotations_persist(self.test)
+
     def action_timeline_prev(self) -> None:
         frames = self._line_frames()
         if not frames:
@@ -545,6 +565,7 @@ class TestDebuggerScreen(Screen[None]):
         self.selected_frame_index = ensure_selected_frame_index(
             max(0, self.selected_frame_index - 1), len(frames)
         )
+        self._update_selected_event_index_from_frame(frames[self.selected_frame_index])
         self._refresh_view(force=True)
 
     def action_timeline_next(self) -> None:
@@ -555,6 +576,7 @@ class TestDebuggerScreen(Screen[None]):
         self.selected_frame_index = ensure_selected_frame_index(
             min(len(frames) - 1, self.selected_frame_index + 1), len(frames)
         )
+        self._update_selected_event_index_from_frame(frames[self.selected_frame_index])
         self._refresh_view(force=True)
 
     def action_timeline_prev_10(self) -> None:
@@ -588,6 +610,7 @@ class TestDebuggerScreen(Screen[None]):
             min(len(frames) - 1, max(0, self.selected_frame_index + offset)),
             len(frames),
         )
+        self._update_selected_event_index_from_frame(frames[self.selected_frame_index])
         self._refresh_view(force=True)
 
     def on_resize(self, event: events.Resize) -> None:
@@ -642,6 +665,7 @@ class TestDebuggerScreen(Screen[None]):
         self._follow_latest_frame = False
         self._mouse_dragging = True
         self.selected_frame_index = ensure_selected_frame_index(new_index, total)
+        self._update_selected_event_index_from_frame(frames[self.selected_frame_index])
         self._refresh_view(force=True)
 
     def _handle_timeline_drag(self, event: events.MouseMove) -> None:
@@ -667,6 +691,7 @@ class TestDebuggerScreen(Screen[None]):
         new_index = self._index_from_column(col, bar_width, total)
 
         self.selected_frame_index = ensure_selected_frame_index(new_index, total)
+        self._update_selected_event_index_from_frame(frames[self.selected_frame_index])
         self._refresh_view(force=True)
 
     async def _run_action(
@@ -1065,6 +1090,7 @@ class TestDebuggerScreen(Screen[None]):
         total = len(frames)
         if total > 0 and self._follow_latest_frame and is_debug_active(self.test):
             self.selected_frame_index = total - 1
+            self.test.timeline_selected_event_index = -1
         self.selected_frame_index = ensure_selected_frame_index(
             self.selected_frame_index, total
         )

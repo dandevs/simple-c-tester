@@ -1,4 +1,5 @@
 import os
+import re
 
 from rich.console import Group
 from rich.syntax import Syntax
@@ -6,6 +7,89 @@ from rich.text import Text
 
 import state as global_state
 from .source_utils import display_path, detect_language, load_source_lines
+
+_C_KEYWORDS = {
+    "if", "else", "for", "while", "do", "switch", "case", "default",
+    "break", "continue", "return", "goto", "sizeof", "typeof",
+    "int", "char", "float", "double", "void", "long", "short",
+    "signed", "unsigned", "const", "static", "extern", "inline",
+    "struct", "union", "enum", "typedef", "volatile", "register",
+    "auto", "restrict", "_Bool", "_Complex", "_Imaginary",
+    "NULL", "true", "false",
+}
+
+_VAR_EXPR_RE = re.compile(r"[A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*")
+
+
+def _normalize_expr(expr: str) -> str:
+    """Normalize a C expression for lookup (e.g. table->count -> table.count)."""
+    expr = re.sub(r"\s*->\s*", ".", expr)
+    expr = re.sub(r"\s*\.\s*", ".", expr)
+    return expr
+
+
+def _extract_variable_expressions(line: str) -> list[str]:
+    """Extract potential variable/member expressions from a C source line."""
+    seen: set[str] = set()
+    expressions: list[str] = []
+    for match in _VAR_EXPR_RE.finditer(line):
+        expr = match.group(0)
+        normalized = _normalize_expr(expr)
+        root = normalized.split(".")[0]
+        if root in _C_KEYWORDS:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        expressions.append(expr)
+    return expressions
+
+
+def _build_line_annotations(line: str, variables: list[tuple[str, str]]) -> str:
+    """Build inline annotation string for a source line, e.g. '[table.count=5] [count=5]'."""
+    if not variables:
+        return ""
+
+    expressions = _extract_variable_expressions(line)
+    if not expressions:
+        return ""
+
+    var_map = {}
+    for name, value in variables:
+        var_map[_normalize_expr(name)] = value
+
+    annotations: list[str] = []
+    seen: set[str] = set()
+    for expr in expressions:
+        normalized = _normalize_expr(expr)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if normalized in var_map:
+            value = var_map[normalized]
+            display_value = value if len(value) <= 40 else value[:37] + "..."
+            annotations.append(f"[{expr}={display_value}]")
+
+    return " ".join(annotations)
+
+
+def _build_resolved_annotations(
+    resolved_annotations: list[tuple[str, str, str]],
+) -> str:
+    """Build inline annotation string from resolver output for current frame."""
+    if not resolved_annotations:
+        return ""
+
+    annotations: list[str] = []
+    seen: set[str] = set()
+    for name, value, _availability in resolved_annotations:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        display_value = value if len(value) <= 40 else value[:37] + "..."
+        annotations.append(f"[{name}={display_value}]")
+
+    return " ".join(annotations)
 
 
 STORY_META_HIGHLIGHT = "#89dceb"
@@ -25,12 +109,21 @@ def build_frame_snippet(
     snippet_end,
     selected,
     code_width,
+    variables=None,
+    resolved_annotations=None,
 ):
     padded_width = max(1, code_width)
-    snippet_lines = [
-        source_lines[line_no - 1].ljust(padded_width)
-        for line_no in range(snippet_start, snippet_end + 1)
-    ]
+    snippet_lines = []
+    for line_no in range(snippet_start, snippet_end + 1):
+        line_text = source_lines[line_no - 1]
+        annotation = ""
+        if line_no == line_number and resolved_annotations:
+            annotation = _build_resolved_annotations(resolved_annotations)
+        if not annotation and variables:
+            annotation = _build_line_annotations(line_text, variables)
+        if annotation:
+            line_text = f"{line_text}  {annotation}"
+        snippet_lines.append(line_text.ljust(padded_width))
     snippet_text = "\n".join(snippet_lines)
     line_count = len(snippet_lines)
     syntax = Syntax(
@@ -161,6 +254,8 @@ def render_code_panel(
             snippet_end,
             selected,
             code_width,
+            variables=event.variables,
+            resolved_annotations=event.resolved_annotations,
         )
 
         renderables.append(title)
@@ -258,6 +353,8 @@ def render_full_file_panel(
         snippet_end,
         True,
         code_width,
+        variables=event.variables,
+        resolved_annotations=event.resolved_annotations,
     )
 
     title = Text()

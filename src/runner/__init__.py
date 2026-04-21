@@ -17,6 +17,7 @@ from .execute import (
     get_debug_session,
     cancel_test_and_restore_normal_build,
     restore_normal_build_mode,
+    _schedule_story_annotations_persist,
 )
 from .makefile import (
     generate_makefile,
@@ -25,6 +26,7 @@ from .makefile import (
     hydrate_dependencies_from_db,
     refresh_dependency_graph,
     persist_user_preferences,
+    save_story_annotations,
 )
 from .state import all_tests_finished, has_active_tests, display_state_signature
 
@@ -47,12 +49,14 @@ __all__ = [
     "get_debug_session",
     "cancel_test_and_restore_normal_build",
     "restore_normal_build_mode",
+    "_schedule_story_annotations_persist",
     "generate_makefile",
     "rebuild_dep_index",
     "build_project_sources",
     "hydrate_dependencies_from_db",
     "refresh_dependency_graph",
     "persist_user_preferences",
+    "save_story_annotations",
     "all_tests_finished",
     "has_active_tests",
     "display_state_signature",

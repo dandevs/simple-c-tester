@@ -20,6 +20,10 @@ _SYNC_RE = re.compile(
     r"atomic_thread_fence"
     r")\b"
 )
+_STANDALONE_IGNORE_RE = re.compile(
+    r"\b(return|break|continue|goto|if|else|for|while|do|switch|case|default|sizeof|typeof)\b"
+)
+_CONTROL_FLOW_RE = re.compile(r"^\s*(return|break|continue|goto|if|else|for|while|do|switch|case|default)\b")
 _ANOMALOUS_LITERAL_VALUES = {
     "0x0",
     "(nil)",
@@ -94,6 +98,8 @@ def evaluate_trigger(
         return _first_hit_function(ctx, runtime_state)
     if trigger_id == "first_hit_line":
         return _first_hit_line(ctx, runtime_state)
+    if trigger_id == "standalone_expr":
+        return _standalone_expr(ctx)
     return None
 
 
@@ -295,6 +301,42 @@ def _sync_event(ctx: StoryStopContext) -> TriggerMatch | None:
         trigger_id="sync_event",
         label="Sync",
         message=f"sync event {api_name}()",
+    )
+
+
+def _is_standalone_expression_line(line_text: str) -> bool:
+    """Check if a source line is a standalone expression statement."""
+    if not line_text:
+        return False
+    line = line_text.split("//")[0].split("/*")[0]
+    line = line.strip()
+    if not line or not line.endswith(";"):
+        return False
+    body = line[:-1].strip()
+    if not body:
+        return False
+    if not re.search(r"[A-Za-z_]\w*(?:\s*(?:->|\.|\[))?", body):
+        return False
+    if "=" in body:
+        return False
+    if re.search(r"[A-Za-z_]\w*\s*\(", body):
+        return False
+    if _CONTROL_FLOW_RE.search(line_text):
+        return False
+    if _STANDALONE_IGNORE_RE.search(body):
+        return False
+    if _ASSERT_RE.search(line_text):
+        return False
+    return True
+
+
+def _standalone_expr(ctx: StoryStopContext) -> TriggerMatch | None:
+    if not _is_standalone_expression_line(ctx.line_text):
+        return None
+    return TriggerMatch(
+        trigger_id="standalone_expr",
+        label="Expr",
+        message=f"standalone expression at L{ctx.stop_event.line}",
     )
 
 

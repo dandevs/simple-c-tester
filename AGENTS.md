@@ -17,7 +17,7 @@ python3 ../src/main.py
 - `--watch` — file change monitoring, re-runs affected tests
 - `--output-lines N` (default 10) — max lines in inline output boxes
 - `--theme ansi|default` (default `ansi`)
-- `--timeline` — enable per-line Test Story capture with gdb
+- `--timeline` — globally enable per-line Test Story capture with gdb for all tests in the main list
 - `--debug-build` — compile tests with debug flags (`-g -O0`)
 - `--story-filter-profile minimal|balanced|all` (default `balanced`) — selects Test Story stop/filter profile
 - `--tsv-lines-above N` (default 4) — source lines shown above current frame
@@ -32,6 +32,11 @@ python3 ../src/main.py
 pip install -r requirements.txt
 ```
 Requires Python 3.9+, gcc, and make on PATH.
+On Linux with PEP 668 / externally-managed Python, install dependencies in a virtualenv instead:
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
 
 ## Build (PEX)
 ```bash
@@ -62,6 +67,7 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 
 - `src/runner/makefile.py` — `generate_makefile()`, include path resolution (`resolve_include_dirs` via iterative `gcc -E`), project source discovery and `libproject.a` build
 - `src/runner/execute.py` — `run_test()` invokes `make` then the binary; `state_changed()` dispatches tests via `asyncio.ensure_future()`; also owns Test Story/debug session orchestration, editor-breakpoint cache loading, and cancellation/rebuild restore flow
+- `src/runner/dwarf_core/` — reusable DWARF resolver core for line-table lookup, source-expression parsing, and inline variable annotations
 - `src/runner/story_filters/` — profile config (`minimal`/`balanced`/`all`), trigger matcher set (function enter/exit, branch, loop milestones, goto, assert, anomaly, sync, first-hit), and decision engine
 - `src/runner/debugger.py` — gdb MI controller used for Test Story capture and variable expansion
 - `src/runner/state.py` — helpers for checking completion state
@@ -75,6 +81,7 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 - UI redraws the full tree every 100ms tick when state changes (single `RichLog` widget)
 - `state_changed()` is sync, uses `asyncio.ensure_future()` to schedule async work
 - Test Story opens a per-test debug page with code frames and a variables tree; exiting a running story cancels the test, restores normal build mode, and reruns it normally
+- Opening the Test Story page enables capture for that test even without `--timeline`; `T` toggles capture for the selected test, while `--timeline` enables it globally for all tests
 - The debug page now has two stepping precisions: `loose` uses smart/heuristic stepping, while `precise` keeps the older scheduler-locking style; `P` toggles precision and restarts the debugger from the beginning
 - The selected precision mode (`loose`/`precise`) is persisted in `test_build/db.json` under `preferences.debug_precision_mode`, applied on startup, and used as the default for newly discovered tests
 - Manual debug startup loads breakpoints from `test_build/breakpoints.json` (override with `CTESTER_BREAKPOINTS_FILE`), filters to `.c`/`.cpp`, and if any are valid starts at the first breakpoint hit; otherwise it falls back to `main`
@@ -114,4 +121,8 @@ ject rebuilds
 ## Gotchas
 - `requirements.txt` includes `pyperclip` for clipboard support in the output screen, but it's not listed in `pyproject.toml` dependencies — the app handles `ImportError` gracefully
 - `pygdbmi` is required for Test Story/debug capture and must be available in the PEX/runtime environment
+- `pyelftools` powers DWARF-backed inline annotation resolution; if it's unavailable (or a binary has no DWARF info), resolver calls degrade gracefully to no inline annotations without breaking test execution or UI rendering
+- Inline annotations in the story viewer are resolver-backed when DWARF is available; card frames now carry `resolved_annotations` alongside the existing raw captured variables
+- Card frames use a fast variable-capture path by default so story startup stays responsive; deeper recursive variable expansion is reserved for the heavier anomaly/debug paths
 - The pex entry point is `main:entry` (not `src.main:entry`)
+- On Linux systems with PEP 668 (`externally-managed-environment`), install deps in a virtualenv (`python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`) for local source runs

@@ -10,7 +10,10 @@ def _as_int(value, default: int = 0) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
-        return default
+        try:
+            return int(str(value), 0)
+        except (TypeError, ValueError):
+            return default
 
 
 def _as_token(value) -> int | None:
@@ -27,6 +30,7 @@ class DebugStopEvent:
     reason: str = ""
     file_path: str = ""
     line: int = 0
+    program_counter: int = 0
     function: str = ""
     exit_code: int | None = None
     signal_name: str = ""
@@ -426,6 +430,7 @@ class GdbMIController:
         file_path = str(frame.get("fullname") or frame.get("file") or payload_dict.get("fullname") or payload_dict.get("file") or "")
         function = str(frame.get("func") or payload_dict.get("func") or "")
         line_number = _as_int(frame.get("line") or payload_dict.get("line"), 0)
+        program_counter = _as_int(frame.get("addr") or payload_dict.get("addr"), 0)
 
         exit_code = None
         exit_code_raw = payload_dict.get("exit-code")
@@ -442,6 +447,7 @@ class GdbMIController:
             reason=reason,
             file_path=file_path,
             line=line_number,
+            program_counter=program_counter,
             function=function,
             exit_code=exit_code,
             signal_name=signal_name,

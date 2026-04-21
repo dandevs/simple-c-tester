@@ -19,7 +19,12 @@ from .makefile import (
 )
 from .artifacts import test_binary_path
 from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
+from .dwarf_core import DwarfCoreApi, DwarfResolveRequest, create_dwarf_core_api
 from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_filter_profile
+from render.test_debugger_screen_utils.render_utils import (
+    _build_resolved_annotations,
+    _build_line_annotations,
+)
 
 
 MAX_TIMELINE_EVENTS = 12000
@@ -59,6 +64,8 @@ _BREAKPOINTS_FILE_PATH = os.environ.get(
 )
 _editor_breakpoints_cache: list[tuple[str, int]] = []
 _editor_breakpoints_mtime_ns: int | None = None
+_dwarf_core_api: DwarfCoreApi = create_dwarf_core_api()
+_annotation_persist_tasks: dict[str, asyncio.Task] = {}
 
 
 def _looks_pointer_value(value: str) -> bool:
@@ -93,6 +100,8 @@ def _append_timeline_event(
     function: str = "",
     stream: str = "",
     variables: list[tuple[str, str]] | None = None,
+    program_counter: int = 0,
+    resolved_annotations: list[tuple[str, str, str]] | None = None,
     primary_trigger: str = "",
     trigger_ids: list[str] | None = None,
     trigger_label: str = "",
@@ -108,6 +117,8 @@ def _append_timeline_event(
         function=function,
         stream=stream,
         variables=list(variables or []),
+        program_counter=program_counter,
+        resolved_annotations=list(resolved_annotations or []),
         primary_trigger=primary_trigger,
         trigger_ids=list(trigger_ids or []),
         trigger_label=trigger_label,
@@ -116,6 +127,159 @@ def _append_timeline_event(
     test.timeline_events.append(event)
     if len(test.timeline_events) > MAX_TIMELINE_EVENTS:
         test.timeline_events = test.timeline_events[-MAX_TIMELINE_EVENTS:]
+
+
+def _resolve_annotations_for_stop(
+    *,
+    binary_path: str,
+    stop_event: DebugStopEvent,
+    source_line: str,
+    runtime_variables: list[tuple[str, str]],
+) -> list[tuple[str, str, str]]:
+    if not binary_path:
+        return []
+
+    try:
+        resolve_response = _dwarf_core_api.resolve(
+            DwarfResolveRequest(
+                binary_path=binary_path,
+                address=stop_event.program_counter,
+                file_path=stop_event.file_path,
+                line=stop_event.line,
+                source_line=source_line,
+                runtime_variables=tuple(runtime_variables),
+                program_counter=stop_event.program_counter,
+            )
+        )
+    except Exception:
+        return []
+
+    if not resolve_response.ok or not resolve_response.annotations:
+        return []
+
+    return [
+        (annotation.name, annotation.value, annotation.availability)
+        for annotation in resolve_response.annotations
+    ]
+
+
+def _is_manual_debug_mode(test: Test) -> bool:
+    for event in reversed(test.timeline_events):
+        if event.kind == "run_start":
+            return "manual debug" in event.message.lower()
+    return False
+
+
+def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
+    annotations_by_file: dict[str, dict[int, list[str]]] = {}
+    events = test.timeline_events
+    boundary = test.timeline_selected_event_index
+    if boundary >= 0:
+        events = events[: boundary + 1]
+    for event in events:
+        if event.kind != "step":
+            continue
+        if not event.file_path or event.line <= 0:
+            continue
+        if event.resolved_annotations:
+            inline_str = _build_resolved_annotations(event.resolved_annotations)
+        else:
+            source_line = _line_text(event.file_path, event.line)
+            inline_str = _build_line_annotations(source_line, event.variables)
+        if not inline_str:
+            continue
+        file_path = os.path.abspath(event.file_path)
+        if file_path not in annotations_by_file:
+            annotations_by_file[file_path] = {}
+        annotations_by_file[file_path].setdefault(event.line, []).append(inline_str)
+
+    result: dict[str, list[list]] = {}
+    for file_path, line_map in annotations_by_file.items():
+        sorted_lines = sorted(line_map.items())
+        result[file_path] = [
+            [_line_text(file_path, line).strip(), line, arr]
+            for line, arr in sorted_lines
+        ]
+    return result
+
+
+def _persist_story_annotations(test: Test) -> None:
+    annotations = _compute_story_annotations(test)
+    from .makefile import save_story_annotations
+    save_story_annotations(_test_key(test), annotations)
+
+
+async def _persist_story_annotations_after_delay(test: Test) -> None:
+    test_key = _test_key(test)
+    try:
+        await asyncio.sleep(0.1)
+        _persist_story_annotations(test)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _annotation_persist_tasks.pop(test_key, None)
+
+
+def _schedule_story_annotations_persist(test: Test) -> None:
+    test_key = _test_key(test)
+    existing = _annotation_persist_tasks.get(test_key)
+    if existing is not None and not existing.done():
+        existing.cancel()
+    task = asyncio.ensure_future(_persist_story_annotations_after_delay(test))
+    _annotation_persist_tasks[test_key] = task
+
+
+async def _emit_skipped_standalone_exprs(
+    test: Test,
+    stop_event: DebugStopEvent,
+    story_filters: StoryFilterEngine,
+    controller: GdbMIController,
+    variables: list[tuple[str, str]],
+    binary_path: str,
+) -> None:
+    """Create synthetic timeline events for standalone expression lines skipped by gdb next()."""
+    prev = story_filters.previous_stop
+    if prev is None:
+        return
+    if not prev.file_path or prev.line <= 0:
+        return
+    if not stop_event.file_path or stop_event.line <= 0:
+        return
+    if os.path.abspath(prev.file_path) != os.path.abspath(stop_event.file_path):
+        return
+    if (prev.function or "") != (stop_event.function or ""):
+        return
+    if stop_event.line <= prev.line + 1:
+        return
+
+    from .story_filters import _is_standalone_expression_line
+
+    vars_for_synthetic = list(variables)
+    if not vars_for_synthetic:
+        vars_for_synthetic = await _capture_scope_variables_fast(controller)
+
+    for line_num in range(prev.line + 1, stop_event.line):
+        line_text = _line_text(stop_event.file_path, line_num)
+        if _is_standalone_expression_line(line_text):
+            synthetic_stop = DebugStopEvent(
+                file_path=stop_event.file_path,
+                line=line_num,
+                function=stop_event.function,
+                program_counter=stop_event.program_counter,
+            )
+            _record_stop_event(
+                test,
+                synthetic_stop,
+                binary_path=binary_path,
+                variables=vars_for_synthetic,
+                trigger_matches=[
+                    TriggerMatch(
+                        trigger_id="standalone_expr",
+                        label="Expr",
+                        message=f"standalone expression at L{line_num}",
+                    )
+                ],
+            )
 
 
 def _start_timeline_run(test: Test, reason: str) -> None:
@@ -496,6 +660,30 @@ async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[st
         return []
 
 
+async def _capture_scope_variables_fast(controller: GdbMIController) -> list[tuple[str, str]]:
+    """Capture lightweight frame variables without deep expansion.
+
+    This is used for card rendering paths where we want variable visibility
+    without paying the full recursive pointer/child expansion cost.
+    """
+    try:
+        simple_vars = await controller.list_simple_variables(timeout=1.0)
+        if not simple_vars:
+            simple_vars = await controller.list_all_variables(timeout=1.0)
+
+        seen: set[str] = set()
+        deduped: list[tuple[str, str]] = []
+        for name, value in simple_vars:
+            if name in seen:
+                continue
+            seen.add(name)
+            deduped.append((name, value))
+
+        return deduped[:120]
+    except Exception:
+        return []
+
+
 def _merge_trigger_matches(
     base_matches: list[TriggerMatch],
     extra_matches: list[TriggerMatch],
@@ -514,9 +702,18 @@ def _merge_trigger_matches(
 def _record_stop_event(
     test: Test,
     stop_event: DebugStopEvent,
+    binary_path: str = "",
     variables: list[tuple[str, str]] | None = None,
     trigger_matches: list[TriggerMatch] | None = None,
 ) -> None:
+    runtime_variables = list(variables or [])
+    source_line = _line_text(stop_event.file_path, stop_event.line)
+    resolved_annotations = _resolve_annotations_for_stop(
+        binary_path=binary_path,
+        stop_event=stop_event,
+        source_line=source_line,
+        runtime_variables=runtime_variables,
+    )
     matches = list(trigger_matches or [])
     primary = matches[0] if matches else None
     message = primary.message if primary is not None else _stop_reason_message(stop_event)
@@ -527,7 +724,9 @@ def _record_stop_event(
         file_path=stop_event.file_path,
         line=stop_event.line,
         function=stop_event.function,
-        variables=variables,
+        variables=runtime_variables,
+        program_counter=stop_event.program_counter,
+        resolved_annotations=resolved_annotations,
         primary_trigger=primary.trigger_id if primary is not None else "",
         trigger_ids=[match.trigger_id for match in matches],
         trigger_label=primary.label if primary is not None else "",
@@ -781,6 +980,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
     test.debug_running = True
     test.debug_exited = False
     test.debug_exit_code = None
+    test.timeline_selected_event_index = -1
     _append_timeline_event(test, "debug_start", f"gdb trace start: {binary_path}")
 
     await controller.start()
@@ -804,13 +1004,20 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             var_decision = story_filters.evaluate_with_variables(stop_event, variables)
             matches = _merge_trigger_matches(matches, var_decision.matches)
 
+        if matches and not variables:
+            variables = await _capture_scope_variables_fast(controller)
+
         if matches:
             _record_stop_event(
                 test,
                 stop_event,
+                binary_path=binary_path,
                 variables=variables,
                 trigger_matches=matches,
             )
+        await _emit_skipped_standalone_exprs(
+            test, stop_event, story_filters, controller, variables, binary_path
+        )
         story_filters.mark_processed(stop_event)
 
     stop_event = await controller.break_main_and_run()
@@ -832,6 +1039,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         test.debug_running = False
         test.debug_exited = True
         test.time_state_changed = time.monotonic()
+        _persist_story_annotations(test)
         return
 
     if stop_event_is_terminal(stop_event):
@@ -841,6 +1049,8 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
     await controller.shutdown()
     if active_processes.get(process_key) is controller.proc:
         active_processes.pop(process_key, None)
+
+    _persist_story_annotations(test)
 
 
 async def run_test(test: Test, on_complete: Callable[[], None]):
@@ -988,7 +1198,14 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
         vars_for_event: list[tuple[str, str]] = []
         if _stop_has_source_location(initial_stop):
             vars_for_event = await _capture_scope_variables(controller)
-        _record_stop_event(test, initial_stop, vars_for_event)
+        _record_stop_event(
+            test,
+            initial_stop,
+            binary_path=binary_path,
+            variables=vars_for_event,
+        )
+        test.timeline_selected_event_index = -1
+        _schedule_story_annotations_persist(test)
 
         if stop_event_is_terminal(initial_stop):
             _apply_terminal_stop(test, initial_stop)
@@ -1017,6 +1234,17 @@ async def stop_debug_session(test: Test) -> None:
         test.debug_exited = True
         test.debug_exit_code = None
         _append_timeline_event(test, "debug_end", "debug session stopped")
+
+    pending = _annotation_persist_tasks.pop(test_key, None)
+    if pending is not None and not pending.done():
+        pending.cancel()
+        try:
+            await pending
+        except asyncio.CancelledError:
+            pass
+
+    _persist_story_annotations(test)
+
     if global_state.active_debug_test_key == test_key:
         global_state.active_debug_test_key = None
 
@@ -1087,6 +1315,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
             current_stop = DebugStopEvent(
                 file_path=latest_event.file_path if latest_event is not None else "",
                 line=latest_event.line if latest_event is not None else 0,
+                program_counter=latest_event.program_counter if latest_event is not None else 0,
                 function=latest_event.function if latest_event is not None else "",
             )
             stop_event = await _auto_trace_step(controller, current_stop)
@@ -1104,7 +1333,14 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
     vars_for_event: list[tuple[str, str]] = []
     if _stop_has_source_location(stop_event):
         vars_for_event = await _capture_scope_variables(controller)
-    _record_stop_event(test, stop_event, vars_for_event)
+    _record_stop_event(
+        test,
+        stop_event,
+        binary_path=controller.binary_path,
+        variables=vars_for_event,
+    )
+    test.timeline_selected_event_index = -1
+    _schedule_story_annotations_persist(test)
     if stop_event_is_terminal(stop_event):
         _apply_terminal_stop(test, stop_event)
         _append_timeline_event(test, "debug_end", _stop_reason_message(stop_event))
