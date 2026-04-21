@@ -21,6 +21,10 @@ from .artifacts import test_binary_path
 from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
 from .dwarf_core import DwarfCoreApi, DwarfResolveRequest, create_dwarf_core_api
 from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_filter_profile
+from render.test_debugger_screen_utils.render_utils import (
+    _build_resolved_annotations,
+    _build_line_annotations,
+)
 
 
 MAX_TIMELINE_EVENTS = 12000
@@ -156,6 +160,38 @@ def _resolve_annotations_for_stop(
         (annotation.name, annotation.value, annotation.availability)
         for annotation in resolve_response.annotations
     ]
+
+
+def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
+    annotations_by_file: dict[str, dict[int, str]] = {}
+    for event in test.timeline_events:
+        if event.kind != "step":
+            continue
+        if not event.file_path or event.line <= 0:
+            continue
+        if event.resolved_annotations:
+            inline_str = _build_resolved_annotations(event.resolved_annotations)
+        else:
+            source_line = _line_text(event.file_path, event.line)
+            inline_str = _build_line_annotations(source_line, event.variables)
+        if not inline_str:
+            continue
+        file_path = os.path.abspath(event.file_path)
+        if file_path not in annotations_by_file:
+            annotations_by_file[file_path] = {}
+        annotations_by_file[file_path][event.line] = inline_str
+
+    result: dict[str, list[list]] = {}
+    for file_path, line_map in annotations_by_file.items():
+        sorted_lines = sorted(line_map.items())
+        result[file_path] = [[line, s] for line, s in sorted_lines]
+    return result
+
+
+def _persist_story_annotations(test: Test) -> None:
+    annotations = _compute_story_annotations(test)
+    from .makefile import save_story_annotations
+    save_story_annotations(_test_key(test), annotations)
 
 
 def _start_timeline_run(test: Test, reason: str) -> None:
@@ -911,6 +947,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         test.debug_running = False
         test.debug_exited = True
         test.time_state_changed = time.monotonic()
+        _persist_story_annotations(test)
         return
 
     if stop_event_is_terminal(stop_event):
@@ -920,6 +957,8 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
     await controller.shutdown()
     if active_processes.get(process_key) is controller.proc:
         active_processes.pop(process_key, None)
+
+    _persist_story_annotations(test)
 
 
 async def run_test(test: Test, on_complete: Callable[[], None]):
@@ -1101,6 +1140,9 @@ async def stop_debug_session(test: Test) -> None:
         test.debug_exited = True
         test.debug_exit_code = None
         _append_timeline_event(test, "debug_end", "debug session stopped")
+
+    _persist_story_annotations(test)
+
     if global_state.active_debug_test_key == test_key:
         global_state.active_debug_test_key = None
 

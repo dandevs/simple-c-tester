@@ -49,6 +49,7 @@ class Test:
     force_rebuild_once: bool = False
     debug_precision_mode: str = "loose"
     story_filter_profile: str = "balanced"
+    story_annotations: dict[str, list[list]] = field(default_factory=dict)
 
 
 @dataclass

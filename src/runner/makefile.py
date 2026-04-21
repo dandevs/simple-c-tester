@@ -295,12 +295,15 @@ def save_dependency_db(changed_test_keys: set[str] | None = None) -> None:
         except OSError:
             pass
 
-    tests_payload: dict[str, dict[str, list[str]]] = {}
+    tests_payload: dict[str, dict] = {}
     for test in state.all_tests:
         test_key = _normalize_dep_path(test.source_path)
-        tests_payload[test_key] = {
+        entry: dict = {
             "collected_dependencies": sorted(set(test.dependencies))
         }
+        if getattr(test, "story_annotations", None):
+            entry["story_annotations"] = test.story_annotations
+        tests_payload[test_key] = entry
 
     payload = {"tests": tests_payload}
     payload["preferences"] = {
@@ -322,6 +325,14 @@ def save_dependency_db(changed_test_keys: set[str] | None = None) -> None:
 
 
 def persist_user_preferences() -> None:
+    save_dependency_db(changed_test_keys=None)
+
+
+def save_story_annotations(test_key: str, annotations: dict[str, list[list]]) -> None:
+    for test in state.all_tests:
+        if _normalize_dep_path(test.source_path) == test_key:
+            test.story_annotations = dict(annotations)
+            break
     save_dependency_db(changed_test_keys=None)
 
 

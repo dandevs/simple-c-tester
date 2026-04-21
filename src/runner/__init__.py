@@ -25,6 +25,7 @@ from .makefile import (
     hydrate_dependencies_from_db,
     refresh_dependency_graph,
     persist_user_preferences,
+    save_story_annotations,
 )
 from .state import all_tests_finished, has_active_tests, display_state_signature
 
@@ -53,6 +54,7 @@ __all__ = [
     "hydrate_dependencies_from_db",
     "refresh_dependency_graph",
     "persist_user_preferences",
+    "save_story_annotations",
     "all_tests_finished",
     "has_active_tests",
     "display_state_signature",

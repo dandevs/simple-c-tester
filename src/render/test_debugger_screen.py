@@ -26,6 +26,7 @@ from runner import (
     cancel_test_and_restore_normal_build,
     state_changed,
     persist_user_preferences,
+    save_story_annotations,
 )
 from runner.story_filters import normalized_story_filter_profile
 from .test_debugger_screen_utils import (
@@ -322,6 +323,7 @@ class TestDebuggerScreen(Screen[None]):
             self._variables_task.cancel()
 
         await cancel_test_and_restore_normal_build(self.test)
+        save_story_annotations(self.test.source_path, {})
         self._set_footer_text("Cancelled test debug/recording and restored normal build mode.")
         self.app.pop_screen()
 
