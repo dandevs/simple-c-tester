@@ -163,9 +163,20 @@ def _resolve_annotations_for_stop(
     ]
 
 
+def _is_manual_debug_mode(test: Test) -> bool:
+    for event in reversed(test.timeline_events):
+        if event.kind == "run_start":
+            return "manual debug" in event.message.lower()
+    return False
+
+
 def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
     annotations_by_file: dict[str, dict[int, str]] = {}
-    for event in test.timeline_events:
+    events = test.timeline_events
+    boundary = test.timeline_selected_event_index
+    if boundary >= 0 and _is_manual_debug_mode(test):
+        events = events[: boundary + 1]
+    for event in events:
         if event.kind != "step":
             continue
         if not event.file_path or event.line <= 0:
@@ -913,6 +924,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
     test.debug_running = True
     test.debug_exited = False
     test.debug_exit_code = None
+    test.timeline_selected_event_index = -1
     _append_timeline_event(test, "debug_start", f"gdb trace start: {binary_path}")
 
     await controller.start()
@@ -1133,6 +1145,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
             binary_path=binary_path,
             variables=vars_for_event,
         )
+        test.timeline_selected_event_index = -1
         _schedule_story_annotations_persist(test)
 
         if stop_event_is_terminal(initial_stop):
@@ -1267,6 +1280,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
         binary_path=controller.binary_path,
         variables=vars_for_event,
     )
+    test.timeline_selected_event_index = -1
     _schedule_story_annotations_persist(test)
     if stop_event_is_terminal(stop_event):
         _apply_terminal_stop(test, stop_event)

@@ -17,6 +17,7 @@ from .execute import (
     get_debug_session,
     cancel_test_and_restore_normal_build,
     restore_normal_build_mode,
+    _schedule_story_annotations_persist,
 )
 from .makefile import (
     generate_makefile,
@@ -48,6 +49,7 @@ __all__ = [
     "get_debug_session",
     "cancel_test_and_restore_normal_build",
     "restore_normal_build_mode",
+    "_schedule_story_annotations_persist",
     "generate_makefile",
     "rebuild_dep_index",
     "build_project_sources",
