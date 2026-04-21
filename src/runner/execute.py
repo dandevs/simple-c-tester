@@ -65,6 +65,7 @@ _BREAKPOINTS_FILE_PATH = os.environ.get(
 _editor_breakpoints_cache: list[tuple[str, int]] = []
 _editor_breakpoints_mtime_ns: int | None = None
 _dwarf_core_api: DwarfCoreApi = create_dwarf_core_api()
+_annotation_persist_tasks: dict[str, asyncio.Task] = {}
 
 
 def _looks_pointer_value(value: str) -> bool:
@@ -192,6 +193,26 @@ def _persist_story_annotations(test: Test) -> None:
     annotations = _compute_story_annotations(test)
     from .makefile import save_story_annotations
     save_story_annotations(_test_key(test), annotations)
+
+
+async def _persist_story_annotations_after_delay(test: Test) -> None:
+    test_key = _test_key(test)
+    try:
+        await asyncio.sleep(0.1)
+        _persist_story_annotations(test)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _annotation_persist_tasks.pop(test_key, None)
+
+
+def _schedule_story_annotations_persist(test: Test) -> None:
+    test_key = _test_key(test)
+    existing = _annotation_persist_tasks.get(test_key)
+    if existing is not None and not existing.done():
+        existing.cancel()
+    task = asyncio.ensure_future(_persist_story_annotations_after_delay(test))
+    _annotation_persist_tasks[test_key] = task
 
 
 def _start_timeline_run(test: Test, reason: str) -> None:
@@ -1112,6 +1133,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
             binary_path=binary_path,
             variables=vars_for_event,
         )
+        _schedule_story_annotations_persist(test)
 
         if stop_event_is_terminal(initial_stop):
             _apply_terminal_stop(test, initial_stop)
@@ -1140,6 +1162,14 @@ async def stop_debug_session(test: Test) -> None:
         test.debug_exited = True
         test.debug_exit_code = None
         _append_timeline_event(test, "debug_end", "debug session stopped")
+
+    pending = _annotation_persist_tasks.pop(test_key, None)
+    if pending is not None and not pending.done():
+        pending.cancel()
+        try:
+            await pending
+        except asyncio.CancelledError:
+            pass
 
     _persist_story_annotations(test)
 
@@ -1237,6 +1267,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
         binary_path=controller.binary_path,
         variables=vars_for_event,
     )
+    _schedule_story_annotations_persist(test)
     if stop_event_is_terminal(stop_event):
         _apply_terminal_stop(test, stop_event)
         _append_timeline_event(test, "debug_end", _stop_reason_message(stop_event))
