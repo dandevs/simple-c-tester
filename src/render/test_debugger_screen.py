@@ -545,7 +545,10 @@ class TestDebuggerScreen(Screen[None]):
             idx = self.test.timeline_events.index(frame)
         except ValueError:
             idx = -1
-        self.test.timeline_selected_event_index = idx
+        if not self._is_manual_debug_story() and self.selected_frame_index == 0:
+            self.test.timeline_selected_event_index = -1
+        else:
+            self.test.timeline_selected_event_index = idx
         _schedule_story_annotations_persist(self.test)
 
     def action_timeline_prev(self) -> None:

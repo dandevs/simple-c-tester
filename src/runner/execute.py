@@ -174,7 +174,7 @@ def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
     annotations_by_file: dict[str, dict[int, list[str]]] = {}
     events = test.timeline_events
     boundary = test.timeline_selected_event_index
-    if boundary >= 0 and _is_manual_debug_mode(test):
+    if boundary >= 0:
         events = events[: boundary + 1]
     for event in events:
         if event.kind != "step":
