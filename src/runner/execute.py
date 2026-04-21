@@ -226,6 +226,59 @@ def _schedule_story_annotations_persist(test: Test) -> None:
     _annotation_persist_tasks[test_key] = task
 
 
+async def _emit_skipped_standalone_exprs(
+    test: Test,
+    stop_event: DebugStopEvent,
+    story_filters: StoryFilterEngine,
+    controller: GdbMIController,
+    variables: list[tuple[str, str]],
+    binary_path: str,
+) -> None:
+    """Create synthetic timeline events for standalone expression lines skipped by gdb next()."""
+    prev = story_filters.previous_stop
+    if prev is None:
+        return
+    if not prev.file_path or prev.line <= 0:
+        return
+    if not stop_event.file_path or stop_event.line <= 0:
+        return
+    if os.path.abspath(prev.file_path) != os.path.abspath(stop_event.file_path):
+        return
+    if (prev.function or "") != (stop_event.function or ""):
+        return
+    if stop_event.line <= prev.line + 1:
+        return
+
+    from .story_filters import _is_standalone_expression_line
+
+    vars_for_synthetic = list(variables)
+    if not vars_for_synthetic:
+        vars_for_synthetic = await _capture_scope_variables_fast(controller)
+
+    for line_num in range(prev.line + 1, stop_event.line):
+        line_text = _line_text(stop_event.file_path, line_num)
+        if _is_standalone_expression_line(line_text):
+            synthetic_stop = DebugStopEvent(
+                file_path=stop_event.file_path,
+                line=line_num,
+                function=stop_event.function,
+                program_counter=stop_event.program_counter,
+            )
+            _record_stop_event(
+                test,
+                synthetic_stop,
+                binary_path=binary_path,
+                variables=vars_for_synthetic,
+                trigger_matches=[
+                    TriggerMatch(
+                        trigger_id="standalone_expr",
+                        label="Expr",
+                        message=f"standalone expression at L{line_num}",
+                    )
+                ],
+            )
+
+
 def _start_timeline_run(test: Test, reason: str) -> None:
     run_index = (
         sum(1 for event in test.timeline_events if event.kind == "run_start") + 1
@@ -959,6 +1012,9 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
                 variables=variables,
                 trigger_matches=matches,
             )
+        await _emit_skipped_standalone_exprs(
+            test, stop_event, story_filters, controller, variables, binary_path
+        )
         story_filters.mark_processed(stop_event)
 
     stop_event = await controller.break_main_and_run()
