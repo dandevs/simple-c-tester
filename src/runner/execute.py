@@ -536,6 +536,30 @@ async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[st
         return []
 
 
+async def _capture_scope_variables_fast(controller: GdbMIController) -> list[tuple[str, str]]:
+    """Capture lightweight frame variables without deep expansion.
+
+    This is used for card rendering paths where we want variable visibility
+    without paying the full recursive pointer/child expansion cost.
+    """
+    try:
+        simple_vars = await controller.list_simple_variables(timeout=1.0)
+        if not simple_vars:
+            simple_vars = await controller.list_all_variables(timeout=1.0)
+
+        seen: set[str] = set()
+        deduped: list[tuple[str, str]] = []
+        for name, value in simple_vars:
+            if name in seen:
+                continue
+            seen.add(name)
+            deduped.append((name, value))
+
+        return deduped[:120]
+    except Exception:
+        return []
+
+
 def _merge_trigger_matches(
     base_matches: list[TriggerMatch],
     extra_matches: list[TriggerMatch],
@@ -854,6 +878,9 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             variables = await _capture_scope_variables(controller)
             var_decision = story_filters.evaluate_with_variables(stop_event, variables)
             matches = _merge_trigger_matches(matches, var_decision.matches)
+
+        if matches and not variables:
+            variables = await _capture_scope_variables_fast(controller)
 
         if matches:
             _record_stop_event(
