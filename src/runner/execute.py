@@ -19,6 +19,7 @@ from .makefile import (
 )
 from .artifacts import test_binary_path
 from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
+from .dwarf_core import DwarfCoreApi, DwarfResolveRequest, create_dwarf_core_api
 from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_filter_profile
 
 
@@ -59,6 +60,7 @@ _BREAKPOINTS_FILE_PATH = os.environ.get(
 )
 _editor_breakpoints_cache: list[tuple[str, int]] = []
 _editor_breakpoints_mtime_ns: int | None = None
+_dwarf_core_api: DwarfCoreApi = create_dwarf_core_api()
 
 
 def _looks_pointer_value(value: str) -> bool:
@@ -93,6 +95,8 @@ def _append_timeline_event(
     function: str = "",
     stream: str = "",
     variables: list[tuple[str, str]] | None = None,
+    program_counter: int = 0,
+    resolved_annotations: list[tuple[str, str, str]] | None = None,
     primary_trigger: str = "",
     trigger_ids: list[str] | None = None,
     trigger_label: str = "",
@@ -108,6 +112,8 @@ def _append_timeline_event(
         function=function,
         stream=stream,
         variables=list(variables or []),
+        program_counter=program_counter,
+        resolved_annotations=list(resolved_annotations or []),
         primary_trigger=primary_trigger,
         trigger_ids=list(trigger_ids or []),
         trigger_label=trigger_label,
@@ -116,6 +122,40 @@ def _append_timeline_event(
     test.timeline_events.append(event)
     if len(test.timeline_events) > MAX_TIMELINE_EVENTS:
         test.timeline_events = test.timeline_events[-MAX_TIMELINE_EVENTS:]
+
+
+def _resolve_annotations_for_stop(
+    *,
+    binary_path: str,
+    stop_event: DebugStopEvent,
+    source_line: str,
+    runtime_variables: list[tuple[str, str]],
+) -> list[tuple[str, str, str]]:
+    if not binary_path:
+        return []
+
+    try:
+        resolve_response = _dwarf_core_api.resolve(
+            DwarfResolveRequest(
+                binary_path=binary_path,
+                address=stop_event.program_counter,
+                file_path=stop_event.file_path,
+                line=stop_event.line,
+                source_line=source_line,
+                runtime_variables=tuple(runtime_variables),
+                program_counter=stop_event.program_counter,
+            )
+        )
+    except Exception:
+        return []
+
+    if not resolve_response.ok or not resolve_response.annotations:
+        return []
+
+    return [
+        (annotation.name, annotation.value, annotation.availability)
+        for annotation in resolve_response.annotations
+    ]
 
 
 def _start_timeline_run(test: Test, reason: str) -> None:
@@ -514,9 +554,18 @@ def _merge_trigger_matches(
 def _record_stop_event(
     test: Test,
     stop_event: DebugStopEvent,
+    binary_path: str = "",
     variables: list[tuple[str, str]] | None = None,
     trigger_matches: list[TriggerMatch] | None = None,
 ) -> None:
+    runtime_variables = list(variables or [])
+    source_line = _line_text(stop_event.file_path, stop_event.line)
+    resolved_annotations = _resolve_annotations_for_stop(
+        binary_path=binary_path,
+        stop_event=stop_event,
+        source_line=source_line,
+        runtime_variables=runtime_variables,
+    )
     matches = list(trigger_matches or [])
     primary = matches[0] if matches else None
     message = primary.message if primary is not None else _stop_reason_message(stop_event)
@@ -527,7 +576,9 @@ def _record_stop_event(
         file_path=stop_event.file_path,
         line=stop_event.line,
         function=stop_event.function,
-        variables=variables,
+        variables=runtime_variables,
+        program_counter=stop_event.program_counter,
+        resolved_annotations=resolved_annotations,
         primary_trigger=primary.trigger_id if primary is not None else "",
         trigger_ids=[match.trigger_id for match in matches],
         trigger_label=primary.label if primary is not None else "",
@@ -808,6 +859,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             _record_stop_event(
                 test,
                 stop_event,
+                binary_path=binary_path,
                 variables=variables,
                 trigger_matches=matches,
             )
@@ -988,7 +1040,12 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
         vars_for_event: list[tuple[str, str]] = []
         if _stop_has_source_location(initial_stop):
             vars_for_event = await _capture_scope_variables(controller)
-        _record_stop_event(test, initial_stop, vars_for_event)
+        _record_stop_event(
+            test,
+            initial_stop,
+            binary_path=binary_path,
+            variables=vars_for_event,
+        )
 
         if stop_event_is_terminal(initial_stop):
             _apply_terminal_stop(test, initial_stop)
@@ -1087,6 +1144,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
             current_stop = DebugStopEvent(
                 file_path=latest_event.file_path if latest_event is not None else "",
                 line=latest_event.line if latest_event is not None else 0,
+                program_counter=latest_event.program_counter if latest_event is not None else 0,
                 function=latest_event.function if latest_event is not None else "",
             )
             stop_event = await _auto_trace_step(controller, current_stop)
@@ -1104,7 +1162,12 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
     vars_for_event: list[tuple[str, str]] = []
     if _stop_has_source_location(stop_event):
         vars_for_event = await _capture_scope_variables(controller)
-    _record_stop_event(test, stop_event, vars_for_event)
+    _record_stop_event(
+        test,
+        stop_event,
+        binary_path=controller.binary_path,
+        variables=vars_for_event,
+    )
     if stop_event_is_terminal(stop_event):
         _apply_terminal_stop(test, stop_event)
         _append_timeline_event(test, "debug_end", _stop_reason_message(stop_event))

@@ -114,4 +114,6 @@ ject rebuilds
 ## Gotchas
 - `requirements.txt` includes `pyperclip` for clipboard support in the output screen, but it's not listed in `pyproject.toml` dependencies — the app handles `ImportError` gracefully
 - `pygdbmi` is required for Test Story/debug capture and must be available in the PEX/runtime environment
+- `pyelftools` powers DWARF-backed inline annotation resolution; if it's unavailable (or a binary has no DWARF info), resolver calls degrade gracefully to no inline annotations without breaking test execution or UI rendering
 - The pex entry point is `main:entry` (not `src.main:entry`)
+- On Linux systems with PEP 668 (`externally-managed-environment`), install deps in a virtualenv (`python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`) for local source runs
