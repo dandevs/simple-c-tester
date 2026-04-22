@@ -22,10 +22,9 @@ from .artifacts import test_binary_path
 from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
 from .dwarf_core import DwarfCoreApi, DwarfResolveRequest, create_dwarf_core_api
 from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_filter_profile
-from render.test_debugger_screen_utils.render_utils import (
-    _build_resolved_annotations,
-    _build_line_annotations,
-    _normalize_expr,
+from .story_annotations import (
+    get_story_annotations,
+    format_story_annotations_for_db,
 )
 
 
@@ -172,152 +171,11 @@ def _is_manual_debug_mode(test: Test) -> bool:
     return False
 
 
-def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
-    annotations_by_file: dict[str, dict[int, list[str]]] = {}
-    events = test.timeline_events
-    aggregate = getattr(test, "aggregate_annotations", True)
-    boundary = test.timeline_selected_event_index
-    if not aggregate and boundary >= 0:
-        events = events[: boundary + 1]
-
-    # Build captured variable map from relevant events
-    captured_vars: dict[str, str] = {}
-    for ev in events:
-        if ev.kind != "step":
-            continue
-        for name, value in (ev.variables or []):
-            captured_vars[_normalize_expr(name)] = value
-
-    # Try DWARF scope index for full-file, per-variable-liveness annotations
-    scope_annotations = _compute_scope_annotations(test, captured_vars)
-    if scope_annotations is not None:
-        return scope_annotations
-
-    # Fallback: snippet-window regex-based annotations
-    merged_vars: list[tuple[str, str]] | None = None
-    if aggregate:
-        merged_vars = list(captured_vars.items()) if captured_vars else None
-
-    lines_above = max(0, int(global_state.tsv_lines_above))
-    lines_below = max(0, int(global_state.tsv_lines_below))
-
-    for event in events:
-        if event.kind != "step":
-            continue
-        if not event.file_path or event.line <= 0:
-            continue
-
-        file_path = os.path.abspath(event.file_path)
-        source_lines = _load_source_lines(file_path)
-        if not source_lines:
-            continue
-
-        snippet_start = max(1, event.line - lines_above)
-        snippet_end = min(len(source_lines), event.line + lines_below)
-        vars_for_line = merged_vars if aggregate else event.variables
-
-        for line_no in range(snippet_start, snippet_end + 1):
-            annotation = ""
-            if line_no == event.line and event.resolved_annotations:
-                annotation = _build_resolved_annotations(event.resolved_annotations)
-            if not annotation and vars_for_line:
-                line_text = source_lines[line_no - 1]
-                annotation = _build_line_annotations(line_text, vars_for_line)
-            if not annotation:
-                continue
-            if file_path not in annotations_by_file:
-                annotations_by_file[file_path] = {}
-            annotations_by_file[file_path].setdefault(line_no, []).append(annotation)
-
-    result: dict[str, list[list]] = {}
-    for file_path, line_map in annotations_by_file.items():
-        sorted_lines = sorted(line_map.items())
-        result[file_path] = [
-            [_line_text(file_path, line).strip(), line, list(dict.fromkeys(arr))]
-            for line, arr in sorted_lines
-        ]
-    return result
-
-
-def _compute_scope_annotations(
-    test: Test,
-    captured_vars: dict[str, str],
-) -> dict[str, list[list]] | None:
-    """Use DWARF scope index to build full-file variable annotations.
-
-    Returns None if DWARF is unavailable or scope index is empty.
-    """
-    if not captured_vars:
-        return None
-
-    binary_path = test_binary_path(test.source_path)
-    if not os.path.isfile(binary_path):
-        return None
-
-    try:
-        from .dwarf_core import DwarfLoaderRequest
-
-        loader_response = _dwarf_core_api.load(DwarfLoaderRequest(binary_path=binary_path))
-    except Exception:
-        return None
-
-    if not loader_response.ok or not loader_response.scope_index.file_lines:
-        return None
-
-    annotations_by_file: dict[str, dict[int, list[str]]] = {}
-
-    for file_path, line_map in loader_response.scope_index.file_lines.items():
-        abs_path = os.path.abspath(file_path)
-        source_lines = _load_source_lines(abs_path)
-        if not source_lines:
-            continue
-
-        for line_no, alive_names in line_map.items():
-            if line_no <= 0 or line_no > len(source_lines):
-                continue
-
-            # Match alive variable names against captured values.
-            # Also allow nested expressions rooted at alive variables
-            # (e.g. DWARF knows "table" is alive → include captured
-            # "table.philosophers" and "table->philosophers").
-            matched_vars: list[tuple[str, str]] = []
-            for var_name in alive_names:
-                normalized = _normalize_expr(var_name)
-                if normalized in captured_vars:
-                    matched_vars.append((var_name, captured_vars[normalized]))
-                for cap_name, cap_value in captured_vars.items():
-                    if cap_name.startswith(normalized + "."):
-                        matched_vars.append((cap_name, cap_value))
-
-            if not matched_vars:
-                continue
-
-            line_text = source_lines[line_no - 1]
-            annotation = _build_line_annotations(line_text, matched_vars)
-            if not annotation:
-                continue
-
-            if abs_path not in annotations_by_file:
-                annotations_by_file[abs_path] = {}
-            annotations_by_file[abs_path].setdefault(line_no, []).append(annotation)
-
-    if not annotations_by_file:
-        return None
-
-    result: dict[str, list[list]] = {}
-    for file_path, line_map in annotations_by_file.items():
-        sorted_lines = sorted(line_map.items())
-        result[file_path] = [
-            [_line_text(file_path, line).strip(), line, list(dict.fromkeys(arr))]
-            for line, arr in sorted_lines
-        ]
-    return result
-
-
 def _persist_story_annotations(test: Test) -> None:
-    annotations = _compute_story_annotations(test)
+    annotations = get_story_annotations(test)
+    db_formatted = format_story_annotations_for_db(annotations)
     from .makefile import save_story_annotations
-    save_story_annotations(_test_key(test), annotations)
+    save_story_annotations(_test_key(test), db_formatted)
 
 
 async def _persist_story_annotations_after_delay(test: Test) -> None:

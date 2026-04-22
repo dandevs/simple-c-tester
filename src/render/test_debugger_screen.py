@@ -33,8 +33,8 @@ from runner import (
     cancel_pending_story_annotations_persist,
 )
 from runner.story_filters import normalized_story_filter_profile
+from runner.story_annotations import _normalize_expr
 from .test_debugger_screen_utils import (
-    _normalize_expr,
     display_path,
     detect_language,
     load_source_lines,
@@ -1036,16 +1036,17 @@ class TestDebuggerScreen(Screen[None]):
                 self.code_widget.update(Text.from_ansi(self.test.compile_err))
             return
         frames = self._line_frames()
-        agg_vars = self._build_aggregate_variables() if (
-            self.selected_frame_index == 0 and not is_active and not is_manual
-        ) else None
+
+        from runner.story_annotations import get_story_annotations
+        annotations = get_story_annotations(self.test)
+
         if self.full_file_view:
             render_full_file_panel(
                 self.code_widget,
                 frames,
                 self.selected_frame_index,
                 self._source_cache,
-                aggregate_variables=agg_vars,
+                annotations=annotations,
             )
         else:
             render_code_panel(
@@ -1053,7 +1054,7 @@ class TestDebuggerScreen(Screen[None]):
                 frames,
                 self.selected_frame_index,
                 self._source_cache,
-                aggregate_variables=agg_vars,
+                annotations=annotations,
             )
 
     def _render_variables_panel(self, selected_event) -> None:

@@ -20,6 +20,7 @@ from .execute import (
     _schedule_story_annotations_persist,
     cancel_pending_story_annotations_persist,
 )
+from .story_annotations import get_story_annotations
 from .makefile import (
     generate_makefile,
     rebuild_dep_index,
@@ -54,6 +55,7 @@ __all__ = [
     "restore_normal_build_mode",
     "_schedule_story_annotations_persist",
     "cancel_pending_story_annotations_persist",
+    "get_story_annotations",
     "generate_makefile",
     "rebuild_dep_index",
     "build_project_sources",
