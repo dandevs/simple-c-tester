@@ -69,6 +69,57 @@ _dwarf_core_api: DwarfCoreApi = create_dwarf_core_api()
 _annotation_persist_tasks: dict[str, asyncio.Task] = {}
 
 
+def _snapshot_accumulator(
+    acc: dict[str, dict[str, dict[int, dict[str, list[str]]]]]
+) -> dict[str, dict[str, dict[int, dict[str, list[str]]]]]:
+    """Create a snapshot of the accumulator.
+
+    More efficient than copy.deepcopy because we know the exact shape.
+    Only the inner list values need copying.
+    """
+    result: dict[str, dict[str, dict[int, dict[str, list[str]]]]] = {}
+    for file_path, func_map in acc.items():
+        file_copy: dict[str, dict[int, dict[str, list[str]]]] = {}
+        for func, line_map in func_map.items():
+            line_copy: dict[int, dict[str, list[str]]] = {}
+            for line, var_map in line_map.items():
+                line_copy[line] = {name: list(values) for name, values in var_map.items()}
+            file_copy[func] = line_copy
+        result[file_path] = file_copy
+    return result
+
+
+def _update_annotations_accumulator(
+    test: Test,
+    stop_event: DebugStopEvent,
+    variables: list[tuple[str, str]] | None = None,
+) -> int:
+    """Update the running annotation accumulator and return the snapshot index."""
+    if not stop_event.file_path or stop_event.line <= 0:
+        return len(test.annotation_snapshots) - 1 if test.annotation_snapshots else -1
+
+    file_key = os.path.abspath(stop_event.file_path)
+    func_key = stop_event.function or ""
+    line_key = stop_event.line
+
+    line_vars = (
+        test.annotations_accumulator
+        .setdefault(file_key, {})
+        .setdefault(func_key, {})
+        .setdefault(line_key, {})
+    )
+
+    for name, value in (variables or []):
+        history = line_vars.setdefault(name, [])
+        history.append(str(value))
+        max_hist = max(1, int(global_state.tsv_var_history))
+        if len(history) > max_hist:
+            history.pop(0)
+
+    test.annotation_snapshots.append(_snapshot_accumulator(test.annotations_accumulator))
+    return len(test.annotation_snapshots) - 1
+
+
 def _looks_pointer_value(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
@@ -107,6 +158,7 @@ def _append_timeline_event(
     trigger_ids: list[str] | None = None,
     trigger_label: str = "",
     trigger_message: str = "",
+    snapshot_index: int = -1,
 ) -> None:
     event = TimelineEvent(
         index=len(test.timeline_events) + 1,
@@ -124,6 +176,7 @@ def _append_timeline_event(
         trigger_ids=list(trigger_ids or []),
         trigger_label=trigger_label,
         trigger_message=trigger_message,
+        snapshot_index=snapshot_index,
     )
     test.timeline_events.append(event)
     if len(test.timeline_events) > MAX_TIMELINE_EVENTS:
@@ -674,6 +727,7 @@ def _record_stop_event(
     binary_path: str = "",
     variables: list[tuple[str, str]] | None = None,
     trigger_matches: list[TriggerMatch] | None = None,
+    snapshot_index: int = -1,
 ) -> None:
     runtime_variables = list(variables or [])
     source_line = _line_text(stop_event.file_path, stop_event.line)
@@ -700,6 +754,7 @@ def _record_stop_event(
         trigger_ids=[match.trigger_id for match in matches],
         trigger_label=primary.label if primary is not None else "",
         trigger_message=primary.message if primary is not None else "",
+        snapshot_index=snapshot_index,
     )
 
 
@@ -976,6 +1031,8 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         if matches and not variables:
             variables = await _capture_scope_variables_fast(controller)
 
+        snapshot_index = _update_annotations_accumulator(test, stop_event, variables)
+
         if matches:
             _record_stop_event(
                 test,
@@ -983,6 +1040,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
                 binary_path=binary_path,
                 variables=variables,
                 trigger_matches=matches,
+                snapshot_index=snapshot_index,
             )
         await _emit_skipped_standalone_exprs(
             test, stop_event, story_filters, controller, variables, binary_path
@@ -1036,6 +1094,8 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             _ensure_debug_build_mode(True)
 
         test.timeline_events = []
+        test.annotations_accumulator = {}
+        test.annotation_snapshots = []
         _start_timeline_run(test, "scheduled")
         compiled, binary_path = await _compile_binary_for_test(test, proc_env)
         if test.state == TestState.CANCELLED:
@@ -1102,6 +1162,8 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
     test.debug_exited = False
     test.debug_exit_code = None
     test.debug_precision_mode = "precise" if precision_mode == "precise" else "loose"
+    test.annotations_accumulator = {}
+    test.annotation_snapshots = []
     _start_timeline_run(test, "manual debug")
 
     proc_env = os.environ.copy()
@@ -1167,11 +1229,13 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
         vars_for_event: list[tuple[str, str]] = []
         if _stop_has_source_location(initial_stop):
             vars_for_event = await _capture_scope_variables(controller)
+        snapshot_index = _update_annotations_accumulator(test, initial_stop, vars_for_event)
         _record_stop_event(
             test,
             initial_stop,
             binary_path=binary_path,
             variables=vars_for_event,
+            snapshot_index=snapshot_index,
         )
         if _stop_has_source_location(initial_stop):
             save_debug_line(initial_stop.file_path, initial_stop.line)
@@ -1305,11 +1369,13 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
     vars_for_event: list[tuple[str, str]] = []
     if _stop_has_source_location(stop_event):
         vars_for_event = await _capture_scope_variables(controller)
+    snapshot_index = _update_annotations_accumulator(test, stop_event, vars_for_event)
     _record_stop_event(
         test,
         stop_event,
         binary_path=controller.binary_path,
         variables=vars_for_event,
+        snapshot_index=snapshot_index,
     )
     if _stop_has_source_location(stop_event):
         save_debug_line(stop_event.file_path, stop_event.line)

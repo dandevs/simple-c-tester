@@ -33,7 +33,7 @@ from runner import (
     cancel_pending_story_annotations_persist,
 )
 from runner.story_filters import normalized_story_filter_profile
-from runner.story_annotations import _normalize_expr
+from runner.story_annotations import _normalize_expr, get_story_annotations, get_story_annotations_for_snapshot
 from .test_debugger_screen_utils import (
     display_path,
     detect_language,
@@ -1037,8 +1037,17 @@ class TestDebuggerScreen(Screen[None]):
             return
         frames = self._line_frames()
 
-        from runner.story_annotations import get_story_annotations
-        annotations = get_story_annotations(self.test)
+        use_aggregate = not is_manual and self.selected_frame_index == 0
+        if use_aggregate:
+            annotations = get_story_annotations(self.test)
+        else:
+            selected_frame = frames[self.selected_frame_index] if frames else None
+            if selected_frame and selected_frame.snapshot_index >= 0:
+                annotations = get_story_annotations_for_snapshot(
+                    self.test, selected_frame.snapshot_index
+                )
+            else:
+                annotations = get_story_annotations(self.test)
 
         if self.full_file_view:
             render_full_file_panel(

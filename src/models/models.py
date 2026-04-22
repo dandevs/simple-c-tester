@@ -2,6 +2,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from .enum import TestState
 
+# file_path -> function_name -> line_number -> var_name -> [values]
+FileAnnotations = dict[str, dict[str, dict[int, dict[str, list[str]]]]]
+
 
 @dataclass
 class TimelineEvent:
@@ -20,6 +23,7 @@ class TimelineEvent:
     trigger_ids: list[str] = field(default_factory=list)
     trigger_label: str = ""
     trigger_message: str = ""
+    snapshot_index: int = -1
 
 
 @dataclass
@@ -52,6 +56,8 @@ class Test:
     story_annotations: dict[str, list[list]] = field(default_factory=dict)  # {abs_path: [[lineText, line, [str, ...]], ...]}
     aggregate_annotations: bool = True
     timeline_selected_event_index: int = -1
+    annotations_accumulator: FileAnnotations = field(default_factory=dict)
+    annotation_snapshots: list[FileAnnotations] = field(default_factory=list)
 
 
 @dataclass
