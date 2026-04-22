@@ -83,7 +83,7 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 - Test Story opens a per-test debug page with code frames and a variables tree; exiting a running story cancels the test, restores normal build mode, and reruns it normally
 - Opening the Test Story page enables capture for that test even without `--timeline`; `T` toggles capture for the selected test, while `--timeline` enables it globally for all tests
 - The debug page now has two stepping precisions: `loose` uses smart/heuristic stepping, while `precise` keeps the older scheduler-locking style; `P` toggles precision and restarts the debugger from the beginning
-- The selected precision mode (`loose`/`precise`) is persisted in `test_build/db.json` under `preferences.debug_precision_mode`, applied on startup, and used as the default for newly discovered tests
+- The selected precision mode (`loose`/`precise`) is persisted in `test_build/db.json` under `preferences.debug_precision_mode`; the default is `precise` (used for manual debug mode), applied on startup, and used as the default for newly discovered tests
 - Manual debug startup loads breakpoints from `test_build/breakpoints.json` (override with `CTESTER_BREAKPOINTS_FILE`), filters to `.c`/`.cpp`, and if any are valid starts at the first breakpoint hit; otherwise it falls back to `main`
 - `R` force-restarts a running debugger from the beginning if a step is in flight; `K` can interrupt even while another debug action is pending
 - After a manual debug session exits, pressing `R` restarts manual debug mode (it no longer falls back to auto story capture)
@@ -95,6 +95,11 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 - In debug mode, left/right history navigation is still available, and debug steps re-follow the latest frame while arrow scrubbing keeps the current history position
 - Variables expansion is driven by gdb MI (`pygdbmi`) and is frame-aware; expand/collapse state and per-frame scroll position are preserved in the viewer
 - In non-manual story mode, initial frame selection now starts at the first frame/card (index `0`) when no prior selection is valid
+- Aggregate variable annotations merge all captured variables from all timeline events into a single pool, shown only on card 0 in auto mode after the test completes; per-card variables are shown for cards 1+ and for manual debug mode
+- `test.aggregate_annotations` (bool, default `True`) controls whether `_compute_story_annotations()` processes all events or respects `timeline_selected_event_index`; it is toggled based on card selection (True on card 0 in auto mode, False otherwise), ensuring db.json annotations match the currently selected card scope
+- When a test fails with a compile error in auto story mode, the TSV card view is replaced with the gcc compile error output (with ANSI colors preserved) in the debug screen; manual debug mode keeps the normal card view behavior
+- The `on_unmount()` lifecycle hook on `TestDebuggerScreen` clears both `story_annotations` (saved as empty dict to db.json) and `debugLine` (removed from db.json), ensuring no stale state persists after exiting the screen regardless of exit path
+- A `debugLine` root-level entry is written to `test_build/db.json` in manual debug mode, tracking the currently selected card's source location (`{"filePath": "...", "lineNumber": N}`); it is updated on every card navigation (arrow keys, mouse click, drag) and on every debugger step; it is cleared on screen unmount
 
 ## Watch Mode Details
 - Observes repo root (`.`) recursively — no need to pre-build watched directory lists
