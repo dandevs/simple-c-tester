@@ -772,6 +772,7 @@ class TestDebuggerScreen(Screen[None]):
             int(self.size.height),
             self.full_file_view,
             self.test.story_filter_profile,
+            self.test.compile_err,
         )
 
     def _base_footer_text(self) -> str:
@@ -1017,8 +1018,14 @@ class TestDebuggerScreen(Screen[None]):
         return list(merged.items())
 
     def _render_code_panel(self) -> None:
-        frames = self._line_frames()
+        has_compile_err = bool(self.test.compile_err.strip())
         is_active = is_debug_active(self.test) or self.test.state == TestState.RUNNING
+        is_manual = self._is_manual_debug_story()
+        if has_compile_err and not is_active and not is_manual:
+            if self.code_widget is not None:
+                self.code_widget.update(Text.from_ansi(self.test.compile_err))
+            return
+        frames = self._line_frames()
         agg_vars = self._build_aggregate_variables() if (self.selected_frame_index == 0 and not is_active) else None
         if self.full_file_view:
             render_full_file_panel(

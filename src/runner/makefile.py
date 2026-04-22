@@ -36,9 +36,9 @@ def _normalize_dep_path(path: str) -> str:
 
 
 def _normalized_precision_mode(value) -> str:
-    if isinstance(value, str) and value.lower() == "precise":
-        return "precise"
-    return "loose"
+    if isinstance(value, str) and value.lower() == "loose":
+        return "loose"
+    return "precise"
 
 
 def _parse_dep_file(dep_file: str) -> list[str]:
@@ -259,7 +259,7 @@ def load_dependency_db() -> dict[str, dict]:
             prefs_payload.get("story_filter_profile")
         )
     else:
-        global_state.debug_precision_mode_preference = "loose"
+        global_state.debug_precision_mode_preference = "precise"
         global_state.story_filter_profile_preference = "balanced"
 
     try:

@@ -47,7 +47,7 @@ class Test:
     cancelled_by_user: bool = False
     rerun_after_user_cancel: bool = False
     force_rebuild_once: bool = False
-    debug_precision_mode: str = "loose"
+    debug_precision_mode: str = "precise"
     story_filter_profile: str = "balanced"
     story_annotations: dict[str, list[list]] = field(default_factory=dict)  # {abs_path: [[lineText, line, [str, ...]], ...]}
     aggregate_annotations: bool = True
