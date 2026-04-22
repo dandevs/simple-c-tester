@@ -276,12 +276,18 @@ def _compute_scope_annotations(
             if line_no <= 0 or line_no > len(source_lines):
                 continue
 
-            # Match alive variable names against captured values
+            # Match alive variable names against captured values.
+            # Also allow nested expressions rooted at alive variables
+            # (e.g. DWARF knows "table" is alive → include captured
+            # "table.philosophers" and "table->philosophers").
             matched_vars: list[tuple[str, str]] = []
             for var_name in alive_names:
                 normalized = _normalize_expr(var_name)
                 if normalized in captured_vars:
                     matched_vars.append((var_name, captured_vars[normalized]))
+                for cap_name, cap_value in captured_vars.items():
+                    if cap_name.startswith(normalized + "."):
+                        matched_vars.append((cap_name, cap_value))
 
             if not matched_vars:
                 continue
