@@ -190,31 +190,42 @@ def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
                 merged[_normalize_expr(name)] = value
         merged_vars = list(merged.items()) if merged else None
 
+    lines_above = max(0, int(global_state.tsv_lines_above))
+    lines_below = max(0, int(global_state.tsv_lines_below))
+
     for event in events:
         if event.kind != "step":
             continue
         if not event.file_path or event.line <= 0:
             continue
-        if event.resolved_annotations:
-            inline_str = _build_resolved_annotations(event.resolved_annotations)
-        else:
-            source_line = _line_text(event.file_path, event.line)
-            inline_str = _build_line_annotations(source_line, event.variables)
-        if not inline_str and merged_vars:
-            source_line = _line_text(event.file_path, event.line)
-            inline_str = _build_line_annotations(source_line, merged_vars)
-        if not inline_str:
-            continue
+
         file_path = os.path.abspath(event.file_path)
-        if file_path not in annotations_by_file:
-            annotations_by_file[file_path] = {}
-        annotations_by_file[file_path].setdefault(event.line, []).append(inline_str)
+        source_lines = _load_source_lines(file_path)
+        if not source_lines:
+            continue
+
+        snippet_start = max(1, event.line - lines_above)
+        snippet_end = min(len(source_lines), event.line + lines_below)
+        vars_for_line = merged_vars if aggregate else event.variables
+
+        for line_no in range(snippet_start, snippet_end + 1):
+            annotation = ""
+            if line_no == event.line and event.resolved_annotations:
+                annotation = _build_resolved_annotations(event.resolved_annotations)
+            if not annotation and vars_for_line:
+                line_text = source_lines[line_no - 1]
+                annotation = _build_line_annotations(line_text, vars_for_line)
+            if not annotation:
+                continue
+            if file_path not in annotations_by_file:
+                annotations_by_file[file_path] = {}
+            annotations_by_file[file_path].setdefault(line_no, []).append(annotation)
 
     result: dict[str, list[list]] = {}
     for file_path, line_map in annotations_by_file.items():
         sorted_lines = sorted(line_map.items())
         result[file_path] = [
-            [_line_text(file_path, line).strip(), line, arr]
+            [_line_text(file_path, line).strip(), line, list(dict.fromkeys(arr))]
             for line, arr in sorted_lines
         ]
     return result
