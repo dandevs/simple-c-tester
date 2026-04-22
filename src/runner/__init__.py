@@ -27,6 +27,8 @@ from .makefile import (
     refresh_dependency_graph,
     persist_user_preferences,
     save_story_annotations,
+    save_debug_line,
+    clear_debug_line,
 )
 from .state import all_tests_finished, has_active_tests, display_state_signature
 
@@ -57,6 +59,8 @@ __all__ = [
     "refresh_dependency_graph",
     "persist_user_preferences",
     "save_story_annotations",
+    "save_debug_line",
+    "clear_debug_line",
     "all_tests_finished",
     "has_active_tests",
     "display_state_signature",

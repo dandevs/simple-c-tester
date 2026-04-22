@@ -314,6 +314,8 @@ def save_dependency_db(changed_test_keys: set[str] | None = None) -> None:
             global_state.story_filter_profile_preference
         ),
     }
+    if global_state.debug_line is not None:
+        payload["debugLine"] = global_state.debug_line
     new_content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     os.makedirs("test_build", exist_ok=True)
     with open(DB_PATH, "w", encoding="utf-8") as f:
@@ -325,6 +327,19 @@ def save_dependency_db(changed_test_keys: set[str] | None = None) -> None:
 
 
 def persist_user_preferences() -> None:
+    save_dependency_db(changed_test_keys=None)
+
+
+def save_debug_line(file_path: str, line_number: int) -> None:
+    global_state.debug_line = {
+        "filePath": file_path,
+        "lineNumber": line_number,
+    }
+    save_dependency_db(changed_test_keys=None)
+
+
+def clear_debug_line() -> None:
+    global_state.debug_line = None
     save_dependency_db(changed_test_keys=None)
 
 

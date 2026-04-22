@@ -27,6 +27,8 @@ from runner import (
     state_changed,
     persist_user_preferences,
     save_story_annotations,
+    save_debug_line,
+    clear_debug_line,
     _schedule_story_annotations_persist,
 )
 from runner.story_filters import normalized_story_filter_profile
@@ -331,6 +333,7 @@ class TestDebuggerScreen(Screen[None]):
             pass
 
         save_story_annotations(os.path.abspath(self.test.source_path), {})
+        clear_debug_line()
 
     async def action_close(self) -> None:
         self.app.pop_screen()
@@ -556,6 +559,8 @@ class TestDebuggerScreen(Screen[None]):
             self.test.timeline_selected_event_index = -1
         else:
             self.test.timeline_selected_event_index = idx
+        if self._is_manual_debug_story() and frame.file_path and frame.line > 0:
+            save_debug_line(frame.file_path, frame.line)
         _schedule_story_annotations_persist(self.test)
 
     def action_timeline_prev(self) -> None:
