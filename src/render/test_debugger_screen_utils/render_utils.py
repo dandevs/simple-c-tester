@@ -259,7 +259,7 @@ def render_code_panel(
             code_width,
             variables=event.variables,
             resolved_annotations=event.resolved_annotations,
-            aggregate_variables=aggregate_variables,
+            aggregate_variables=aggregate_variables if index == 0 else None,
         )
 
         renderables.append(title)
@@ -360,7 +360,7 @@ def render_full_file_panel(
         code_width,
         variables=event.variables,
         resolved_annotations=event.resolved_annotations,
-        aggregate_variables=aggregate_variables,
+        aggregate_variables=aggregate_variables if selected == 0 else None,
     )
 
     title = Text()

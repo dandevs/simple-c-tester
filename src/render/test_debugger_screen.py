@@ -555,11 +555,14 @@ class TestDebuggerScreen(Screen[None]):
             idx = self.test.timeline_events.index(frame)
         except ValueError:
             idx = -1
-        if not self._is_manual_debug_story() and self.selected_frame_index == 0:
+        is_manual = self._is_manual_debug_story()
+        if not is_manual and self.selected_frame_index == 0:
             self.test.timeline_selected_event_index = -1
+            self.test.aggregate_annotations = True
         else:
             self.test.timeline_selected_event_index = idx
-        if self._is_manual_debug_story() and frame.file_path and frame.line > 0:
+            self.test.aggregate_annotations = False
+        if is_manual and frame.file_path and frame.line > 0:
             save_debug_line(frame.file_path, frame.line)
         _schedule_story_annotations_persist(self.test)
 
@@ -1031,7 +1034,9 @@ class TestDebuggerScreen(Screen[None]):
                 self.code_widget.update(Text.from_ansi(self.test.compile_err))
             return
         frames = self._line_frames()
-        agg_vars = self._build_aggregate_variables() if (self.selected_frame_index == 0 and not is_active) else None
+        agg_vars = self._build_aggregate_variables() if (
+            self.selected_frame_index == 0 and not is_active and not is_manual
+        ) else None
         if self.full_file_view:
             render_full_file_panel(
                 self.code_widget,
