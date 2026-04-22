@@ -16,6 +16,7 @@ from .makefile import (
     refresh_dependency_graph,
     generate_makefile,
     build_project_sources,
+    save_debug_line,
 )
 from .artifacts import test_binary_path
 from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
@@ -1220,6 +1221,8 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
             binary_path=binary_path,
             variables=vars_for_event,
         )
+        if _stop_has_source_location(initial_stop):
+            save_debug_line(initial_stop.file_path, initial_stop.line)
         test.timeline_selected_event_index = -1
         _schedule_story_annotations_persist(test)
 
@@ -1355,6 +1358,8 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
         binary_path=controller.binary_path,
         variables=vars_for_event,
     )
+    if _stop_has_source_location(stop_event):
+        save_debug_line(stop_event.file_path, stop_event.line)
     test.timeline_selected_event_index = -1
     _schedule_story_annotations_persist(test)
     if stop_event_is_terminal(stop_event):
