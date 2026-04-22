@@ -24,6 +24,7 @@ from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_fil
 from render.test_debugger_screen_utils.render_utils import (
     _build_resolved_annotations,
     _build_line_annotations,
+    _normalize_expr,
 )
 
 
@@ -173,9 +174,21 @@ def _is_manual_debug_mode(test: Test) -> bool:
 def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
     annotations_by_file: dict[str, dict[int, list[str]]] = {}
     events = test.timeline_events
+    aggregate = getattr(test, "aggregate_annotations", True)
     boundary = test.timeline_selected_event_index
-    if boundary >= 0:
+    if not aggregate and boundary >= 0:
         events = events[: boundary + 1]
+
+    merged_vars: list[tuple[str, str]] | None = None
+    if aggregate:
+        merged: dict[str, str] = {}
+        for ev in events:
+            if ev.kind != "step":
+                continue
+            for name, value in (ev.variables or []):
+                merged[_normalize_expr(name)] = value
+        merged_vars = list(merged.items()) if merged else None
+
     for event in events:
         if event.kind != "step":
             continue
@@ -186,6 +199,9 @@ def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
         else:
             source_line = _line_text(event.file_path, event.line)
             inline_str = _build_line_annotations(source_line, event.variables)
+        if not inline_str and merged_vars:
+            source_line = _line_text(event.file_path, event.line)
+            inline_str = _build_line_annotations(source_line, merged_vars)
         if not inline_str:
             continue
         file_path = os.path.abspath(event.file_path)

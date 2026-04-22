@@ -31,6 +31,7 @@ from runner import (
 )
 from runner.story_filters import normalized_story_filter_profile
 from .test_debugger_screen_utils import (
+    _normalize_expr,
     display_path,
     detect_language,
     load_source_lines,
@@ -1001,14 +1002,31 @@ class TestDebuggerScreen(Screen[None]):
         self._variables_cache[event_key] = list(selected_event.variables or [])
         self._refresh_view(force=True)
 
+    def _build_aggregate_variables(self) -> list[tuple[str, str]] | None:
+        events = self.test.timeline_events
+        if not events:
+            return None
+        merged: dict[str, str] = {}
+        for event in events:
+            if event.kind != "step":
+                continue
+            for name, value in (event.variables or []):
+                merged[_normalize_expr(name)] = value
+        if not merged:
+            return None
+        return list(merged.items())
+
     def _render_code_panel(self) -> None:
         frames = self._line_frames()
+        is_active = is_debug_active(self.test) or self.test.state == TestState.RUNNING
+        agg_vars = self._build_aggregate_variables() if (self.selected_frame_index == 0 and not is_active) else None
         if self.full_file_view:
             render_full_file_panel(
                 self.code_widget,
                 frames,
                 self.selected_frame_index,
                 self._source_cache,
+                aggregate_variables=agg_vars,
             )
         else:
             render_code_panel(
@@ -1016,6 +1034,7 @@ class TestDebuggerScreen(Screen[None]):
                 frames,
                 self.selected_frame_index,
                 self._source_cache,
+                aggregate_variables=agg_vars,
             )
 
     def _render_variables_panel(self, selected_event) -> None:

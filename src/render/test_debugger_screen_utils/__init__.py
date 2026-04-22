@@ -10,6 +10,7 @@ from .frame_utils import (
     compute_frame_cards_window,
 )
 from .render_utils import (
+    _normalize_expr,
     build_frame_snippet,
     build_frame_title,
     render_code_panel,
@@ -25,6 +26,7 @@ from .render_utils import (
 )
 
 __all__ = [
+    "_normalize_expr",
     "display_path",
     "detect_language",
     "load_source_lines",

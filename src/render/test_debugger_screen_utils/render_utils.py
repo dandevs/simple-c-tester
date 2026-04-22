@@ -111,16 +111,18 @@ def build_frame_snippet(
     code_width,
     variables=None,
     resolved_annotations=None,
+    aggregate_variables=None,
 ):
     padded_width = max(1, code_width)
+    annotation_vars = aggregate_variables if aggregate_variables else variables
     snippet_lines = []
     for line_no in range(snippet_start, snippet_end + 1):
         line_text = source_lines[line_no - 1]
         annotation = ""
         if line_no == line_number and resolved_annotations:
             annotation = _build_resolved_annotations(resolved_annotations)
-        if not annotation and variables:
-            annotation = _build_line_annotations(line_text, variables)
+        if not annotation and annotation_vars:
+            annotation = _build_line_annotations(line_text, annotation_vars)
         if annotation:
             line_text = f"{line_text}  {annotation}"
         snippet_lines.append(line_text.ljust(padded_width))
@@ -206,6 +208,7 @@ def render_code_panel(
     frames,
     selected_frame_index,
     source_cache,
+    aggregate_variables=None,
 ):
     if code_widget is None:
         return
@@ -256,6 +259,7 @@ def render_code_panel(
             code_width,
             variables=event.variables,
             resolved_annotations=event.resolved_annotations,
+            aggregate_variables=aggregate_variables,
         )
 
         renderables.append(title)
@@ -306,6 +310,7 @@ def render_full_file_panel(
     frames,
     selected_frame_index,
     source_cache,
+    aggregate_variables=None,
 ):
     if code_widget is None:
         return
@@ -355,6 +360,7 @@ def render_full_file_panel(
         code_width,
         variables=event.variables,
         resolved_annotations=event.resolved_annotations,
+        aggregate_variables=aggregate_variables,
     )
 
     title = Text()
