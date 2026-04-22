@@ -49,6 +49,22 @@ class DwarfLineIndex:
 
 
 @dataclass(frozen=True)
+class DwarfVariableLiveRange:
+    """A single live range for a variable (from location list or scope)."""
+    name: str
+    low_pc: int
+    high_pc: int
+    file_path: str = ""
+    line: int = 0
+
+
+@dataclass(frozen=True)
+class DwarfScopeIndex:
+    """Maps file_path → line_number → tuple of variable names alive at that line."""
+    file_lines: dict[str, dict[int, tuple[str, ...]]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class DwarfLoaderRequest:
     binary_path: str
 
@@ -58,6 +74,7 @@ class DwarfLoaderResponse:
     ok: bool
     compilation_units: tuple[DwarfCompilationUnit, ...] = ()
     line_index: DwarfLineIndex = DwarfLineIndex()
+    scope_index: DwarfScopeIndex = DwarfScopeIndex()
     pyelftools_available: bool = True
     dwarf_info_available: bool = True
     error: DwarfCoreError | None = None

@@ -7,8 +7,10 @@ from .models import (
     DwarfLineEntry,
     DwarfLoaderRequest,
     DwarfLoaderResponse,
+    DwarfScopeIndex,
     DwarfSourceLocation,
 )
+from .variable_scopes import build_scope_index
 
 try:
     from elftools.common.exceptions import ELFError
@@ -59,10 +61,12 @@ def load_dwarf_data(request: DwarfLoaderRequest) -> DwarfLoaderResponse:
             dwarf_info = elf_file.get_dwarf_info()
             compilation_units = _collect_compilation_units(dwarf_info)
             line_index = build_line_index(compilation_units)
+            scope_index = _build_scope_index(dwarf_info, line_index)
             return DwarfLoaderResponse(
                 ok=True,
                 compilation_units=compilation_units,
                 line_index=line_index,
+                scope_index=scope_index,
                 pyelftools_available=True,
                 dwarf_info_available=True,
             )
@@ -86,6 +90,13 @@ def load_dwarf_data(request: DwarfLoaderRequest) -> DwarfLoaderResponse:
             details={"binary_path": binary_path, "reason": str(error)},
             dwarf_info_available=False,
         )
+
+
+def _build_scope_index(dwarf_info, line_index) -> DwarfScopeIndex:
+    try:
+        return build_scope_index(line_index, dwarf_info)
+    except Exception:
+        return DwarfScopeIndex()
 
 
 def _collect_compilation_units(dwarf_info) -> tuple[DwarfCompilationUnit, ...]:

@@ -14,7 +14,9 @@ from .models import (
     DwarfLocationRange,
     DwarfResolveRequest,
     DwarfResolveResponse,
+    DwarfScopeIndex,
     DwarfSourceLocation,
+    DwarfVariableLiveRange,
     ResolvedVariableAnnotation,
     SourceExpressionParseRequest,
     SourceExpressionParseResponse,
@@ -22,6 +24,7 @@ from .models import (
 from .line_index import build_line_index, lookup_address
 from .loader import load_dwarf_data
 from .location_lists import is_location_live_at_address, load_location_lists
+from .variable_scopes import build_scope_index
 from .resolver import resolve_inline_annotations
 from .resolver_models import DwarfResolverInput, DwarfResolverOutput
 from .source_parser import (
@@ -54,11 +57,14 @@ __all__ = [
     "DwarfResolveResponse",
     "DwarfResolverInput",
     "DwarfResolverOutput",
+    "DwarfScopeIndex",
     "DwarfSourceLocation",
+    "DwarfVariableLiveRange",
     "ResolvedVariableAnnotation",
     "SourceExpressionParseRequest",
     "SourceExpressionParseResponse",
     "build_line_index",
+    "build_scope_index",
     "lookup_address",
     "SourceExpressionIdentifier",
     "SourceExpressionMatch",

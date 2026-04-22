@@ -180,15 +180,23 @@ def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
     if not aggregate and boundary >= 0:
         events = events[: boundary + 1]
 
+    # Build captured variable map from relevant events
+    captured_vars: dict[str, str] = {}
+    for ev in events:
+        if ev.kind != "step":
+            continue
+        for name, value in (ev.variables or []):
+            captured_vars[_normalize_expr(name)] = value
+
+    # Try DWARF scope index for full-file, per-variable-liveness annotations
+    scope_annotations = _compute_scope_annotations(test, captured_vars)
+    if scope_annotations is not None:
+        return scope_annotations
+
+    # Fallback: snippet-window regex-based annotations
     merged_vars: list[tuple[str, str]] | None = None
     if aggregate:
-        merged: dict[str, str] = {}
-        for ev in events:
-            if ev.kind != "step":
-                continue
-            for name, value in (ev.variables or []):
-                merged[_normalize_expr(name)] = value
-        merged_vars = list(merged.items()) if merged else None
+        merged_vars = list(captured_vars.items()) if captured_vars else None
 
     lines_above = max(0, int(global_state.tsv_lines_above))
     lines_below = max(0, int(global_state.tsv_lines_below))
@@ -220,6 +228,75 @@ def _compute_story_annotations(test: Test) -> dict[str, list[list]]:
             if file_path not in annotations_by_file:
                 annotations_by_file[file_path] = {}
             annotations_by_file[file_path].setdefault(line_no, []).append(annotation)
+
+    result: dict[str, list[list]] = {}
+    for file_path, line_map in annotations_by_file.items():
+        sorted_lines = sorted(line_map.items())
+        result[file_path] = [
+            [_line_text(file_path, line).strip(), line, list(dict.fromkeys(arr))]
+            for line, arr in sorted_lines
+        ]
+    return result
+
+
+def _compute_scope_annotations(
+    test: Test,
+    captured_vars: dict[str, str],
+) -> dict[str, list[list]] | None:
+    """Use DWARF scope index to build full-file variable annotations.
+
+    Returns None if DWARF is unavailable or scope index is empty.
+    """
+    if not captured_vars:
+        return None
+
+    binary_path = test_binary_path(test.source_path)
+    if not os.path.isfile(binary_path):
+        return None
+
+    try:
+        from .dwarf_core import DwarfLoaderRequest
+
+        loader_response = _dwarf_core_api.load(DwarfLoaderRequest(binary_path=binary_path))
+    except Exception:
+        return None
+
+    if not loader_response.ok or not loader_response.scope_index.file_lines:
+        return None
+
+    annotations_by_file: dict[str, dict[int, list[str]]] = {}
+
+    for file_path, line_map in loader_response.scope_index.file_lines.items():
+        abs_path = os.path.abspath(file_path)
+        source_lines = _load_source_lines(abs_path)
+        if not source_lines:
+            continue
+
+        for line_no, alive_names in line_map.items():
+            if line_no <= 0 or line_no > len(source_lines):
+                continue
+
+            # Match alive variable names against captured values
+            matched_vars: list[tuple[str, str]] = []
+            for var_name in alive_names:
+                normalized = _normalize_expr(var_name)
+                if normalized in captured_vars:
+                    matched_vars.append((var_name, captured_vars[normalized]))
+
+            if not matched_vars:
+                continue
+
+            line_text = source_lines[line_no - 1]
+            annotation = _build_line_annotations(line_text, matched_vars)
+            if not annotation:
+                continue
+
+            if abs_path not in annotations_by_file:
+                annotations_by_file[abs_path] = {}
+            annotations_by_file[abs_path].setdefault(line_no, []).append(annotation)
+
+    if not annotations_by_file:
+        return None
 
     result: dict[str, list[list]] = {}
     for file_path, line_map in annotations_by_file.items():

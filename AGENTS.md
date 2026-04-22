@@ -128,6 +128,8 @@ ject rebuilds
 - `pygdbmi` is required for Test Story/debug capture and must be available in the PEX/runtime environment
 - `pyelftools` powers DWARF-backed inline annotation resolution; if it's unavailable (or a binary has no DWARF info), resolver calls degrade gracefully to no inline annotations without breaking test execution or UI rendering
 - Inline annotations in the story viewer are resolver-backed when DWARF is available; card frames now carry `resolved_annotations` alongside the existing raw captured variables
+- Full-file variable annotations in db.json are driven by a DWARF scope index that parses per-variable location lists (`DW_AT_location`) to determine exact PC live ranges, then maps those ranges to source lines via the line index; annotations only appear on lines where a captured variable is both alive (per DWARF) and referenced by name (per regex)
+- The DWARF scope index is built lazily and cached inside `DwarfCoreApi`; if DWARF is unavailable or parsing fails, `_compute_story_annotations()` falls back to the previous snippet-window regex approach
 - Card frames use a fast variable-capture path by default so story startup stays responsive; deeper recursive variable expansion is reserved for the heavier anomaly/debug paths
 - The pex entry point is `main:entry` (not `src.main:entry`)
 - On Linux systems with PEP 668 (`externally-managed-environment`), install deps in a virtualenv (`python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`) for local source runs
