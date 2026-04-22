@@ -30,6 +30,7 @@ from runner import (
     save_debug_line,
     clear_debug_line,
     _schedule_story_annotations_persist,
+    cancel_pending_story_annotations_persist,
 )
 from runner.story_filters import normalized_story_filter_profile
 from .test_debugger_screen_utils import (
@@ -332,6 +333,7 @@ class TestDebuggerScreen(Screen[None]):
         except RuntimeError:
             pass
 
+        cancel_pending_story_annotations_persist(self.test)
         save_story_annotations(os.path.abspath(self.test.source_path), {})
         clear_debug_line()
 

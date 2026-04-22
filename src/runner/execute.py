@@ -246,6 +246,13 @@ def _schedule_story_annotations_persist(test: Test) -> None:
     _annotation_persist_tasks[test_key] = task
 
 
+def cancel_pending_story_annotations_persist(test: Test) -> None:
+    test_key = _test_key(test)
+    existing = _annotation_persist_tasks.pop(test_key, None)
+    if existing is not None and not existing.done():
+        existing.cancel()
+
+
 async def _emit_skipped_standalone_exprs(
     test: Test,
     stop_event: DebugStopEvent,
@@ -1240,7 +1247,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
         await stop_debug_session(test)
 
 
-async def stop_debug_session(test: Test) -> None:
+async def stop_debug_session(test: Test, persist_annotations: bool = True) -> None:
     test_key = _test_key(test)
     controller = _debug_sessions.pop(test_key, None)
     if controller is not None:
@@ -1262,7 +1269,8 @@ async def stop_debug_session(test: Test) -> None:
         except asyncio.CancelledError:
             pass
 
-    _persist_story_annotations(test)
+    if persist_annotations:
+        _persist_story_annotations(test)
 
     if global_state.active_debug_test_key == test_key:
         global_state.active_debug_test_key = None
@@ -1281,7 +1289,7 @@ async def cancel_test_and_restore_normal_build(test: Test) -> None:
     test.rerun_after_user_cancel = True
     test.force_rebuild_once = True
 
-    await stop_debug_session(test)
+    await stop_debug_session(test, persist_annotations=False)
 
     process = active_processes.get(test_key)
     if process is not None and process.returncode is None:
