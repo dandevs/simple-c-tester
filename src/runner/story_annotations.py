@@ -224,6 +224,59 @@ def _compute_scope_enriched_vars(
 
 
 # ---------------------------------------------------------------------------
+# Variable-history compression
+# ---------------------------------------------------------------------------
+
+def _parse_annotation(ann: str) -> tuple[str, str] | None:
+    """Parse '[expr=value]' -> (expr, value).  Returns None for non-standard shapes."""
+    if not ann.startswith("[") or not ann.endswith("]"):
+        return None
+    inner = ann[1:-1]
+    idx = inner.find("=")
+    if idx < 0:
+        return None
+    return inner[:idx], inner[idx + 1 :]
+
+
+def _compress_var_history(annotations: list[str], max_history: int) -> list[str]:
+    """Collapse multiple [var=val] entries for the same variable into
+    [var=latest,prev,prev2].  Non-standard annotations pass through untouched.
+    """
+    if max_history <= 0:
+        return annotations
+
+    parsed: list[tuple[str | None, str]] = []
+    for ann in annotations:
+        p = _parse_annotation(ann)
+        if p is None:
+            parsed.append((None, ann))
+        else:
+            parsed.append(p)
+
+    # Group by variable name, preserving chronological order
+    groups: dict[str, list[str]] = {}
+    other: list[str] = []
+    for name, value in parsed:
+        if name is None:
+            other.append(value)
+            continue
+        groups.setdefault(name, []).append(value)
+
+    result: list[str] = []
+    for name, values in groups.items():
+        if len(values) > max_history:
+            # newest first
+            kept = values[-max_history:][::-1]
+            result.append(f"[{name}={','.join(kept)}]")
+        else:
+            for v in values:
+                result.append(f"[{name}={v}]")
+
+    result.extend(other)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main annotation pipeline
 # ---------------------------------------------------------------------------
 
@@ -303,6 +356,11 @@ def _compute_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
             if not annotation:
                 continue
             annotations_by_file.setdefault(file_path, {})[line_no] = [annotation]
+
+        max_hist = max(1, int(global_state.tsv_var_history))
+        for line_map in annotations_by_file.values():
+            for line_no in list(line_map.keys()):
+                line_map[line_no] = _compress_var_history(line_map[line_no], max_hist)
 
         return annotations_by_file
 
@@ -391,10 +449,12 @@ def _compute_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
                 annotations_by_file[file_path] = {}
             annotations_by_file[file_path].setdefault(line_no, []).append(annotation)
 
-    # Deduplicate per line while preserving order
+    # Compress variable history + deduplicate per line
+    max_hist = max(1, int(global_state.tsv_var_history))
     for line_map in annotations_by_file.values():
         for line_no in list(line_map.keys()):
-            line_map[line_no] = list(dict.fromkeys(line_map[line_no]))
+            compressed = _compress_var_history(line_map[line_no], max_hist)
+            line_map[line_no] = list(dict.fromkeys(compressed))
 
     return annotations_by_file
 

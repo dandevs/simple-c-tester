@@ -92,6 +92,12 @@ def parse_args():
         action="store_true",
         help="Show [Reason] About details in Test Story cards",
     )
+    parser.add_argument(
+        "--tsv-var-history",
+        type=int,
+        default=3,
+        help="Max historical values shown per variable on a line (default: 3)",
+    )
     return parser.parse_args()
 
 
@@ -105,6 +111,7 @@ async def _main():
     global_state.tsv_vars_depth = max(1, int(args.tsv_vars_depth))
     global_state.tsv_variables_height = max(3, int(args.tsv_variables_height))
     global_state.tsv_show_reason_about = bool(args.tsv_show_reason_about)
+    global_state.tsv_var_history = max(1, int(args.tsv_var_history))
     global_state.story_filter_profile_preference = normalized_story_filter_profile(
         args.story_filter_profile
     )

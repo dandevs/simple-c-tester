@@ -26,6 +26,7 @@ python3 ../src/main.py
 - `--tsv-vars-depth N` (default 2) — variable expansion depth in the Test Story viewer
 - `--tsv-variables-height N` (default 10) — minimum height for the variables panel
 - `--tsv-show-reason-about` — shows verbose trigger "reason/about" detail text in card titles (hidden by default)
+- `--tsv-var-history N` (default 3) — max historical values shown per variable on a single source line in Test Story cards; when a line is visited multiple times, values are compressed into `[i=9,8,7]` instead of `[i=9] [i=8] [i=7]`
 
 ## Setup
 ```bash
