@@ -164,13 +164,6 @@ def _resolve_annotations_for_stop(
     ]
 
 
-def _is_manual_debug_mode(test: Test) -> bool:
-    for event in reversed(test.timeline_events):
-        if event.kind == "run_start":
-            return "manual debug" in event.message.lower()
-    return False
-
-
 def _persist_story_annotations(test: Test) -> None:
     annotations = get_story_annotations(test)
     db_formatted = format_story_annotations_for_db(annotations)

@@ -128,66 +128,99 @@ def _line_text(file_path: str, line_number: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# DWARF scope-index path
+# Manual-debug detection
+# ---------------------------------------------------------------------------
+
+def _is_manual_debug_mode(test: Test) -> bool:
+    for event in reversed(test.timeline_events):
+        if event.kind == "run_start":
+            return "manual debug" in event.message.lower()
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Annotatable-line gating
+# ---------------------------------------------------------------------------
+
+def _annotatable_lines(events: list) -> dict[tuple[str, str], set[int]]:
+    """Determine which lines per (file, function) should be annotated.
+
+    Returns a mapping of (abs_path, function_name) -> set of line numbers.
+
+    Rules:
+      - Auto story: per (file, function), all lines from min event line
+        to max event line (inclusive), so gaps between visited events
+        are also annotated.
+      - Manual debug: the current (file, function) additionally gets
+        all lines from 1 up to the latest event line in that function.
+    """
+    # Per-function event range
+    func_range: dict[tuple[str, str], tuple[int, int]] = {}
+    latest_event: dict[tuple[str, str], int] = {}
+
+    for ev in events:
+        if ev.kind != "step":
+            continue
+        if not ev.file_path or ev.line <= 0:
+            continue
+        key = (os.path.abspath(ev.file_path), ev.function or "")
+        min_line, max_line = func_range.get(key, (ev.line, ev.line))
+        func_range[key] = (min(min_line, ev.line), max(max_line, ev.line))
+        latest_event[key] = max(latest_event.get(key, 0), ev.line)
+
+    result: dict[tuple[str, str], set[int]] = {}
+    for key, (lo, hi) in func_range.items():
+        result[key] = set(range(lo, hi + 1))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# DWARF scope-index enrichment (returns flat variable list, not lines)
 # ---------------------------------------------------------------------------
 
 _dwarf_core_api: DwarfCoreApi = create_dwarf_core_api()
 
 
-def _compute_scope_annotations(
+def _compute_scope_enriched_vars(
     test: Test,
     captured_vars: dict[str, str],
-) -> dict[str, dict[int, list[str]]]:
-    """Use DWARF scope index to build full-file variable annotations."""
-    result: dict[str, dict[int, list[str]]] = {}
+) -> dict[str, str]:
+    """Use DWARF scope index to find additional captured expressions.
+
+    For each top-level variable that DWARF says is alive anywhere in the
+    binary, include all captured gdb expressions rooted at that variable.
+    Returns a flat mapping of normalised_name -> value.
+    """
+    enriched = dict(captured_vars)
     if not captured_vars:
-        return result
+        return enriched
 
     binary_path = test_binary_path(test.source_path)
     if not os.path.isfile(binary_path):
-        return result
+        return enriched
 
     try:
         from .dwarf_core import DwarfLoaderRequest
         loader_response = _dwarf_core_api.load(DwarfLoaderRequest(binary_path=binary_path))
     except Exception:
-        return result
+        return enriched
 
     if not loader_response.ok or not loader_response.scope_index.file_lines:
-        return result
+        return enriched
 
-    for file_path, line_map in loader_response.scope_index.file_lines.items():
-        abs_path = os.path.abspath(file_path)
-        source_lines = _load_source_lines(abs_path)
-        if not source_lines:
-            continue
-
-        for line_no, alive_names in line_map.items():
-            if line_no <= 0 or line_no > len(source_lines):
-                continue
-
-            matched_vars: list[tuple[str, str]] = []
+    alive_roots: set[str] = set()
+    for line_map in loader_response.scope_index.file_lines.values():
+        for alive_names in line_map.values():
             for var_name in alive_names:
-                normalized = _normalize_expr(var_name)
-                if normalized in captured_vars:
-                    matched_vars.append((var_name, captured_vars[normalized]))
-                for cap_name, cap_value in captured_vars.items():
-                    if cap_name.startswith(normalized + "."):
-                        matched_vars.append((cap_name, cap_value))
+                alive_roots.add(_normalize_expr(var_name))
 
-            if not matched_vars:
-                continue
+    for root in alive_roots:
+        for cap_name, cap_value in captured_vars.items():
+            if cap_name.startswith(root + ".") and cap_name not in enriched:
+                enriched[cap_name] = cap_value
 
-            line_text = source_lines[line_no - 1]
-            annotation = _build_line_annotations(line_text, matched_vars)
-            if not annotation:
-                continue
-
-            if abs_path not in result:
-                result[abs_path] = {}
-            result[abs_path].setdefault(line_no, []).append(annotation)
-
-    return result
+    return enriched
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +228,7 @@ def _compute_scope_annotations(
 # ---------------------------------------------------------------------------
 
 def _compute_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
-    """Compute inline annotations for all source lines based on timeline events."""
+    """Compute inline annotations gated by execution history."""
     annotations_by_file: dict[str, dict[int, list[str]]] = {}
     events = test.timeline_events
     aggregate = getattr(test, "aggregate_annotations", True)
@@ -203,26 +236,99 @@ def _compute_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
     if not aggregate and boundary >= 0:
         events = events[: boundary + 1]
 
-    # Build captured variable map from relevant events
-    captured_vars: dict[str, str] = {}
+    is_manual = _is_manual_debug_mode(test)
+
+    # ------------------------------------------------------------------
+    # Manual debug: single source of truth = latest event.
+    # Annotate all lines from file-start up to current PC in the current
+    # function.  Do NOT iterate historical events (their resolved_anno
+    # would leak stale values onto their original lines).
+    # ------------------------------------------------------------------
+    if is_manual:
+        latest_event = None
+        for ev in reversed(events):
+            if ev.kind == "step" and ev.file_path and ev.line > 0:
+                latest_event = ev
+                break
+        if latest_event is None:
+            return {}
+
+        file_path = os.path.abspath(latest_event.file_path)
+        func = latest_event.function or ""
+        key = (file_path, func)
+        source_lines = _load_source_lines(file_path)
+        if not source_lines:
+            return {}
+
+        # annotatable = every line in this function up to current PC
+        annotatable_lines: set[int] = set()
+        max_line = 0
+        for ev in events:
+            if ev.kind != "step":
+                continue
+            if not ev.file_path or ev.line <= 0:
+                continue
+            if os.path.abspath(ev.file_path) == file_path and (ev.function or "") == func:
+                annotatable_lines.add(ev.line)
+        if annotatable_lines:
+            max_line = max(annotatable_lines)
+            annotatable_lines = set(range(1, max_line + 1))
+
+        # Build variable pool from the latest event only
+        pool: dict[str, str] = {}
+        for name, value in (latest_event.variables or []):
+            pool[_normalize_expr(name)] = value
+        enriched = _compute_scope_enriched_vars(test, pool)
+
+        vars_for_line: list[tuple[str, str]] = []
+        seen_vars: set[str] = set()
+        for name, value in pool.items():
+            if name not in seen_vars:
+                seen_vars.add(name)
+                vars_for_line.append((name, value))
+        for name, value in enriched.items():
+            if name not in seen_vars:
+                root = name.split(".")[0]
+                if root in pool:
+                    seen_vars.add(name)
+                    vars_for_line.append((name, value))
+
+        for line_no in annotatable_lines:
+            line_text = source_lines[line_no - 1]
+            annotation = ""
+            if line_no == latest_event.line and latest_event.resolved_annotations:
+                annotation = _build_resolved_annotations(latest_event.resolved_annotations)
+            if not annotation and vars_for_line:
+                annotation = _build_line_annotations(line_text, vars_for_line)
+            if not annotation:
+                continue
+            annotations_by_file.setdefault(file_path, {})[line_no] = [annotation]
+
+        return annotations_by_file
+
+    # ------------------------------------------------------------------
+    # Auto story: per-event annotation (each card shows its own snapshot).
+    # ------------------------------------------------------------------
+
+    # Determine which lines are annotatable per (file, function)
+    annotatable = _annotatable_lines(events)
+
+    # Build per-function variable pools from captured events
+    function_vars: dict[tuple[str, str], dict[str, str]] = {}
     for ev in events:
         if ev.kind != "step":
             continue
+        if not ev.file_path or ev.line <= 0:
+            continue
+        key = (os.path.abspath(ev.file_path), ev.function or "")
+        pool = function_vars.setdefault(key, {})
         for name, value in (ev.variables or []):
-            captured_vars[_normalize_expr(name)] = value
+            pool[_normalize_expr(name)] = value
 
-    # DWARF scope index path
-    scope_result = _compute_scope_annotations(test, captured_vars)
-    for file_path, line_map in scope_result.items():
-        if file_path not in annotations_by_file:
-            annotations_by_file[file_path] = {}
-        for line_no, arr in line_map.items():
-            annotations_by_file[file_path].setdefault(line_no, []).extend(arr)
-
-    # Fallback / supplement: snippet-window regex-based annotations
-    merged_vars: list[tuple[str, str]] | None = None
-    if aggregate:
-        merged_vars = list(captured_vars.items()) if captured_vars else None
+    flat_captured: dict[str, str] = {}
+    for pool in function_vars.values():
+        flat_captured.update(pool)
+    enriched = _compute_scope_enriched_vars(test, flat_captured)
 
     lines_above = max(0, int(global_state.tsv_lines_above))
     lines_below = max(0, int(global_state.tsv_lines_below))
@@ -234,15 +340,45 @@ def _compute_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
             continue
 
         file_path = os.path.abspath(event.file_path)
+        func = event.function or ""
+        key = (file_path, func)
+        annotatable_lines = annotatable.get(key, set())
+        if not annotatable_lines:
+            continue
+
         source_lines = _load_source_lines(file_path)
         if not source_lines:
             continue
 
         snippet_start = max(1, event.line - lines_above)
         snippet_end = min(len(source_lines), event.line + lines_below)
-        vars_for_line = merged_vars if aggregate else event.variables
+        pool = function_vars.get(key, {})
+
+        vars_for_line: list[tuple[str, str]] = []
+        seen_vars: set[str] = set()
+        for name, value in pool.items():
+            if name not in seen_vars:
+                seen_vars.add(name)
+                vars_for_line.append((name, value))
+        for name, value in enriched.items():
+            if name not in seen_vars:
+                root = name.split(".")[0]
+                if root in pool:
+                    seen_vars.add(name)
+                    vars_for_line.append((name, value))
+
+        if aggregate:
+            for other_key, other_pool in function_vars.items():
+                if other_key[0] == file_path and other_key != key:
+                    for name, value in other_pool.items():
+                        if name not in seen_vars:
+                            seen_vars.add(name)
+                            vars_for_line.append((name, value))
 
         for line_no in range(snippet_start, snippet_end + 1):
+            if line_no not in annotatable_lines:
+                continue
+
             annotation = ""
             if line_no == event.line and event.resolved_annotations:
                 annotation = _build_resolved_annotations(event.resolved_annotations)
