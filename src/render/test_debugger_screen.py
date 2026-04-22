@@ -33,7 +33,7 @@ from runner import (
     cancel_pending_story_annotations_persist,
 )
 from runner.story_filters import normalized_story_filter_profile
-from runner.story_annotations import _normalize_expr, get_story_annotations, get_story_annotations_for_snapshot
+from runner.story_annotations import _normalize_expr, invalidate_story_annotation_cache
 from .test_debugger_screen_utils import (
     display_path,
     detect_language,
@@ -366,7 +366,9 @@ class TestDebuggerScreen(Screen[None]):
 
     def _queue_story_capture(self, footer_message: str | None = None) -> None:
         self._reset_story_state()
+        self.test.aggregate_annotations = True
         self._follow_latest_frame = False
+        clear_debug_line()
         self.test.state = TestState.PENDING
         self.test.time_start = 0.0
         self.test.time_state_changed = time.monotonic()
@@ -381,6 +383,7 @@ class TestDebuggerScreen(Screen[None]):
     async def _restart_debug_session(self) -> None:
         await stop_debug_session(self.test)
         self._reset_story_state()
+        self.test.aggregate_annotations = False
         await start_debug_session(self.test, precision_mode=self.test.debug_precision_mode)
 
     async def _force_restart_debug_session(self) -> None:
@@ -405,12 +408,15 @@ class TestDebuggerScreen(Screen[None]):
 
         await stop_debug_session(self.test)
         self._reset_story_state()
+        self.test.aggregate_annotations = False
         self._refresh_view(force=True)
         self._set_footer_text("Force restarting debugger...")
         await start_debug_session(self.test, precision_mode=self.test.debug_precision_mode)
 
     def _reset_story_state(self) -> None:
         self.test.timeline_events = []
+        self.test.annotation_cache.clear()
+        invalidate_story_annotation_cache(self.test)
         self.test.debug_logs = []
         self.test.stdout = ""
         self.test.stdout_raw = b""
@@ -418,6 +424,7 @@ class TestDebuggerScreen(Screen[None]):
         self.test.stderr_raw = b""
         self.test.compile_err = ""
         self.test.compile_err_raw = b""
+        self.test.timeline_selected_event_index = -1
         self._line_frames_cache_key = None
         self._line_frames_cache = []
         self._line_frames_last_event_count = 0
@@ -446,6 +453,7 @@ class TestDebuggerScreen(Screen[None]):
             self._variables_task.cancel()
             self._variables_task = None
         self._reset_story_state()
+        self.test.aggregate_annotations = False
         self._refresh_view(force=True)
         self._set_footer_text("Starting debugger...")
 
@@ -1037,17 +1045,8 @@ class TestDebuggerScreen(Screen[None]):
             return
         frames = self._line_frames()
 
-        use_aggregate = not is_manual and self.selected_frame_index == 0
-        if use_aggregate:
-            annotations = get_story_annotations(self.test)
-        else:
-            selected_frame = frames[self.selected_frame_index] if frames else None
-            if selected_frame and selected_frame.snapshot_index >= 0:
-                annotations = get_story_annotations_for_snapshot(
-                    self.test, selected_frame.snapshot_index
-                )
-            else:
-                annotations = get_story_annotations(self.test)
+        from runner.story_annotations import get_story_annotations
+        annotations = get_story_annotations(self.test)
 
         if self.full_file_view:
             render_full_file_panel(
@@ -1145,6 +1144,8 @@ class TestDebuggerScreen(Screen[None]):
         selected = None
         if 0 <= self.selected_frame_index < total:
             selected = frames[self.selected_frame_index]
+            if self._follow_latest_frame and is_debug_active(self.test) and selected.file_path and selected.line > 0:
+                save_debug_line(selected.file_path, selected.line)
 
         if self.header_widget is not None:
             status = self.test.state.value

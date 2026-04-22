@@ -4,6 +4,7 @@ import re
 import state as global_state
 from models import Test
 
+
 _C_KEYWORDS = {
     "if", "else", "for", "while", "do", "switch", "case", "default",
     "break", "continue", "return", "goto", "sizeof", "typeof",
@@ -15,6 +16,7 @@ _C_KEYWORDS = {
 }
 
 _VAR_EXPR_RE = re.compile(r"[A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*")
+_ANNOTATION_TOKEN_RE = re.compile(r"\[([^=\]]+)=([^\]]*)\]")
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +98,22 @@ def _build_resolved_annotations(
     return " ".join(annotations)
 
 
+def _merge_latest_annotations(annotation_strs: list[str]) -> list[str]:
+    """Parse annotation tokens and keep only the latest value per expression, preserving last-seen order."""
+    latest: dict[str, str] = {}
+    order: list[str] = []
+    for s in annotation_strs:
+        for match in _ANNOTATION_TOKEN_RE.finditer(s):
+            expr = match.group(1)
+            value = match.group(2)
+            if expr not in latest:
+                order.append(expr)
+            latest[expr] = value
+    if not latest:
+        return []
+    return [" ".join([f"[{expr}={latest[expr]}]" for expr in order])]
+
+
 # ---------------------------------------------------------------------------
 # Source-line helpers (self-contained cache)
 # ---------------------------------------------------------------------------
@@ -126,108 +144,168 @@ def _line_text(file_path: str, line_number: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Accumulator formatting
+# Annotation Cache (Store A)
 # ---------------------------------------------------------------------------
-
-def _format_var_history(values: list[str], max_history: int) -> str:
-    """Format a variable's history into '[name=v1,v2,v3]'."""
-    if not values:
-        return ""
-    if max_history <= 0:
-        display = values
-    elif len(values) > max_history:
-        display = values[-max_history:]
-    else:
-        display = values
-    return ",".join(display)
+# Per-function, per-file, per-line latest variable values.
+# Structure: {func_name: {abs_file_path: {line_no: {var_name: value}}}}
 
 
-def _format_accumulator_for_display(
-    accumulator: dict[str, dict[str, dict[int, dict[str, list[str]]]]]
-) -> dict[str, dict[int, list[str]]]:
-    """Convert the raw accumulator into the display format.
+def update_annotation_cache(test: Test, event) -> None:
+    """Update Store (A) after a debugger step.
 
-    Input:  {file_path: {function: {line: {var: [values]}}}}
-    Output: {file_path: {line: ["[var=v1,v2]", ...]}}
+    Each variable's value is stored at the exact source line where the
+    debugger stopped, keyed by the current function so that ``main``'s ``i``
+    does not clobber ``foo``'s ``i``.
     """
-    result: dict[str, dict[int, list[str]]] = {}
-    max_hist = max(1, int(global_state.tsv_var_history))
+    if event.kind != "step" or not event.file_path or event.line <= 0:
+        return
 
-    for file_path, func_map in accumulator.items():
-        file_result: dict[int, list[str]] = {}
-        for _func, line_map in func_map.items():
+    func = event.function or "global"
+    file_path = os.path.abspath(event.file_path)
+    line_no = event.line
+
+    func_cache = test.annotation_cache.setdefault(func, {})
+    file_cache = func_cache.setdefault(file_path, {})
+    line_cache = file_cache.setdefault(line_no, {})
+
+    for name, value in (event.variables or []):
+        line_cache[_normalize_expr(name)] = value
+
+
+def _cache_to_annotations(
+    cache: dict[str, dict[str, dict[int, dict[str, str]]]],
+) -> dict[str, dict[int, list[str]]]:
+    """Convert Store (A) into the legacy annotation dict format.
+
+    Merges across all function scopes for a given file/line, keeping the
+    latest value per variable name.
+    """
+    merged: dict[str, dict[int, dict[str, str]]] = {}
+    for func_map in cache.values():
+        for file_path, line_map in func_map.items():
+            if file_path not in merged:
+                merged[file_path] = {}
             for line_no, var_map in line_map.items():
-                annotations: list[str] = []
-                for var_name, values in var_map.items():
-                    history_str = _format_var_history(values, max_hist)
-                    if history_str:
-                        annotations.append(f"[{var_name}={history_str}]")
-                if annotations:
-                    file_result.setdefault(line_no, []).extend(annotations)
-        if file_result:
-            result[file_path] = file_result
+                merged_line = merged[file_path].setdefault(line_no, {})
+                for var_name, value in var_map.items():
+                    merged_line[var_name] = value
+
+    result: dict[str, dict[int, list[str]]] = {}
+    for file_path, line_map in merged.items():
+        result[file_path] = {}
+        for line_no, var_map in line_map.items():
+            if not var_map:
+                continue
+            line_text = _line_text(file_path, line_no)
+            annotation = _build_line_annotations(line_text, list(var_map.items()))
+            if annotation:
+                result[file_path][line_no] = [annotation]
 
     return result
 
 
-# ---------------------------------------------------------------------------
-# Formatted annotation cache
-#
-# Snapshots are immutable append-only. Once formatted, a snapshot never
-# changes, so cache entries never need invalidation.
-# ---------------------------------------------------------------------------
-
-_MAX_FORMATTED_CACHE_SIZE = 512
-_formatted_cache: dict[tuple[str, int], dict[str, dict[int, list[str]]]] = {}
-
-
-def _cache_key_for_test(test: Test) -> str:
-    return os.path.abspath(test.source_path)
-
-
-def _get_cached_formatted(
-    test: Test, snapshot_index: int
-) -> dict[str, dict[int, list[str]]] | None:
-    test_key = _cache_key_for_test(test)
-    return _formatted_cache.get((test_key, snapshot_index))
-
-
-def _set_cached_formatted(
-    test: Test, snapshot_index: int, formatted: dict[str, dict[int, list[str]]]
-) -> None:
-    test_key = _cache_key_for_test(test)
-    if len(_formatted_cache) >= _MAX_FORMATTED_CACHE_SIZE:
-        _formatted_cache.clear()
-    _formatted_cache[(test_key, snapshot_index)] = formatted
+def _replay_events_to_cache(
+    events,
+) -> dict[str, dict[str, dict[int, dict[str, str]]]]:
+    """Replay a slice of events into a temporary Store (A) snapshot."""
+    cache: dict[str, dict[str, dict[int, dict[str, str]]]] = {}
+    for event in events:
+        if event.kind != "step" or not event.file_path or event.line <= 0:
+            continue
+        func = event.function or "global"
+        file_path = os.path.abspath(event.file_path)
+        line_no = event.line
+        func_cache = cache.setdefault(func, {})
+        file_cache = func_cache.setdefault(file_path, {})
+        line_cache = file_cache.setdefault(line_no, {})
+        for name, value in (event.variables or []):
+            line_cache[_normalize_expr(name)] = value
+    return cache
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Main annotation pipeline
 # ---------------------------------------------------------------------------
+
+def _compute_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
+    """Compute inline annotations from Store (A) or by replaying events."""
+    aggregate = getattr(test, "aggregate_annotations", True)
+    boundary = test.timeline_selected_event_index
+
+    if aggregate:
+        # Aggregate mode: display Store (A) as-is — only lines where the
+        # debugger actually stopped are annotated.  No DWARF supplementation.
+        cache = test.annotation_cache
+        return _cache_to_annotations(cache)
+
+    # Per-frame mode: replay events up to the selected card into a
+    # temporary Store (A), then annotate ONLY lines that have an explicit
+    # cache entry.  Unvisited lines in the snippet window remain blank.
+    events = test.timeline_events
+    if boundary >= 0:
+        events = events[: boundary + 1]
+    cache = _replay_events_to_cache(events)
+
+    # Ensure the current frame's line is present with its latest values
+    target_event = None
+    if events:
+        target_event = events[-1]
+    if target_event and target_event.kind == "step" and target_event.file_path and target_event.line > 0:
+        func = target_event.function or "global"
+        file_path = os.path.abspath(target_event.file_path)
+        line_no = target_event.line
+        func_cache = cache.setdefault(func, {})
+        file_cache = func_cache.setdefault(file_path, {})
+        line_cache = file_cache.setdefault(line_no, {})
+        for name, value in (target_event.variables or []):
+            line_cache[_normalize_expr(name)] = value
+
+    return _cache_to_annotations(cache)
+
+
+# ---------------------------------------------------------------------------
+# Public API with caching
+# ---------------------------------------------------------------------------
+
+_MAX_ANNOTATION_CACHE_SIZE = 256
+_annotation_cache: dict[tuple[str, int, bool, int], dict[str, dict[int, list[str]]]] = {}
+
 
 def get_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
-    """Return inline annotations from the current accumulator state."""
-    cached = _get_cached_formatted(test, -1)
+    """Return cached inline annotations for the test.
+
+    The result is a mapping of:
+        absolute_file_path -> line_number -> [annotation_strings]
+    """
+    test_key = os.path.abspath(test.source_path)
+    event_count = len(test.timeline_events)
+    aggregate = getattr(test, "aggregate_annotations", True)
+    boundary = test.timeline_selected_event_index
+
+    cache_key = (test_key, event_count, aggregate, boundary)
+    cached = _annotation_cache.get(cache_key)
     if cached is not None:
         return cached
-    result = _format_accumulator_for_display(test.annotations_accumulator)
-    _set_cached_formatted(test, -1, result)
-    return result
+
+    if len(_annotation_cache) >= _MAX_ANNOTATION_CACHE_SIZE:
+        _annotation_cache.clear()
+
+    annotations = _compute_story_annotations(test)
+    _annotation_cache[cache_key] = annotations
+    return annotations
 
 
-def get_story_annotations_for_snapshot(
-    test: Test, snapshot_index: int
-) -> dict[str, dict[int, list[str]]]:
-    """Return inline annotations from a specific snapshot."""
-    if snapshot_index < 0 or snapshot_index >= len(test.annotation_snapshots):
-        return {}
-    cached = _get_cached_formatted(test, snapshot_index)
-    if cached is not None:
-        return cached
-    result = _format_accumulator_for_display(test.annotation_snapshots[snapshot_index])
-    _set_cached_formatted(test, snapshot_index, result)
-    return result
+def invalidate_story_annotation_cache(test: Test) -> None:
+    """Remove cached annotations for a test (e.g. after new events)."""
+    test_key = os.path.abspath(test.source_path)
+    keys_to_remove = [k for k in _annotation_cache if k[0] == test_key]
+    for key in keys_to_remove:
+        del _annotation_cache[key]
 
+
+# ---------------------------------------------------------------------------
+# Format helpers for persistence / consumers
+# ---------------------------------------------------------------------------
 
 def format_story_annotations_for_db(
     annotations: dict[str, dict[int, list[str]]]

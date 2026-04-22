@@ -14,6 +14,7 @@ from runner.execute import (
     state_changed,
     is_editor_breakpoints_file_path,
     refresh_editor_breakpoints_cache,
+    sync_editor_breakpoints_for_active_debug,
 )
 
 
@@ -201,10 +202,36 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
 
 async def handle_file_changes(changed_paths: dict[str, set[str]]):
     async with _change_lock:
-        if global_state.active_debug_test_key is not None:
-            _merge_changed_paths(_deferred_changes, changed_paths)
+        breakpoint_paths: dict[str, set[str]] = {}
+        non_breakpoint_paths: dict[str, set[str]] = {}
+        for path, event_kinds in changed_paths.items():
+            abs_path = os.path.abspath(path)
+            if is_editor_breakpoints_file_path(abs_path):
+                breakpoint_paths[path] = event_kinds
+            else:
+                non_breakpoint_paths[path] = event_kinds
+
+        if breakpoint_paths:
+            for path, event_kinds in breakpoint_paths.items():
+                abs_path = os.path.abspath(path)
+                if "deleted" in event_kinds:
+                    refresh_editor_breakpoints_cache(force=True)
+                elif event_kinds & {"created", "modified", "moved"}:
+                    refresh_editor_breakpoints_cache(force=True)
+
+            if global_state.active_debug_test_key is not None:
+                await sync_editor_breakpoints_for_active_debug()
+            else:
+                state_changed()
+
+        if not non_breakpoint_paths:
             return
-        await _apply_file_changes(changed_paths)
+
+        if global_state.active_debug_test_key is not None:
+            _merge_changed_paths(_deferred_changes, non_breakpoint_paths)
+            return
+
+        await _apply_file_changes(non_breakpoint_paths)
 
 
 async def flush_deferred_changes() -> None:

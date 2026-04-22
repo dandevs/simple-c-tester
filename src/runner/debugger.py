@@ -50,6 +50,7 @@ class GdbMIController:
         self._command_lock = asyncio.Lock()
         self._target_output_callback = None
         self._console_output_callback = None
+        self._breakpoints: dict[tuple[str, int], int] = {}
 
     async def start(self) -> None:
         self.proc = await asyncio.create_subprocess_exec(
@@ -97,8 +98,42 @@ class GdbMIController:
         if not file_path or line <= 0:
             return False
         escaped_path = file_path.replace("\\", "\\\\").replace('"', '\\"')
-        result = await self._send_command(f'-break-insert "{escaped_path}:{line}"')
-        return result.get("message") != "error"
+        async with self._command_lock:
+            result = await self._send_command(f'-break-insert "{escaped_path}:{line}"')
+            if result.get("message") == "error":
+                return False
+            payload = result.get("payload")
+            if isinstance(payload, dict):
+                bkpt = payload.get("bkpt")
+                if isinstance(bkpt, dict):
+                    bp_number = _as_int(bkpt.get("number"), 0)
+                    if bp_number > 0:
+                        self._breakpoints[(file_path, line)] = bp_number
+            return True
+
+    async def delete_breakpoint(self, file_path: str, line: int) -> bool:
+        bp_number = self._breakpoints.pop((file_path, line), None)
+        if bp_number is None:
+            return False
+        async with self._command_lock:
+            result = await self._send_command(f"-break-delete {bp_number}")
+            return result.get("message") != "error"
+
+    async def list_breakpoints(self) -> list[dict]:
+        async with self._command_lock:
+            result = await self._send_command("-break-list")
+            if result.get("message") == "error":
+                return []
+            payload = result.get("payload")
+            if not isinstance(payload, dict):
+                return []
+            breakpoint_table = payload.get("BreakpointTable")
+            if not isinstance(breakpoint_table, dict):
+                return []
+            body = breakpoint_table.get("body")
+            if not isinstance(body, list):
+                return []
+            return body
 
     async def run(self) -> DebugStopEvent:
         return await self._run_until_stop("-exec-run")

@@ -25,6 +25,7 @@ from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_fil
 from .story_annotations import (
     get_story_annotations,
     format_story_annotations_for_db,
+    update_annotation_cache,
 )
 
 
@@ -69,57 +70,6 @@ _dwarf_core_api: DwarfCoreApi = create_dwarf_core_api()
 _annotation_persist_tasks: dict[str, asyncio.Task] = {}
 
 
-def _snapshot_accumulator(
-    acc: dict[str, dict[str, dict[int, dict[str, list[str]]]]]
-) -> dict[str, dict[str, dict[int, dict[str, list[str]]]]]:
-    """Create a snapshot of the accumulator.
-
-    More efficient than copy.deepcopy because we know the exact shape.
-    Only the inner list values need copying.
-    """
-    result: dict[str, dict[str, dict[int, dict[str, list[str]]]]] = {}
-    for file_path, func_map in acc.items():
-        file_copy: dict[str, dict[int, dict[str, list[str]]]] = {}
-        for func, line_map in func_map.items():
-            line_copy: dict[int, dict[str, list[str]]] = {}
-            for line, var_map in line_map.items():
-                line_copy[line] = {name: list(values) for name, values in var_map.items()}
-            file_copy[func] = line_copy
-        result[file_path] = file_copy
-    return result
-
-
-def _update_annotations_accumulator(
-    test: Test,
-    stop_event: DebugStopEvent,
-    variables: list[tuple[str, str]] | None = None,
-) -> int:
-    """Update the running annotation accumulator and return the snapshot index."""
-    if not stop_event.file_path or stop_event.line <= 0:
-        return len(test.annotation_snapshots) - 1 if test.annotation_snapshots else -1
-
-    file_key = os.path.abspath(stop_event.file_path)
-    func_key = stop_event.function or ""
-    line_key = stop_event.line
-
-    line_vars = (
-        test.annotations_accumulator
-        .setdefault(file_key, {})
-        .setdefault(func_key, {})
-        .setdefault(line_key, {})
-    )
-
-    for name, value in (variables or []):
-        history = line_vars.setdefault(name, [])
-        history.append(str(value))
-        max_hist = max(1, int(global_state.tsv_var_history))
-        if len(history) > max_hist:
-            history.pop(0)
-
-    test.annotation_snapshots.append(_snapshot_accumulator(test.annotations_accumulator))
-    return len(test.annotation_snapshots) - 1
-
-
 def _looks_pointer_value(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
@@ -158,7 +108,6 @@ def _append_timeline_event(
     trigger_ids: list[str] | None = None,
     trigger_label: str = "",
     trigger_message: str = "",
-    snapshot_index: int = -1,
 ) -> None:
     event = TimelineEvent(
         index=len(test.timeline_events) + 1,
@@ -176,7 +125,6 @@ def _append_timeline_event(
         trigger_ids=list(trigger_ids or []),
         trigger_label=trigger_label,
         trigger_message=trigger_message,
-        snapshot_index=snapshot_index,
     )
     test.timeline_events.append(event)
     if len(test.timeline_events) > MAX_TIMELINE_EVENTS:
@@ -215,6 +163,13 @@ def _resolve_annotations_for_stop(
         (annotation.name, annotation.value, annotation.availability)
         for annotation in resolve_response.annotations
     ]
+
+
+def _is_manual_debug_mode(test: Test) -> bool:
+    for event in reversed(test.timeline_events):
+        if event.kind == "run_start":
+            return "manual debug" in event.message.lower()
+    return False
 
 
 def _persist_story_annotations(test: Test) -> None:
@@ -557,6 +512,63 @@ def prime_editor_breakpoints_cache() -> None:
     refresh_editor_breakpoints_cache(force=True)
 
 
+async def sync_editor_breakpoints_for_active_debug() -> None:
+    active_key = global_state.active_debug_test_key
+    if active_key is None:
+        return
+
+    controller = _debug_sessions.get(active_key)
+    if controller is None:
+        return
+
+    editor_breakpoints, fetch_error = refresh_editor_breakpoints_cache()
+    if fetch_error and not editor_breakpoints:
+        return
+
+    desired = {(fp, line) for fp, line in editor_breakpoints}
+    current = set(controller._breakpoints.keys())
+
+    to_remove = current - desired
+    to_add = desired - current
+
+    removed_count = 0
+    for file_path, line in to_remove:
+        try:
+            if await controller.delete_breakpoint(file_path, line):
+                removed_count += 1
+        except Exception:
+            pass
+
+    added_count = 0
+    for file_path, line in to_add:
+        try:
+            if await controller.insert_breakpoint(file_path, line):
+                added_count += 1
+        except Exception:
+            pass
+
+    if removed_count or added_count:
+        test = _test_from_key(active_key)
+        if test is not None:
+            parts: list[str] = []
+            if added_count:
+                parts.append(f"+{added_count}")
+            if removed_count:
+                parts.append(f"-{removed_count}")
+            _append_timeline_event(
+                test,
+                "debug_info",
+                f"breakpoints updated ({', '.join(parts)})",
+            )
+
+
+def _test_from_key(test_key: str) -> Test | None:
+    for test in state.all_tests:
+        if _test_key(test) == test_key:
+            return test
+    return None
+
+
 async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEvent) -> DebugStopEvent:
     if stop_event_is_terminal(stop_event):
         return stop_event
@@ -727,7 +739,6 @@ def _record_stop_event(
     binary_path: str = "",
     variables: list[tuple[str, str]] | None = None,
     trigger_matches: list[TriggerMatch] | None = None,
-    snapshot_index: int = -1,
 ) -> None:
     runtime_variables = list(variables or [])
     source_line = _line_text(stop_event.file_path, stop_event.line)
@@ -754,8 +765,8 @@ def _record_stop_event(
         trigger_ids=[match.trigger_id for match in matches],
         trigger_label=primary.label if primary is not None else "",
         trigger_message=primary.message if primary is not None else "",
-        snapshot_index=snapshot_index,
     )
+    update_annotation_cache(test, test.timeline_events[-1])
 
 
 def _apply_terminal_stop(test: Test, stop_event: DebugStopEvent) -> None:
@@ -854,6 +865,8 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
     refresh_dependency_graph()
 
     if make_proc.returncode != 0:
+        if test.state == TestState.CANCELLED:
+            return False, binary_path
         test.compile_err = make_stderr.decode(errors="replace")
         test.compile_err_raw = make_stderr
         test.state = TestState.FAILED
@@ -956,6 +969,9 @@ async def _run_plain_binary(test: Test, binary_path: str, proc_env: dict[str, st
     test.stderr = "".join(stderr_parts)
     test.stderr_raw = b"".join(stderr_raw_parts)
 
+    if test.state == TestState.CANCELLED:
+        return
+
     if run_proc.returncode == 0:
         test.state = TestState.PASSED
         _append_timeline_event(test, "run_exit", "exited 0")
@@ -1031,8 +1047,6 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         if matches and not variables:
             variables = await _capture_scope_variables_fast(controller)
 
-        snapshot_index = _update_annotations_accumulator(test, stop_event, variables)
-
         if matches:
             _record_stop_event(
                 test,
@@ -1040,7 +1054,6 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
                 binary_path=binary_path,
                 variables=variables,
                 trigger_matches=matches,
-                snapshot_index=snapshot_index,
             )
         await _emit_skipped_standalone_exprs(
             test, stop_event, story_filters, controller, variables, binary_path
@@ -1069,6 +1082,10 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         _persist_story_annotations(test)
         return
 
+    if test.state == TestState.CANCELLED:
+        _append_timeline_event(test, "debug_cancelled", "cancelled after trace")
+        return
+
     if stop_event_is_terminal(stop_event):
         _apply_terminal_stop(test, stop_event)
         _append_timeline_event(test, "debug_end", _stop_reason_message(stop_event))
@@ -1094,8 +1111,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             _ensure_debug_build_mode(True)
 
         test.timeline_events = []
-        test.annotations_accumulator = {}
-        test.annotation_snapshots = []
+        test.annotation_cache.clear()
         _start_timeline_run(test, "scheduled")
         compiled, binary_path = await _compile_binary_for_test(test, proc_env)
         if test.state == TestState.CANCELLED:
@@ -1162,8 +1178,6 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
     test.debug_exited = False
     test.debug_exit_code = None
     test.debug_precision_mode = "precise" if precision_mode == "precise" else "loose"
-    test.annotations_accumulator = {}
-    test.annotation_snapshots = []
     _start_timeline_run(test, "manual debug")
 
     proc_env = os.environ.copy()
@@ -1229,13 +1243,11 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
         vars_for_event: list[tuple[str, str]] = []
         if _stop_has_source_location(initial_stop):
             vars_for_event = await _capture_scope_variables(controller)
-        snapshot_index = _update_annotations_accumulator(test, initial_stop, vars_for_event)
         _record_stop_event(
             test,
             initial_stop,
             binary_path=binary_path,
             variables=vars_for_event,
-            snapshot_index=snapshot_index,
         )
         if _stop_has_source_location(initial_stop):
             save_debug_line(initial_stop.file_path, initial_stop.line)
@@ -1250,9 +1262,10 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
 
     except Exception as e:
         _append_timeline_event(test, "debug_error", str(e))
-        test.stderr = f"debug error: {e}"
-        test.state = TestState.FAILED
-        test.time_state_changed = time.monotonic()
+        if test.state != TestState.CANCELLED:
+            test.stderr = f"debug error: {e}"
+            test.state = TestState.FAILED
+            test.time_state_changed = time.monotonic()
         await stop_debug_session(test)
 
 
@@ -1369,13 +1382,11 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
     vars_for_event: list[tuple[str, str]] = []
     if _stop_has_source_location(stop_event):
         vars_for_event = await _capture_scope_variables(controller)
-    snapshot_index = _update_annotations_accumulator(test, stop_event, vars_for_event)
     _record_stop_event(
         test,
         stop_event,
         binary_path=controller.binary_path,
         variables=vars_for_event,
-        snapshot_index=snapshot_index,
     )
     if _stop_has_source_location(stop_event):
         save_debug_line(stop_event.file_path, stop_event.line)
