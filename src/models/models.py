@@ -14,7 +14,7 @@ class TimelineEvent:
     program_counter: int = 0
     function: str = ""
     stream: str = ""
-    variables: list[tuple[str, str]] = field(default_factory=list)
+    variables: list[tuple[str, str, str]] = field(default_factory=list)
     resolved_annotations: list[tuple[str, str, str]] = field(default_factory=list)
     primary_trigger: str = ""
     trigger_ids: list[str] = field(default_factory=list)

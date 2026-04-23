@@ -135,7 +135,7 @@ class DwarfResolveRequest:
     address: int
     file_path: str = ""
     line: int = 0
-    runtime_variables: tuple[tuple[str, str], ...] = ()
+    runtime_variables: tuple[tuple[str, str, str], ...] = ()
     source_line: str = ""
     program_counter: int = 0
 

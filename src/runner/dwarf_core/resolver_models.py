@@ -11,7 +11,7 @@ class DwarfResolverInput:
     line: int = 0
     program_counter: int = 0
     source_line: str = ""
-    runtime_variables: tuple[tuple[str, str], ...] = ()
+    runtime_variables: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)

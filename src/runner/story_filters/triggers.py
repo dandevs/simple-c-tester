@@ -54,7 +54,7 @@ class StoryStopContext:
     previous_stop: DebugStopEvent | None
     line_text: str
     previous_line_text: str
-    variables: list[tuple[str, str]]
+    variables: list[tuple[str, str, str]]
 
 
 @dataclass
@@ -253,9 +253,13 @@ def _normalized_value(value: str) -> str:
     return value.strip().lower()
 
 
-def _anomaly_keys(variables: list[tuple[str, str]]) -> set[str]:
+def _anomaly_keys(variables: list[tuple[str, str, str]]) -> set[str]:
     keys: set[str] = set()
-    for name, value in variables:
+    for var_tuple in variables:
+        if len(var_tuple) >= 3:
+            name, value, _type_hint = var_tuple
+        else:
+            name, value = var_tuple
         normalized = _normalized_value(value)
         if not normalized:
             continue

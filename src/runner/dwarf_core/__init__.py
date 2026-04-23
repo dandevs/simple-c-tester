@@ -1,4 +1,7 @@
 from .api import DwarfCoreApi, create_dwarf_core_api
+from .function_index import FunctionEntry, FunctionIndex, get_function_index
+from .global_index import GlobalVariableEntry, GlobalVariableIndex, get_global_variables, evaluate_global
+from .type_resolver import DwarfTypeInfo, resolve_variable_type
 from .models import (
     DwarfAddressLookupRequest,
     DwarfAddressLookupResponse,
@@ -59,12 +62,21 @@ __all__ = [
     "DwarfResolverOutput",
     "DwarfScopeIndex",
     "DwarfSourceLocation",
+    "DwarfTypeInfo",
     "DwarfVariableLiveRange",
+    "evaluate_global",
+    "FunctionEntry",
+    "FunctionIndex",
+    "get_global_variables",
+    "GlobalVariableEntry",
+    "GlobalVariableIndex",
     "ResolvedVariableAnnotation",
+    "resolve_variable_type",
     "SourceExpressionParseRequest",
     "SourceExpressionParseResponse",
     "build_line_index",
     "build_scope_index",
+    "get_function_index",
     "lookup_address",
     "SourceExpressionIdentifier",
     "SourceExpressionMatch",

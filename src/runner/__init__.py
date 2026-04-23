@@ -22,6 +22,12 @@ from .execute import (
     cancel_pending_story_annotations_persist,
 )
 from .story_annotations import get_story_annotations
+from .dwarf_core import (
+    evaluate_global,
+    get_function_index,
+    get_global_variables,
+    resolve_variable_type,
+)
 from .makefile import (
     generate_makefile,
     rebuild_dep_index,
@@ -58,6 +64,10 @@ __all__ = [
     "_schedule_story_annotations_persist",
     "cancel_pending_story_annotations_persist",
     "get_story_annotations",
+    "evaluate_global",
+    "get_function_index",
+    "get_global_variables",
+    "resolve_variable_type",
     "generate_makefile",
     "rebuild_dep_index",
     "build_project_sources",

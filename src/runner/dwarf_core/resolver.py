@@ -117,10 +117,14 @@ def _resolve_location(line_index: DwarfLineIndex, resolver_input: DwarfResolverI
 
 
 def _build_runtime_variable_map(
-    runtime_variables: tuple[tuple[str, str], ...],
+    runtime_variables: tuple[tuple[str, str, str], ...],
 ) -> dict[str, tuple[str, str]]:
     mapped: dict[str, tuple[str, str]] = {}
-    for name, value in runtime_variables:
+    for var_tuple in runtime_variables:
+        if len(var_tuple) >= 3:
+            name, value, _type_hint = var_tuple
+        else:
+            name, value = var_tuple
         normalized_name = normalize_member_access_expression(name)
         if not normalized_name:
             continue

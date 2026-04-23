@@ -57,7 +57,7 @@ class StoryFilterEngine:
     def _build_context(
         self,
         stop_event: DebugStopEvent,
-        variables: list[tuple[str, str]] | None,
+        variables: list[tuple[str, str, str]] | None,
     ) -> StoryStopContext:
         previous = self.previous_stop
         line_text = _line_text(stop_event.file_path, stop_event.line, self.source_cache)
@@ -101,7 +101,7 @@ class StoryFilterEngine:
     def evaluate_with_variables(
         self,
         stop_event: DebugStopEvent,
-        variables: list[tuple[str, str]],
+        variables: list[tuple[str, str, str]],
     ) -> StoryFilterDecision:
         context = self._build_context(stop_event, variables=variables)
         matches: list[TriggerMatch] = []

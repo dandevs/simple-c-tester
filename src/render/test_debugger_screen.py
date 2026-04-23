@@ -280,7 +280,7 @@ class TestDebuggerScreen(Screen[None]):
         self._line_frames_last_debug_mode = False
         self._line_frames_last_time_start = 0.0
         self._line_frames_last_events_id = 0
-        self._variables_cache: dict[tuple[int, str, int], list[tuple[str, str]]] = {}
+        self._variables_cache: dict[tuple[int, str, int], list[tuple[str, str, str]]] = {}
         self._variables_task: asyncio.Task | None = None
         self._vars_tree_signature: tuple | None = None
         self._vars_tree_scroll_by_frame: dict[tuple[int, str, int], float] = {}
@@ -1018,22 +1018,35 @@ class TestDebuggerScreen(Screen[None]):
         if not is_debug_active(self.test):
             return
 
-        self._variables_cache[event_key] = list(selected_event.variables or [])
+        raw_vars = selected_event.variables or []
+        normalized_vars: list[tuple[str, str, str]] = []
+        for var_tuple in raw_vars:
+            if len(var_tuple) >= 3:
+                normalized_vars.append(var_tuple)
+            else:
+                name, value = var_tuple
+                normalized_vars.append((name, value, ""))
+        self._variables_cache[event_key] = normalized_vars
         self._refresh_view(force=True)
 
-    def _build_aggregate_variables(self) -> list[tuple[str, str]] | None:
+    def _build_aggregate_variables(self) -> list[tuple[str, str, str]] | None:
         events = self.test.timeline_events
         if not events:
             return None
-        merged: dict[str, str] = {}
+        merged: dict[str, tuple[str, str]] = {}
         for event in events:
             if event.kind != "step":
                 continue
-            for name, value in (event.variables or []):
-                merged[_normalize_expr(name)] = value
+            for var_tuple in (event.variables or []):
+                if len(var_tuple) >= 3:
+                    name, value, _type_hint = var_tuple
+                else:
+                    name, value = var_tuple
+                    _type_hint = ""
+                merged[_normalize_expr(name)] = (value, _type_hint)
         if not merged:
             return None
-        return list(merged.items())
+        return [(name, value, type_hint) for name, (value, type_hint) in merged.items()]
 
     def _render_code_panel(self) -> None:
         has_compile_err = bool(self.test.compile_err.strip())
@@ -1089,9 +1102,16 @@ class TestDebuggerScreen(Screen[None]):
 
         event_key = (selected_event.index, selected_event.file_path, selected_event.line)
         if is_debug_active(self.test):
-            vars_list = list(self._variables_cache.get(event_key, selected_event.variables or []))
+            raw_vars = self._variables_cache.get(event_key, selected_event.variables or [])
         else:
-            vars_list = list(selected_event.variables or [])
+            raw_vars = selected_event.variables or []
+        vars_list: list[tuple[str, str, str]] = []
+        for var_tuple in raw_vars:
+            if len(var_tuple) >= 3:
+                vars_list.append(var_tuple)
+            else:
+                name, value = var_tuple
+                vars_list.append((name, value, ""))
 
         target_scroll = self._vars_tree_scroll_by_frame.get(event_key, 0.0)
         if self._vars_tree_signature == tuple(vars_list):

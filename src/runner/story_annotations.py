@@ -51,7 +51,7 @@ def _extract_variable_expressions(line: str) -> list[str]:
 # Annotation string builders
 # ---------------------------------------------------------------------------
 
-def _build_line_annotations(line: str, variables: list[tuple[str, str]]) -> str:
+def _build_line_annotations(line: str, variables: list[tuple[str, str, str]]) -> str:
     """Build inline annotation string for a source line, e.g. '[table.count=5] [count=5]'."""
     if not variables:
         return ""
@@ -61,7 +61,11 @@ def _build_line_annotations(line: str, variables: list[tuple[str, str]]) -> str:
         return ""
 
     var_map: dict[str, str] = {}
-    for name, value in variables:
+    for var_tuple in variables:
+        if len(var_tuple) >= 3:
+            name, value, _type_hint = var_tuple
+        else:
+            name, value = var_tuple
         var_map[_normalize_expr(name)] = value
 
     annotations: list[str] = []
@@ -168,7 +172,11 @@ def update_annotation_cache(test: Test, event) -> None:
     file_cache = func_cache.setdefault(file_path, {})
     line_cache = file_cache.setdefault(line_no, {})
 
-    for name, value in (event.variables or []):
+    for var_tuple in (event.variables or []):
+        if len(var_tuple) >= 3:
+            name, value, _type_hint = var_tuple
+        else:
+            name, value = var_tuple
         line_cache[_normalize_expr(name)] = value
 
 
@@ -218,7 +226,11 @@ def _replay_events_to_cache(
         func_cache = cache.setdefault(func, {})
         file_cache = func_cache.setdefault(file_path, {})
         line_cache = file_cache.setdefault(line_no, {})
-        for name, value in (event.variables or []):
+        for var_tuple in (event.variables or []):
+            if len(var_tuple) >= 3:
+                name, value, _type_hint = var_tuple
+            else:
+                name, value = var_tuple
             line_cache[_normalize_expr(name)] = value
     return cache
 
@@ -257,7 +269,11 @@ def _compute_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
         func_cache = cache.setdefault(func, {})
         file_cache = func_cache.setdefault(file_path, {})
         line_cache = file_cache.setdefault(line_no, {})
-        for name, value in (target_event.variables or []):
+        for var_tuple in (target_event.variables or []):
+            if len(var_tuple) >= 3:
+                name, value, _type_hint = var_tuple
+            else:
+                name, value = var_tuple
             line_cache[_normalize_expr(name)] = value
 
     return _cache_to_annotations(cache)
