@@ -1,26 +1,14 @@
 import os
 import re
 
-import state as global_state
 from models import Test
 
 
-_C_KEYWORDS = {
-    "if", "else", "for", "while", "do", "switch", "case", "default",
-    "break", "continue", "return", "goto", "sizeof", "typeof",
-    "int", "char", "float", "double", "void", "long", "short",
-    "signed", "unsigned", "const", "static", "extern", "inline",
-    "struct", "union", "enum", "typedef", "volatile", "register",
-    "auto", "restrict", "_Bool", "_Complex", "_Imaginary",
-    "NULL", "true", "false",
-}
-
-_VAR_EXPR_RE = re.compile(r"[A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*")
 _ANNOTATION_TOKEN_RE = re.compile(r"\[([^=\]]+)=([^\]]*)\]")
 
 
 # ---------------------------------------------------------------------------
-# Normalisation / extraction helpers
+# Normalisation helper
 # ---------------------------------------------------------------------------
 
 def _normalize_expr(expr: str) -> str:
@@ -30,77 +18,9 @@ def _normalize_expr(expr: str) -> str:
     return expr
 
 
-def _extract_variable_expressions(line: str) -> list[str]:
-    """Extract potential variable/member expressions from a C source line."""
-    seen: set[str] = set()
-    expressions: list[str] = []
-    for match in _VAR_EXPR_RE.finditer(line):
-        expr = match.group(0)
-        normalized = _normalize_expr(expr)
-        root = normalized.split(".")[0]
-        if root in _C_KEYWORDS:
-            continue
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        expressions.append(expr)
-    return expressions
-
-
 # ---------------------------------------------------------------------------
 # Annotation string builders
 # ---------------------------------------------------------------------------
-
-def _build_line_annotations(line: str, variables: list[tuple[str, str, str]]) -> str:
-    """Build inline annotation string for a source line, e.g. '[table.count=5] [count=5]'."""
-    if not variables:
-        return ""
-
-    expressions = _extract_variable_expressions(line)
-    if not expressions:
-        return ""
-
-    var_map: dict[str, str] = {}
-    for var_tuple in variables:
-        if len(var_tuple) >= 3:
-            name, value, _type_hint = var_tuple
-        else:
-            name, value = var_tuple
-        var_map[_normalize_expr(name)] = value
-
-    annotations: list[str] = []
-    seen: set[str] = set()
-    for expr in expressions:
-        normalized = _normalize_expr(expr)
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        if normalized in var_map:
-            value = var_map[normalized]
-            display_value = value if len(value) <= 40 else value[:37] + "..."
-            annotations.append(f"[{expr}={display_value}]")
-
-    return " ".join(annotations)
-
-
-def _build_resolved_annotations(
-    resolved_annotations: list[tuple[str, str, str]],
-) -> str:
-    """Build inline annotation string from resolver output for current frame."""
-    if not resolved_annotations:
-        return ""
-
-    annotations: list[str] = []
-    seen: set[str] = set()
-    for name, value, _availability in resolved_annotations:
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        display_value = value if len(value) <= 40 else value[:37] + "..."
-        annotations.append(f"[{name}={display_value}]")
-
-    return " ".join(annotations)
-
 
 def _merge_latest_annotations(annotation_strs: list[str]) -> list[str]:
     """Parse annotation tokens and keep only the latest value per expression, preserving last-seen order."""
@@ -148,91 +68,49 @@ def _line_text(file_path: str, line_number: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Annotation Cache (Store A)
+# Cache helpers
 # ---------------------------------------------------------------------------
-# Per-function, per-file, per-line latest variable values.
-# Structure: {func_name: {abs_file_path: {line_no: {var_name: value}}}}
 
-
-def update_annotation_cache(test: Test, event) -> None:
-    """Update Store (A) after a debugger step.
-
-    Each variable's value is stored at the exact source line where the
-    debugger stopped, keyed by the current function so that ``main``'s ``i``
-    does not clobber ``foo``'s ``i``.
-    """
-    if event.kind != "step" or not event.file_path or event.line <= 0:
-        return
-
-    func = event.function or "global"
-    file_path = os.path.abspath(event.file_path)
-    line_no = event.line
-
-    func_cache = test.annotation_cache.setdefault(func, {})
-    file_cache = func_cache.setdefault(file_path, {})
-    line_cache = file_cache.setdefault(line_no, {})
-
-    for var_tuple in (event.variables or []):
-        if len(var_tuple) >= 3:
-            name, value, _type_hint = var_tuple
-        else:
-            name, value = var_tuple
-        line_cache[_normalize_expr(name)] = value
-
-
-def _cache_to_annotations(
-    cache: dict[str, dict[str, dict[int, dict[str, str]]]],
-) -> dict[str, dict[int, list[str]]]:
-    """Convert Store (A) into the legacy annotation dict format.
-
-    Merges across all function scopes for a given file/line, keeping the
-    latest value per variable name.
-    """
-    merged: dict[str, dict[int, dict[str, str]]] = {}
-    for func_map in cache.values():
-        for file_path, line_map in func_map.items():
-            if file_path not in merged:
-                merged[file_path] = {}
-            for line_no, var_map in line_map.items():
-                merged_line = merged[file_path].setdefault(line_no, {})
-                for var_name, value in var_map.items():
-                    merged_line[var_name] = value
-
-    result: dict[str, dict[int, list[str]]] = {}
-    for file_path, line_map in merged.items():
-        result[file_path] = {}
-        for line_no, var_map in line_map.items():
-            if not var_map:
-                continue
-            line_text = _line_text(file_path, line_no)
-            annotation = _build_line_annotations(line_text, list(var_map.items()))
-            if annotation:
-                result[file_path][line_no] = [annotation]
-
+def _parse_annotation_tokens(annotation_strs: list[str]) -> dict[str, str]:
+    """Parse '[expr=value]' strings into a mapping of expr -> value."""
+    result: dict[str, str] = {}
+    for s in annotation_strs:
+        for match in _ANNOTATION_TOKEN_RE.finditer(s):
+            result[match.group(1)] = match.group(2)
     return result
 
 
-def _replay_events_to_cache(
-    events,
-) -> dict[str, dict[str, dict[int, dict[str, str]]]]:
-    """Replay a slice of events into a temporary Store (A) snapshot."""
-    cache: dict[str, dict[str, dict[int, dict[str, str]]]] = {}
-    for event in events:
-        if event.kind != "step" or not event.file_path or event.line <= 0:
-            continue
-        func = event.function or "global"
-        file_path = os.path.abspath(event.file_path)
-        line_no = event.line
-        func_cache = cache.setdefault(func, {})
-        file_cache = func_cache.setdefault(file_path, {})
+def _merge_event_annotations_into(
+    cache: dict[str, dict[str, dict[int, dict[str, str]]]],
+    event,
+) -> None:
+    """Merge a single event's line_annotations into a Store A cache."""
+    if event.kind != "step" or not event.file_path or event.line <= 0:
+        return
+    func_name = event.function or "unknown"
+    file_path = os.path.abspath(event.file_path)
+    func_cache = cache.setdefault(func_name, {})
+    file_cache = func_cache.setdefault(file_path, {})
+    for line_no, annotation_strs in (event.line_annotations or {}).items():
         line_cache = file_cache.setdefault(line_no, {})
-        for var_tuple in (event.variables or []):
-            if len(var_tuple) >= 3:
-                name, value, _type_hint = var_tuple
-            else:
-                name, value = var_tuple
-            line_cache[_normalize_expr(name)] = value
-    return cache
+        line_cache.update(_parse_annotation_tokens(annotation_strs))
+
+
+def _cache_to_annotations(
+    cache: dict[str, dict[str, dict[int, dict[str, str]]]]
+) -> dict[str, dict[int, list[str]]]:
+    """Convert Store A cache to the public annotation format."""
+    result: dict[str, dict[int, list[str]]] = {}
+    for func_cache in cache.values():
+        for file_path, line_map in func_cache.items():
+            file_result = result.setdefault(file_path, {})
+            for line_no, expr_map in line_map.items():
+                if not expr_map:
+                    continue
+                file_result[line_no] = [
+                    " ".join([f"[{expr}={expr_map[expr]}]" for expr in expr_map])
+                ]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -240,43 +118,22 @@ def _replay_events_to_cache(
 # ---------------------------------------------------------------------------
 
 def _compute_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
-    """Compute inline annotations from Store (A) or by replaying events."""
+    """Compute inline annotations from timeline event line_annotations."""
     aggregate = getattr(test, "aggregate_annotations", True)
+
+    if aggregate and test.annotation_cache:
+        return _cache_to_annotations(test.annotation_cache)
+
     boundary = test.timeline_selected_event_index
-
-    if aggregate:
-        # Aggregate mode: display Store (A) as-is — only lines where the
-        # debugger actually stopped are annotated.  No DWARF supplementation.
-        cache = test.annotation_cache
-        return _cache_to_annotations(cache)
-
-    # Per-frame mode: replay events up to the selected card into a
-    # temporary Store (A), then annotate ONLY lines that have an explicit
-    # cache entry.  Unvisited lines in the snippet window remain blank.
     events = test.timeline_events
-    if boundary >= 0:
+    if not aggregate and boundary >= 0:
         events = events[: boundary + 1]
-    cache = _replay_events_to_cache(events)
 
-    # Ensure the current frame's line is present with its latest values
-    target_event = None
-    if events:
-        target_event = events[-1]
-    if target_event and target_event.kind == "step" and target_event.file_path and target_event.line > 0:
-        func = target_event.function or "global"
-        file_path = os.path.abspath(target_event.file_path)
-        line_no = target_event.line
-        func_cache = cache.setdefault(func, {})
-        file_cache = func_cache.setdefault(file_path, {})
-        line_cache = file_cache.setdefault(line_no, {})
-        for var_tuple in (target_event.variables or []):
-            if len(var_tuple) >= 3:
-                name, value, _type_hint = var_tuple
-            else:
-                name, value = var_tuple
-            line_cache[_normalize_expr(name)] = value
+    temp_cache: dict[str, dict[str, dict[int, dict[str, str]]]] = {}
+    for event in events:
+        _merge_event_annotations_into(temp_cache, event)
 
-    return _cache_to_annotations(cache)
+    return _cache_to_annotations(temp_cache)
 
 
 # ---------------------------------------------------------------------------

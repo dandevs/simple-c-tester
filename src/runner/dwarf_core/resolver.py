@@ -139,6 +139,7 @@ def _build_annotations(
     program_counter: int,
     liveness_checker,
 ) -> tuple[ResolvedVariableAnnotation, ...]:
+    """Deprecated: annotations are now pre-computed at capture time via resolve_line_annotations()."""
     seen: set[str] = set()
     annotations: list[ResolvedVariableAnnotation] = []
     for expression in expressions:

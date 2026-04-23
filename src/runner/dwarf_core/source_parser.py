@@ -31,7 +31,11 @@ def normalize_member_access_expression(expression: str) -> str:
 
 
 def extract_source_expressions(source_line: str) -> tuple[SourceExpressionMatch, ...]:
-    """Extract unique, typed identifier/member-access expressions from a line."""
+    """Extract unique, typed identifier/member-access expressions from a line.
+
+    Deprecated: use expression_tokenizer.extract_expressions() instead.
+    Kept for backward compatibility with dwarf_core.api.parse_source_expression().
+    """
     if not source_line:
         return ()
 

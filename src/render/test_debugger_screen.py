@@ -33,7 +33,7 @@ from runner import (
     cancel_pending_story_annotations_persist,
 )
 from runner.story_filters import normalized_story_filter_profile
-from runner.story_annotations import _normalize_expr, invalidate_story_annotation_cache
+from runner.story_annotations import invalidate_story_annotation_cache
 from .test_debugger_screen_utils import (
     display_path,
     detect_language,
@@ -1028,25 +1028,6 @@ class TestDebuggerScreen(Screen[None]):
                 normalized_vars.append((name, value, ""))
         self._variables_cache[event_key] = normalized_vars
         self._refresh_view(force=True)
-
-    def _build_aggregate_variables(self) -> list[tuple[str, str, str]] | None:
-        events = self.test.timeline_events
-        if not events:
-            return None
-        merged: dict[str, tuple[str, str]] = {}
-        for event in events:
-            if event.kind != "step":
-                continue
-            for var_tuple in (event.variables or []):
-                if len(var_tuple) >= 3:
-                    name, value, _type_hint = var_tuple
-                else:
-                    name, value = var_tuple
-                    _type_hint = ""
-                merged[_normalize_expr(name)] = (value, _type_hint)
-        if not merged:
-            return None
-        return [(name, value, type_hint) for name, (value, type_hint) in merged.items()]
 
     def _render_code_panel(self) -> None:
         has_compile_err = bool(self.test.compile_err.strip())

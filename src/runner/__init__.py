@@ -22,6 +22,7 @@ from .execute import (
     cancel_pending_story_annotations_persist,
 )
 from .story_annotations import get_story_annotations
+from .annotation_resolver import resolve_line_annotations, resolve_line_annotations_sync
 from .dwarf_core import (
     evaluate_global,
     get_function_index,
@@ -64,6 +65,8 @@ __all__ = [
     "_schedule_story_annotations_persist",
     "cancel_pending_story_annotations_persist",
     "get_story_annotations",
+    "resolve_line_annotations",
+    "resolve_line_annotations_sync",
     "evaluate_global",
     "get_function_index",
     "get_global_variables",

@@ -33,8 +33,9 @@ from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_fil
 from .story_annotations import (
     get_story_annotations,
     format_story_annotations_for_db,
-    update_annotation_cache,
+    _merge_event_annotations_into,
 )
+from .annotation_resolver import resolve_line_annotations
 
 
 MAX_TIMELINE_EVENTS = 12000
@@ -136,7 +137,7 @@ def _append_timeline_event(
     stream: str = "",
     variables: list[tuple[str, str, str]] | None = None,
     program_counter: int = 0,
-    resolved_annotations: list[tuple[str, str, str]] | None = None,
+    line_annotations: dict[int, list[str]] | None = None,
     primary_trigger: str = "",
     trigger_ids: list[str] | None = None,
     trigger_label: str = "",
@@ -153,7 +154,7 @@ def _append_timeline_event(
         stream=stream,
         variables=list(variables or []),
         program_counter=program_counter,
-        resolved_annotations=list(resolved_annotations or []),
+        line_annotations=dict(line_annotations or {}),
         primary_trigger=primary_trigger,
         trigger_ids=list(trigger_ids or []),
         trigger_label=trigger_label,
@@ -162,40 +163,6 @@ def _append_timeline_event(
     test.timeline_events.append(event)
     if len(test.timeline_events) > MAX_TIMELINE_EVENTS:
         test.timeline_events = test.timeline_events[-MAX_TIMELINE_EVENTS:]
-
-
-def _resolve_annotations_for_stop(
-    *,
-    binary_path: str,
-    stop_event: DebugStopEvent,
-    source_line: str,
-    runtime_variables: list[tuple[str, str, str]],
-) -> list[tuple[str, str, str]]:
-    if not binary_path:
-        return []
-
-    try:
-        resolve_response = _dwarf_core_api.resolve(
-            DwarfResolveRequest(
-                binary_path=binary_path,
-                address=stop_event.program_counter,
-                file_path=stop_event.file_path,
-                line=stop_event.line,
-                source_line=source_line,
-                runtime_variables=tuple(runtime_variables),
-                program_counter=stop_event.program_counter,
-            )
-        )
-    except Exception:
-        return []
-
-    if not resolve_response.ok or not resolve_response.annotations:
-        return []
-
-    return [
-        (annotation.name, annotation.value, annotation.availability)
-        for annotation in resolve_response.annotations
-    ]
 
 
 def _is_manual_debug_mode(test: Test) -> bool:
@@ -282,7 +249,7 @@ async def _emit_skipped_standalone_exprs(
                 function=stop_event.function,
                 program_counter=stop_event.program_counter,
             )
-            _record_stop_event(
+            await _record_stop_event(
                 test,
                 synthetic_stop,
                 binary_path=binary_path,
@@ -294,6 +261,7 @@ async def _emit_skipped_standalone_exprs(
                         message=f"standalone expression at L{line_num}",
                     )
                 ],
+                debugger=controller,
             )
 
 
@@ -868,21 +836,29 @@ def _merge_trigger_matches(
     return merged
 
 
-def _record_stop_event(
+def update_annotation_cache(test: Test, event: TimelineEvent) -> None:
+    """Merge event line_annotations into test.annotation_cache (Store A)."""
+    _merge_event_annotations_into(test.annotation_cache, event)
+
+
+async def _record_stop_event(
     test: Test,
     stop_event: DebugStopEvent,
     binary_path: str = "",
     variables: list[tuple[str, str, str]] | None = None,
     trigger_matches: list[TriggerMatch] | None = None,
+    debugger: GdbMIController | None = None,
 ) -> None:
     runtime_variables = list(variables or [])
     source_line = _line_text(stop_event.file_path, stop_event.line)
-    resolved_annotations = _resolve_annotations_for_stop(
-        binary_path=binary_path,
-        stop_event=stop_event,
-        source_line=source_line,
-        runtime_variables=runtime_variables,
-    )
+    line_annotations: dict[int, list[str]] = {}
+    if debugger is not None and source_line and stop_event.line > 0:
+        try:
+            line_annotations = await resolve_line_annotations(
+                source_line, stop_event.line, debugger
+            )
+        except Exception:
+            pass
     matches = list(trigger_matches or [])
     primary = matches[0] if matches else None
     message = primary.message if primary is not None else _stop_reason_message(stop_event)
@@ -895,13 +871,14 @@ def _record_stop_event(
         function=stop_event.function,
         variables=runtime_variables,
         program_counter=stop_event.program_counter,
-        resolved_annotations=resolved_annotations,
+        line_annotations=line_annotations,
         primary_trigger=primary.trigger_id if primary is not None else "",
         trigger_ids=[match.trigger_id for match in matches],
         trigger_label=primary.label if primary is not None else "",
         trigger_message=primary.message if primary is not None else "",
     )
-    update_annotation_cache(test, test.timeline_events[-1])
+    event = test.timeline_events[-1]
+    update_annotation_cache(test, event)
 
 
 def _apply_terminal_stop(test: Test, stop_event: DebugStopEvent) -> None:
@@ -1195,12 +1172,13 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         if matches:
             global_vars = await _capture_global_variables(controller, binary_path, variables)
             variables = variables + global_vars
-            _record_stop_event(
+            await _record_stop_event(
                 test,
                 stop_event,
                 binary_path=binary_path,
                 variables=variables,
                 trigger_matches=matches,
+                debugger=controller,
             )
         await _emit_skipped_standalone_exprs(
             test, stop_event, story_filters, controller, variables, binary_path
@@ -1397,11 +1375,12 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
             )
             global_vars = await _capture_global_variables(controller, binary_path, vars_for_event)
             vars_for_event = vars_for_event + global_vars
-        _record_stop_event(
+        await _record_stop_event(
             test,
             initial_stop,
             binary_path=binary_path,
             variables=vars_for_event,
+            debugger=controller,
         )
         if _stop_has_source_location(initial_stop):
             save_debug_line(initial_stop.file_path, initial_stop.line)
@@ -1543,11 +1522,12 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
         )
         global_vars = await _capture_global_variables(controller, controller.binary_path, vars_for_event)
         vars_for_event = vars_for_event + global_vars
-    _record_stop_event(
+    await _record_stop_event(
         test,
         stop_event,
         binary_path=controller.binary_path,
         variables=vars_for_event,
+        debugger=controller,
     )
     if _stop_has_source_location(stop_event):
         save_debug_line(stop_event.file_path, stop_event.line)
