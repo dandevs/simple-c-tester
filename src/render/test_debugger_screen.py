@@ -214,6 +214,8 @@ class TestDebuggerScreen(Screen[None]):
         min-height: 3;
         border: none;
         padding: 0 1;
+        overflow-x: hidden;
+        scrollbar-size-horizontal: 0;
     }
     #debug-footer {
         height: 1;
