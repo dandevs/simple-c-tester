@@ -20,13 +20,22 @@ from .makefile import (
 )
 from .artifacts import test_binary_path
 from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
-from .dwarf_core import DwarfCoreApi, DwarfResolveRequest, create_dwarf_core_api
+from .dwarf_core import (
+    DwarfCoreApi,
+    DwarfResolveRequest,
+    create_dwarf_core_api,
+    get_function_index,
+    FunctionIndex,
+    resolve_variable_type,
+)
+from .dwarf_core.global_index import get_global_variables, evaluate_global
 from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_filter_profile
 from .story_annotations import (
     get_story_annotations,
     format_story_annotations_for_db,
-    update_annotation_cache,
+    _merge_event_annotations_into,
 )
+from .annotation_resolver import resolve_line_annotations
 
 
 MAX_TIMELINE_EVENTS = 12000
@@ -35,7 +44,7 @@ _debug_sessions: dict[str, GdbMIController] = {}
 _active_run_tasks: dict[str, asyncio.Task] = {}
 _source_line_cache: dict[str, list[str]] = {}
 _user_function_cache: set[str] = set()
-_user_function_cache_key: tuple[tuple[str, int], ...] | None = None
+_user_function_cache_key: object | None = None
 
 _CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 _FUNC_DEF_RE = re.compile(
@@ -79,6 +88,31 @@ def _looks_pointer_value(value: str) -> bool:
     return stripped.startswith("0x")
 
 
+def _format_dwarf_type(type_info) -> str:
+    if type_info is None:
+        return ""
+    kind = type_info.kind
+    name = type_info.name or ""
+    if kind == "enum":
+        return f"enum {name}" if name else "enum"
+    if kind == "struct":
+        return f"struct {name}" if name else "struct"
+    if kind == "array":
+        dims = "".join(
+            f"[{upper - lower + 1}]"
+            for lower, upper in type_info.dimensions
+            if upper >= lower
+        )
+        element = _format_dwarf_type(type_info.element_type)
+        base = element or name or "?"
+        return f"{base}{dims}"
+    if kind == "pointer":
+        pointed = _format_dwarf_type(type_info.pointed_to_type)
+        base = pointed or name or "?"
+        return f"{base}*"
+    return name
+
+
 def _test_key(test: Test) -> str:
     return os.path.abspath(test.source_path)
 
@@ -101,9 +135,9 @@ def _append_timeline_event(
     line: int = 0,
     function: str = "",
     stream: str = "",
-    variables: list[tuple[str, str]] | None = None,
+    variables: list[tuple[str, str, str]] | None = None,
     program_counter: int = 0,
-    resolved_annotations: list[tuple[str, str, str]] | None = None,
+    line_annotations: dict[int, list[str]] | None = None,
     primary_trigger: str = "",
     trigger_ids: list[str] | None = None,
     trigger_label: str = "",
@@ -120,7 +154,7 @@ def _append_timeline_event(
         stream=stream,
         variables=list(variables or []),
         program_counter=program_counter,
-        resolved_annotations=list(resolved_annotations or []),
+        line_annotations=dict(line_annotations or {}),
         primary_trigger=primary_trigger,
         trigger_ids=list(trigger_ids or []),
         trigger_label=trigger_label,
@@ -129,40 +163,6 @@ def _append_timeline_event(
     test.timeline_events.append(event)
     if len(test.timeline_events) > MAX_TIMELINE_EVENTS:
         test.timeline_events = test.timeline_events[-MAX_TIMELINE_EVENTS:]
-
-
-def _resolve_annotations_for_stop(
-    *,
-    binary_path: str,
-    stop_event: DebugStopEvent,
-    source_line: str,
-    runtime_variables: list[tuple[str, str]],
-) -> list[tuple[str, str, str]]:
-    if not binary_path:
-        return []
-
-    try:
-        resolve_response = _dwarf_core_api.resolve(
-            DwarfResolveRequest(
-                binary_path=binary_path,
-                address=stop_event.program_counter,
-                file_path=stop_event.file_path,
-                line=stop_event.line,
-                source_line=source_line,
-                runtime_variables=tuple(runtime_variables),
-                program_counter=stop_event.program_counter,
-            )
-        )
-    except Exception:
-        return []
-
-    if not resolve_response.ok or not resolve_response.annotations:
-        return []
-
-    return [
-        (annotation.name, annotation.value, annotation.availability)
-        for annotation in resolve_response.annotations
-    ]
 
 
 def _is_manual_debug_mode(test: Test) -> bool:
@@ -211,7 +211,7 @@ async def _emit_skipped_standalone_exprs(
     stop_event: DebugStopEvent,
     story_filters: StoryFilterEngine,
     controller: GdbMIController,
-    variables: list[tuple[str, str]],
+    variables: list[tuple[str, str, str]],
     binary_path: str,
 ) -> None:
     """Create synthetic timeline events for standalone expression lines skipped by gdb next()."""
@@ -233,7 +233,12 @@ async def _emit_skipped_standalone_exprs(
 
     vars_for_synthetic = list(variables)
     if not vars_for_synthetic:
-        vars_for_synthetic = await _capture_scope_variables_fast(controller)
+        vars_for_synthetic = await _capture_scope_variables_fast(
+            controller,
+            binary_path=binary_path,
+            file_path=stop_event.file_path,
+            line=stop_event.line,
+        )
 
     for line_num in range(prev.line + 1, stop_event.line):
         line_text = _line_text(stop_event.file_path, line_num)
@@ -244,7 +249,7 @@ async def _emit_skipped_standalone_exprs(
                 function=stop_event.function,
                 program_counter=stop_event.program_counter,
             )
-            _record_stop_event(
+            await _record_stop_event(
                 test,
                 synthetic_stop,
                 binary_path=binary_path,
@@ -256,6 +261,7 @@ async def _emit_skipped_standalone_exprs(
                         message=f"standalone expression at L{line_num}",
                     )
                 ],
+                debugger=controller,
             )
 
 
@@ -315,32 +321,42 @@ def _line_text(file_path: str, line_number: int) -> str:
     return lines[line_number - 1]
 
 
-def _line_has_likely_call(file_path: str, line_number: int) -> bool:
-    line = _line_text(file_path, line_number)
-    if not line:
-        return False
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#"):
+async def _line_has_likely_call(file_path: str, line_number: int, binary_path: str = "") -> bool:
+    content = _line_text(file_path, line_number)
+    if not content:
         return False
 
-    call_names = [
-        match.group(1)
-        for match in _CALL_RE.finditer(stripped)
-        if match.group(1) not in _CONTROL_WORDS
-    ]
+    call_names = set(_CALL_RE.findall(content)) - _CONTROL_WORDS
     if not call_names:
         return False
 
-    user_functions = _discover_user_function_names()
+    user_functions = await _discover_user_function_names(binary_path)
     if not user_functions:
         return False
 
     return any(name in user_functions for name in call_names)
 
 
-def _discover_user_function_names() -> set[str]:
+async def _discover_user_function_names(binary_path: str = "") -> set[str]:
     global _user_function_cache_key
     global _user_function_cache
+
+    if binary_path:
+        try:
+            mtime = int(os.path.getmtime(binary_path))
+        except OSError:
+            mtime = 0
+        cache_key = (binary_path, mtime)
+        if _user_function_cache_key == cache_key:
+            return _user_function_cache
+        try:
+            index = await asyncio.to_thread(get_function_index, binary_path)
+            if index.user_function_names:
+                _user_function_cache_key = cache_key
+                _user_function_cache = set(index.user_function_names)
+                return _user_function_cache
+        except Exception:
+            pass
 
     tracked_files: list[tuple[str, int]] = []
     source_files: list[str] = []
@@ -569,7 +585,7 @@ def _test_from_key(test_key: str) -> Test | None:
     return None
 
 
-async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEvent) -> DebugStopEvent:
+async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEvent, binary_path: str = "") -> DebugStopEvent:
     if stop_event_is_terminal(stop_event):
         return stop_event
 
@@ -580,7 +596,7 @@ async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEve
     if not in_user_code:
         return await controller.step_out()
 
-    wants_step_in = _line_has_likely_call(stop_event.file_path, stop_event.line)
+    wants_step_in = await _line_has_likely_call(stop_event.file_path, stop_event.line, binary_path)
     next_event = await (controller.step_in() if wants_step_in else controller.next())
 
     if wants_step_in and not stop_event_is_terminal(next_event) and not _is_user_code_path(next_event.file_path):
@@ -600,18 +616,82 @@ def _stop_has_source_location(stop_event: DebugStopEvent) -> bool:
     return bool(stop_event.file_path) and stop_event.line > 0
 
 
-async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[str, str]]:
+async def _enrich_variable_types(
+    variables: list[tuple[str, str, str]],
+    binary_path: str,
+    file_path: str,
+    line: int,
+) -> list[tuple[str, str, str]]:
+    if not binary_path or not file_path or line <= 0:
+        return variables
+    enriched: list[tuple[str, str, str]] = []
+    for var_tuple in variables:
+        if len(var_tuple) >= 3:
+            name, value, _ = var_tuple
+        else:
+            name, value = var_tuple
+        try:
+            type_info = await asyncio.to_thread(
+                resolve_variable_type, binary_path, name, file_path, line
+            )
+            type_hint = _format_dwarf_type(type_info) if type_info else ""
+        except Exception:
+            type_hint = ""
+        enriched.append((name, value, type_hint))
+    return enriched
+
+
+async def _capture_global_variables(
+    controller: GdbMIController,
+    binary_path: str,
+    local_variables: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    if not binary_path:
+        return []
+    try:
+        index = await asyncio.to_thread(get_global_variables, binary_path)
+    except Exception:
+        return []
+    if not index:
+        return []
+
+    local_names = {name for name, _, _ in local_variables}
+    results: list[tuple[str, str, str]] = []
+    for entry in index.values():
+        try:
+            if entry.name in local_names:
+                continue
+            value = await evaluate_global(controller, entry.name)
+            if value is None:
+                continue
+            prefix = "[global]" if entry.linkage_name else "[static]"
+            type_info = await asyncio.to_thread(
+                resolve_variable_type, binary_path, entry.name, entry.file_path, entry.line
+            )
+            type_hint = _format_dwarf_type(type_info) if type_info else ""
+            results.append((f"{prefix} {entry.name}", value, type_hint))
+        except Exception:
+            continue
+    return results
+
+
+async def _capture_scope_variables(
+    controller: GdbMIController,
+    binary_path: str = "",
+    file_path: str = "",
+    line: int = 0,
+) -> list[tuple[str, str, str]]:
     async def _expand_children(
         var_name: str,
         label_prefix: str,
         depth: int,
         max_depth: int,
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, str]]:
         if depth > max_depth:
             return []
 
         children = await controller.var_list_children(var_name)
-        expanded: list[tuple[str, str]] = []
+        expanded: list[tuple[str, str, str]] = []
         for child in children:
             child_var_name = str(child.get("name", ""))
             child_exp = str(child.get("exp", "") or child_var_name)
@@ -626,7 +706,8 @@ async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[st
             if child_value in {"", "{...}"}:
                 child_value = "?"
             label = f"{label_prefix}.{child_exp}"
-            expanded.append((label, child_value))
+            child_type = str(child.get("type", ""))
+            expanded.append((label, child_value, child_type))
 
             child_numchild = int(child.get("numchild", 0))
             if child_numchild > 0 and depth < max_depth:
@@ -644,9 +725,10 @@ async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[st
     async def _expand_variable(
         name: str,
         value: str,
+        type_hint: str,
         max_depth: int,
-    ) -> list[tuple[str, str]]:
-        base = [(name, value)]
+    ) -> list[tuple[str, str, str]]:
+        base = [(name, value, type_hint)]
 
         should_expand = value == "?" or _looks_pointer_value(value)
         if not should_expand or max_depth <= 0:
@@ -661,6 +743,7 @@ async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[st
             numchild = int(created.get("numchild", 0))
             if numchild <= 0:
                 return base
+            created_type = str(created.get("type", ""))
             expanded_children = await _expand_children(
                 str(created.get("name", "")),
                 name,
@@ -677,24 +760,39 @@ async def _capture_scope_variables(controller: GdbMIController) -> list[tuple[st
             simple_vars = await controller.list_all_variables(timeout=1.5)
 
         max_depth = max(1, int(global_state.tsv_vars_depth))
-        flattened: list[tuple[str, str]] = []
-        for name, value in simple_vars:
-            flattened.extend(await _expand_variable(name, value, max_depth))
+        flattened: list[tuple[str, str, str]] = []
+        for var_tuple in simple_vars:
+            if len(var_tuple) >= 3:
+                name, value, type_hint = var_tuple
+            else:
+                name, value = var_tuple
+                type_hint = ""
+            flattened.extend(await _expand_variable(name, value, type_hint, max_depth))
 
         seen: set[str] = set()
-        deduped: list[tuple[str, str]] = []
-        for name, value in flattened:
+        deduped: list[tuple[str, str, str]] = []
+        for var_tuple in flattened:
+            if len(var_tuple) >= 3:
+                name, value, _type_hint = var_tuple
+            else:
+                name, value = var_tuple
             if name in seen:
                 continue
             seen.add(name)
-            deduped.append((name, value))
+            deduped.append(var_tuple)
 
-        return deduped[:250]
+        enriched = await _enrich_variable_types(deduped, binary_path, file_path, line)
+        return enriched[:250]
     except Exception:
         return []
 
 
-async def _capture_scope_variables_fast(controller: GdbMIController) -> list[tuple[str, str]]:
+async def _capture_scope_variables_fast(
+    controller: GdbMIController,
+    binary_path: str = "",
+    file_path: str = "",
+    line: int = 0,
+) -> list[tuple[str, str, str]]:
     """Capture lightweight frame variables without deep expansion.
 
     This is used for card rendering paths where we want variable visibility
@@ -706,14 +804,19 @@ async def _capture_scope_variables_fast(controller: GdbMIController) -> list[tup
             simple_vars = await controller.list_all_variables(timeout=1.0)
 
         seen: set[str] = set()
-        deduped: list[tuple[str, str]] = []
-        for name, value in simple_vars:
+        deduped: list[tuple[str, str, str]] = []
+        for var_tuple in simple_vars:
+            if len(var_tuple) >= 3:
+                name, value, _type_hint = var_tuple
+            else:
+                name, value = var_tuple
             if name in seen:
                 continue
             seen.add(name)
-            deduped.append((name, value))
+            deduped.append(var_tuple)
 
-        return deduped[:120]
+        enriched = await _enrich_variable_types(deduped, binary_path, file_path, line)
+        return enriched[:120]
     except Exception:
         return []
 
@@ -733,21 +836,29 @@ def _merge_trigger_matches(
     return merged
 
 
-def _record_stop_event(
+def update_annotation_cache(test: Test, event: TimelineEvent) -> None:
+    """Merge event line_annotations into test.annotation_cache (Store A)."""
+    _merge_event_annotations_into(test.annotation_cache, event)
+
+
+async def _record_stop_event(
     test: Test,
     stop_event: DebugStopEvent,
     binary_path: str = "",
-    variables: list[tuple[str, str]] | None = None,
+    variables: list[tuple[str, str, str]] | None = None,
     trigger_matches: list[TriggerMatch] | None = None,
+    debugger: GdbMIController | None = None,
 ) -> None:
     runtime_variables = list(variables or [])
     source_line = _line_text(stop_event.file_path, stop_event.line)
-    resolved_annotations = _resolve_annotations_for_stop(
-        binary_path=binary_path,
-        stop_event=stop_event,
-        source_line=source_line,
-        runtime_variables=runtime_variables,
-    )
+    line_annotations: dict[int, list[str]] = {}
+    if debugger is not None and source_line and stop_event.line > 0:
+        try:
+            line_annotations = await resolve_line_annotations(
+                source_line, stop_event.line, debugger
+            )
+        except Exception:
+            pass
     matches = list(trigger_matches or [])
     primary = matches[0] if matches else None
     message = primary.message if primary is not None else _stop_reason_message(stop_event)
@@ -760,13 +871,14 @@ def _record_stop_event(
         function=stop_event.function,
         variables=runtime_variables,
         program_counter=stop_event.program_counter,
-        resolved_annotations=resolved_annotations,
+        line_annotations=line_annotations,
         primary_trigger=primary.trigger_id if primary is not None else "",
         trigger_ids=[match.trigger_id for match in matches],
         trigger_label=primary.label if primary is not None else "",
         trigger_message=primary.message if primary is not None else "",
     )
-    update_annotation_cache(test, test.timeline_events[-1])
+    event = test.timeline_events[-1]
+    update_annotation_cache(test, event)
 
 
 def _apply_terminal_stop(test: Test, stop_event: DebugStopEvent) -> None:
@@ -1037,23 +1149,36 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
 
         early_decision = story_filters.evaluate_without_variables(stop_event)
         matches = list(early_decision.matches)
-        variables: list[tuple[str, str]] = []
+        variables: list[tuple[str, str, str]] = []
 
         if early_decision.need_variables:
-            variables = await _capture_scope_variables(controller)
+            variables = await _capture_scope_variables(
+                controller,
+                binary_path=binary_path,
+                file_path=stop_event.file_path,
+                line=stop_event.line,
+            )
             var_decision = story_filters.evaluate_with_variables(stop_event, variables)
             matches = _merge_trigger_matches(matches, var_decision.matches)
 
         if matches and not variables:
-            variables = await _capture_scope_variables_fast(controller)
+            variables = await _capture_scope_variables_fast(
+                controller,
+                binary_path=binary_path,
+                file_path=stop_event.file_path,
+                line=stop_event.line,
+            )
 
         if matches:
-            _record_stop_event(
+            global_vars = await _capture_global_variables(controller, binary_path, variables)
+            variables = variables + global_vars
+            await _record_stop_event(
                 test,
                 stop_event,
                 binary_path=binary_path,
                 variables=variables,
                 trigger_matches=matches,
+                debugger=controller,
             )
         await _emit_skipped_standalone_exprs(
             test, stop_event, story_filters, controller, variables, binary_path
@@ -1069,7 +1194,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         if test.state == TestState.CANCELLED:
             _append_timeline_event(test, "debug_cancelled", "cancelled while tracing")
             return
-        stop_event = await _auto_trace_step(controller, stop_event)
+        stop_event = await _auto_trace_step(controller, stop_event, binary_path)
         await _capture_story_stop(stop_event)
         step_count += 1
 
@@ -1240,14 +1365,22 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
                     "no editor breakpoints found; starting at main()",
                 )
             initial_stop = await controller.break_main_and_run()
-        vars_for_event: list[tuple[str, str]] = []
+        vars_for_event: list[tuple[str, str, str]] = []
         if _stop_has_source_location(initial_stop):
-            vars_for_event = await _capture_scope_variables(controller)
-        _record_stop_event(
+            vars_for_event = await _capture_scope_variables(
+                controller,
+                binary_path=binary_path,
+                file_path=initial_stop.file_path,
+                line=initial_stop.line,
+            )
+            global_vars = await _capture_global_variables(controller, binary_path, vars_for_event)
+            vars_for_event = vars_for_event + global_vars
+        await _record_stop_event(
             test,
             initial_stop,
             binary_path=binary_path,
             variables=vars_for_event,
+            debugger=controller,
         )
         if _stop_has_source_location(initial_stop):
             save_debug_line(initial_stop.file_path, initial_stop.line)
@@ -1367,7 +1500,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
                 program_counter=latest_event.program_counter if latest_event is not None else 0,
                 function=latest_event.function if latest_event is not None else "",
             )
-            stop_event = await _auto_trace_step(controller, current_stop)
+            stop_event = await _auto_trace_step(controller, current_stop, controller.binary_path)
     elif action == "step_in":
         stop_event = await controller.step_in()
     elif action == "step_out":
@@ -1379,14 +1512,22 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
     else:
         return None
 
-    vars_for_event: list[tuple[str, str]] = []
+    vars_for_event: list[tuple[str, str, str]] = []
     if _stop_has_source_location(stop_event):
-        vars_for_event = await _capture_scope_variables(controller)
-    _record_stop_event(
+        vars_for_event = await _capture_scope_variables(
+            controller,
+            binary_path=controller.binary_path,
+            file_path=stop_event.file_path,
+            line=stop_event.line,
+        )
+        global_vars = await _capture_global_variables(controller, controller.binary_path, vars_for_event)
+        vars_for_event = vars_for_event + global_vars
+    await _record_stop_event(
         test,
         stop_event,
         binary_path=controller.binary_path,
         variables=vars_for_event,
+        debugger=controller,
     )
     if _stop_has_source_location(stop_event):
         save_debug_line(stop_event.file_path, stop_event.line)

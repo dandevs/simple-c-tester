@@ -156,15 +156,15 @@ class GdbMIController:
     async def interrupt_nowait(self) -> None:
         await self._send_command_no_wait("-exec-interrupt")
 
-    async def list_simple_variables(self, timeout: float = 2.0) -> list[tuple[str, str]]:
+    async def list_simple_variables(self, timeout: float = 2.0) -> list[tuple[str, str, str]]:
         result = await self._send_command("-stack-list-variables --simple-values", timeout=timeout)
         return self._parse_variable_list(result)
 
-    async def list_all_variables(self, timeout: float = 2.0) -> list[tuple[str, str]]:
+    async def list_all_variables(self, timeout: float = 2.0) -> list[tuple[str, str, str]]:
         result = await self._send_command("-stack-list-variables --all-values", timeout=timeout)
         return self._parse_variable_list(result)
 
-    def _parse_variable_list(self, result: dict) -> list[tuple[str, str]]:
+    def _parse_variable_list(self, result: dict) -> list[tuple[str, str, str]]:
         if result.get("message") == "error":
             return []
 
@@ -176,7 +176,7 @@ class GdbMIController:
         if not isinstance(variables, list):
             return []
 
-        parsed: list[tuple[str, str]] = []
+        parsed: list[tuple[str, str, str]] = []
         for item in variables:
             if not isinstance(item, dict):
                 continue
@@ -188,7 +188,8 @@ class GdbMIController:
                 value = str(value)
             if len(value) > 120:
                 value = value[:117] + "..."
-            parsed.append((name, value))
+            type_hint = str(item.get("type", ""))
+            parsed.append((name, value, type_hint))
         return parsed
 
     async def var_create(

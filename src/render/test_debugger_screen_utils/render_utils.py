@@ -319,15 +319,20 @@ def build_variables_tree(vars_list, vars_tree_widget, vars_widget):
         return None
 
     class _Node:
-        __slots__ = ("name", "value", "children")
+        __slots__ = ("name", "value", "type_hint", "children")
 
         def __init__(self, name: str):
             self.name = name
             self.value = ""
+            self.type_hint = ""
             self.children: dict[str, "_Node"] = {}
 
     root: dict[str, _Node] = {}
-    for full_name, value in vars_list:
+    for var_tuple in vars_list:
+        if len(var_tuple) >= 3:
+            full_name, value, _type_hint = var_tuple
+        else:
+            full_name, value = var_tuple
         parts = [part for part in full_name.split(".") if part]
         if not parts:
             continue
@@ -347,6 +352,7 @@ def build_variables_tree(vars_list, vars_tree_widget, vars_widget):
             current = nxt
 
         current.value = value if value not in {"", "{...}"} else "?"
+        current.type_hint = _type_hint if len(var_tuple) >= 3 else ""
 
     vars_widget.update(
         Text.assemble(
@@ -369,6 +375,8 @@ def build_variables_tree(vars_list, vars_tree_widget, vars_widget):
                 val = val[:77] + "..."
             label.append(" = ", style=STORY_HELP)
             label.append(val, style="#f8f8f2")
+        if node.type_hint:
+            label.append(f" [{node.type_hint}]", style=STORY_HELP)
         return label
 
     def _append(tree_node, item: _Node) -> None:
