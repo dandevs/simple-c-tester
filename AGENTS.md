@@ -74,6 +74,108 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 - `src/runner/state.py` — helpers for checking completion state
 - All intra-src imports are bare (no `src.` prefix) — the package is not installed, `main.py` adds its own directory to `sys.path`
 
+## Code Navigation Guide
+
+### `src/runner/execute.py` — Orchestration Layer
+Core async runner and debug/session lifecycle. ~1650 lines.
+- **`run_test(test, on_complete)`** — Entry point. Clears timeline, compiles via `make`, then runs plain binary or auto debug trace.
+- **`_run_auto_debug_trace(test, binary_path, proc_env)`** — Starts `GdbMIController`, configures it, creates a `StoryFilterEngine`, and runs the capture loop.
+  - Inner **`_capture_story_stop(stop_event)`** — Called at **every** gdb stop.
+    - Always calls `_capture_scope_variables_fast()` and `resolve_line_annotations()`.
+    - Always merges annotations into `test.annotation_cache` via `merge_line_annotations_into_cache()`.
+    - Uses `StoryFilterEngine.evaluate_without_variables()` / `evaluate_with_variables()` to decide matches.
+    - Only calls `_record_stop_event()` (creates a visible card) when `matches` is non-empty.
+  - Loop calls `_auto_trace_step(..., always_step_in=True)` so auto trace enters every function.
+- **`_auto_trace_step(controller, stop_event, binary_path, always_step_in=False)`** — Chooses next gdb command. When `always_step_in=True`, unconditionally steps into user-code functions.
+- **`_record_stop_event(..., line_annotations=None)`** — Appends a `TimelineEvent`. Accepts pre-computed annotations to avoid double work.
+- **`start_debug_session(test, precision_mode)`** / **`stop_debug_session(test)`** — Manual debug lifecycle. Sets up breakpoints, initial stop, and teardown.
+- **`_debug_step(test, action)`** — Handles manual actions (`next`, `auto`, `step_in`, `step_out`, `continue`, `interrupt`). `auto` uses `_auto_trace_step` with heuristic stepping.
+- **`_capture_scope_variables(controller, ...)`** — Deep recursive variable expansion (gdb `var_create` / `var_list_children`).
+- **`_capture_scope_variables_fast(controller, ...)`** — Lightweight frame variables without deep expansion. Used for cache population and synthetic events.
+- **`_capture_global_variables(controller, binary_path, locals)`** — Evaluates global/static variables via `evaluate_global()`.
+- **`state_changed()`** — Synchronous dispatcher. Schedules `run_test()` coroutines via `asyncio.ensure_future()`.
+- **`update_annotation_cache(test, event)`** — Wraps `_merge_event_annotations_into()`.
+
+### `src/runner/debugger.py` — GDB MI Controller
+Async wrapper around gdb's MI2 interpreter.
+- **`GdbMIController`** class:
+  - `start()` — launches `gdb --quiet --interpreter=mi2`.
+  - `configure()` — pagination off, confirm off, pretty print, skip system files.
+  - `configure_manual_stepping()` — sets `scheduler-locking step` (used in `precise` mode).
+  - Stepping: `next()`, `step_in()`, `step_out()`, `continue_run()`, `interrupt()`.
+  - Breakpoints: `break_main_and_run()`, `insert_breakpoint()`, `delete_breakpoint()`, `list_breakpoints()`.
+  - Variables: `list_simple_variables()`, `list_all_variables()`, `var_create()`, `var_list_children()`, `var_delete()`, `var_evaluate()`, `evaluate_expression()`.
+  - `shutdown()` — graceful exit + terminate/kill.
+- **`DebugStopEvent`** — dataclass: `reason`, `file_path`, `line`, `program_counter`, `function`, `exit_code`, `signal_name`, `raw`.
+- **`stop_event_is_terminal()`** — returns `True` for `exited-*` or `signal-received` (except `SIGINT`).
+
+### `src/runner/story_filters/` — Filter Engine
+Decides which debug stops become visible timeline cards.
+- **`config.py`** — `StoryFilterConfig` dataclass. Profiles: `minimal` (4 triggers), `balanced` (10 triggers), `all` (12 triggers). `normalized_story_filter_profile()`.
+- **`engine.py`** — `StoryFilterEngine`:
+  - `evaluate_without_variables(stop_event)` → `StoryFilterDecision(emit, matches, need_variables)`.
+  - `evaluate_with_variables(stop_event, variables)` → adds variable-dependent triggers (e.g. `anomaly`).
+  - `mark_processed(stop_event)` — updates `previous_stop` and `step_index`.
+- **`triggers.py`** — Individual matchers:
+  - `function_enter`, `function_exit`, `branch_decision`, `loop_milestone`, `goto_jump`, `assert_line`, `assert_failure`, `anomaly`, `sync_event`, `first_hit_function`, `first_hit_line`, `standalone_expr`.
+  - `trigger_needs_variables()` — only `anomaly` requires runtime variable values.
+
+### `src/runner/story_annotations.py` — Annotation Cache & Pipeline
+Builds inline `[expr=value]` annotations for the story viewer.
+- **`get_story_annotations(test)`** — Public API. Returns `{abs_path: {line: [annotation_strs]}}`. LRU-cached by `(test_key, event_count, aggregate, boundary)`.
+- **`_compute_story_annotations(test)`** — Reads `test.annotation_cache` when `aggregate=True`, or slices events up to `timeline_selected_event_index` when `aggregate=False`.
+- **`merge_line_annotations_into_cache(cache, file_path, function, line_annotations)`** — Injects resolved annotations directly into the Store A cache **without** requiring a `TimelineEvent`. Used by `_capture_story_stop` for non-triggered stops.
+- **`_merge_event_annotations_into(cache, event)`** — Merges a `TimelineEvent`'s `line_annotations` into the cache. Delegates to `merge_line_annotations_into_cache()` internally.
+- **`format_story_annotations_for_db()`** — Converts dict to db.json list format `[[lineText, lineNo, [str...]], ...]`.
+
+### `src/runner/annotation_resolver.py` — Per-Line Expression Evaluation
+- **`resolve_line_annotations(line_text, line_number, debugger)`** — Extracts C expressions from source via `extract_expressions()` and evaluates each via `debugger.evaluate_expression()`. Returns `{line_number: ["[expr=val]", ...]}`.
+- **`extract_expressions()`** lives in `src/runner/expression_tokenizer.py`.
+
+### `src/runner/dwarf_core/` — DWARF Resolver
+Provides DWARF-backed liveness and inline annotations.
+- **`api.py`** — `DwarfCoreApi`:
+  - `load(request)` → `DwarfLoaderResponse` (line index + scope index). Cached per binary path.
+  - `resolve(request)` → `DwarfResolveResponse` (location + annotations).
+  - `parse_source_expression(request)` → tokenizes and normalizes C expressions.
+- **`variable_scopes.py`** — `build_scope_index(line_index, dwarf_info)`:
+  - Walks DWARF DIEs for `DW_TAG_variable` / `DW_TAG_formal_parameter`.
+  - Parses `DW_AT_location` (exprloc or loclist) into `DwarfVariableLiveRange`s.
+  - Maps live PC ranges to source lines via `line_index` → `DwarfScopeIndex(file_lines={abs_path: {line: (var_names,)}})`.
+- **`resolver.py`** — `resolve_inline_annotations()`:
+  - `_resolve_with_loaded_data()` → `_resolve_location()` + `_build_runtime_variable_map()` + `_build_annotations()`.
+  - `_check_liveness()` — consults optional `liveness_checker` (the scope index).
+- **`models.py`** — Dataclasses: `DwarfLoaderResponse`, `DwarfScopeIndex`, `DwarfResolveRequest`, `ResolvedVariableAnnotation`, `DwarfLineIndex`, etc.
+- **`loader.py`** — `load_dwarf_data()` → parses ELF/DWARF, builds line index and scope index.
+- **`line_index.py`** — `lookup_address()` for PC-to-source mapping.
+
+### `src/render/test_debugger_screen.py` — Test Story / Debug UI
+Textual `Screen` subclass for the debug/story view.
+- **`TestDebuggerScreen`**:
+  - `on_mount()` — enables `timeline_capture_enabled`, starts debug session if idle.
+  - `on_unmount()` — cancels debug, clears `annotation_cache` and `debugLine` from db.json.
+  - `_line_frames()` — Builds visible frame list from `test.timeline_events`. Applies sequential-line thinning (`tsv_skip_seq_lines`) only in non-debug mode.
+  - `_render_code_panel()` — Renders full-file view (`render_full_file_panel`) or card stack (`render_code_panel`). Uses `get_story_annotations(test)` for inline annotations.
+  - `_render_variables_panel(selected_event)` — Shows variables. Uses `_variables_cache` for expanded vars when debug is active; falls back to `event.variables` otherwise.
+  - `_fetch_expanded_variables_for_frame()` — Async deep expansion via `_capture_scope_variables()` for the selected frame.
+  - Actions: `action_step_next()`, `action_step_in()`, `action_step_out()`, `action_continue_run()`, `action_interrupt_run()`, `action_toggle_precision()`, `action_toggle_full_file_view()`, `action_toggle_timeline()`, timeline scrub (`left`/`right`), etc.
+- **`DebugControlsModal`** — Modal screen listing keybindings and a 3-button profile selector (`Minimal`/`Balanced`/`All`).
+
+### `src/render/test_debugger_screen_utils/`
+- **`source_utils.py`** — `load_source_lines()`, `display_path()`, `detect_language()`.
+- **`frame_utils.py`** — `ensure_selected_frame_index()`, `compute_frame_cards_window()`, `event_has_useful_source_line()`.
+- **`render_utils.py`** — `build_frame_snippet()`, `build_variables_tree()`, `render_code_panel()`, `render_full_file_panel()`.
+
+### Data Flow Summary (Auto Trace)
+1. `run_test()` compiles binary → `_run_auto_debug_trace()` starts `GdbMIController`.
+2. Loop: `_auto_trace_step(always_step_in=True)` advances gdb into every function.
+3. At every stop, `_capture_story_stop()`:
+   a. Captures lightweight variables + resolves line annotations.
+   b. Merges annotations into `test.annotation_cache` unconditionally.
+   c. Runs `StoryFilterEngine` to decide if this stop is "interesting".
+   d. If matches exist: captures full variables + globals → `_record_stop_event()` → `test.timeline_events.append()`.
+4. UI (`TestDebuggerScreen`) reads `test.timeline_events` for cards and `test.annotation_cache` (via `get_story_annotations()`) for full-file inline annotations.
+
 ## Key Behaviors
 - Compilation goes through `make -f test_build/Makefile`, not direct `gcc` — enables incremental builds via `.d` dependency files
 - `.d` files are parsed after each make run to populate the dependency index for watch mode; persisted to `test_build/db.json` (which also stores user preferences like debug precision mode)
