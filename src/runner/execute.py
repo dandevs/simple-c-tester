@@ -33,6 +33,7 @@ from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_fil
 from .story_annotations import (
     get_story_annotations,
     format_story_annotations_for_db,
+    merge_line_annotations_into_cache,
     _merge_event_annotations_into,
 )
 from .annotation_resolver import resolve_line_annotations
@@ -585,7 +586,7 @@ def _test_from_key(test_key: str) -> Test | None:
     return None
 
 
-async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEvent, binary_path: str = "") -> DebugStopEvent:
+async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEvent, binary_path: str = "", always_step_in: bool = False) -> DebugStopEvent:
     if stop_event_is_terminal(stop_event):
         return stop_event
 
@@ -595,6 +596,12 @@ async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEve
     in_user_code = _is_user_code_path(stop_event.file_path)
     if not in_user_code:
         return await controller.step_out()
+
+    if always_step_in:
+        next_event = await controller.step_in()
+        if not stop_event_is_terminal(next_event) and not _is_user_code_path(next_event.file_path):
+            return await controller.step_out()
+        return next_event
 
     wants_step_in = await _line_has_likely_call(stop_event.file_path, stop_event.line, binary_path)
     next_event = await (controller.step_in() if wants_step_in else controller.next())
@@ -848,17 +855,21 @@ async def _record_stop_event(
     variables: list[tuple[str, str, str]] | None = None,
     trigger_matches: list[TriggerMatch] | None = None,
     debugger: GdbMIController | None = None,
+    line_annotations: dict[int, list[str]] | None = None,
 ) -> None:
     runtime_variables = list(variables or [])
-    source_line = _line_text(stop_event.file_path, stop_event.line)
-    line_annotations: dict[int, list[str]] = {}
-    if debugger is not None and source_line and stop_event.line > 0:
-        try:
-            line_annotations = await resolve_line_annotations(
-                source_line, stop_event.line, debugger
-            )
-        except Exception:
-            pass
+    resolved_annotations: dict[int, list[str]] = {}
+    if line_annotations is not None:
+        resolved_annotations = line_annotations
+    elif debugger is not None and stop_event.file_path and stop_event.line > 0:
+        source_line = _line_text(stop_event.file_path, stop_event.line)
+        if source_line:
+            try:
+                resolved_annotations = await resolve_line_annotations(
+                    source_line, stop_event.line, debugger
+                )
+            except Exception:
+                pass
     matches = list(trigger_matches or [])
     primary = matches[0] if matches else None
     message = primary.message if primary is not None else _stop_reason_message(stop_event)
@@ -871,7 +882,7 @@ async def _record_stop_event(
         function=stop_event.function,
         variables=runtime_variables,
         program_counter=stop_event.program_counter,
-        line_annotations=line_annotations,
+        line_annotations=resolved_annotations,
         primary_trigger=primary.trigger_id if primary is not None else "",
         trigger_ids=[match.trigger_id for match in matches],
         trigger_label=primary.label if primary is not None else "",
@@ -1147,9 +1158,36 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             story_filters.mark_processed(stop_event)
             return
 
+        # Always collect lightweight variables and line annotations for the cache
+        fast_variables = await _capture_scope_variables_fast(
+            controller,
+            binary_path=binary_path,
+            file_path=stop_event.file_path,
+            line=stop_event.line,
+        )
+        line_annotations: dict[int, list[str]] = {}
+        if stop_event.file_path and stop_event.line > 0:
+            source_line = _line_text(stop_event.file_path, stop_event.line)
+            if source_line:
+                try:
+                    line_annotations = await resolve_line_annotations(
+                        source_line, stop_event.line, controller
+                    )
+                except Exception:
+                    pass
+
+        # Merge annotations into the DWARF cache even for non-triggered stops
+        if line_annotations:
+            merge_line_annotations_into_cache(
+                test.annotation_cache,
+                stop_event.file_path,
+                stop_event.function or "unknown",
+                line_annotations,
+            )
+
         early_decision = story_filters.evaluate_without_variables(stop_event)
         matches = list(early_decision.matches)
-        variables: list[tuple[str, str, str]] = []
+        variables = list(fast_variables)
 
         if early_decision.need_variables:
             variables = await _capture_scope_variables(
@@ -1161,14 +1199,6 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             var_decision = story_filters.evaluate_with_variables(stop_event, variables)
             matches = _merge_trigger_matches(matches, var_decision.matches)
 
-        if matches and not variables:
-            variables = await _capture_scope_variables_fast(
-                controller,
-                binary_path=binary_path,
-                file_path=stop_event.file_path,
-                line=stop_event.line,
-            )
-
         if matches:
             global_vars = await _capture_global_variables(controller, binary_path, variables)
             variables = variables + global_vars
@@ -1179,9 +1209,10 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
                 variables=variables,
                 trigger_matches=matches,
                 debugger=controller,
+                line_annotations=line_annotations,
             )
         await _emit_skipped_standalone_exprs(
-            test, stop_event, story_filters, controller, variables, binary_path
+            test, stop_event, story_filters, controller, fast_variables, binary_path
         )
         story_filters.mark_processed(stop_event)
 
@@ -1194,7 +1225,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         if test.state == TestState.CANCELLED:
             _append_timeline_event(test, "debug_cancelled", "cancelled while tracing")
             return
-        stop_event = await _auto_trace_step(controller, stop_event, binary_path)
+        stop_event = await _auto_trace_step(controller, stop_event, binary_path, always_step_in=True)
         await _capture_story_stop(stop_event)
         step_count += 1
 

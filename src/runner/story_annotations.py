@@ -80,6 +80,23 @@ def _parse_annotation_tokens(annotation_strs: list[str]) -> dict[str, str]:
     return result
 
 
+def merge_line_annotations_into_cache(
+    cache: dict[str, dict[str, dict[int, dict[str, str]]]],
+    file_path: str,
+    function: str,
+    line_annotations: dict[int, list[str]],
+) -> None:
+    """Merge raw line_annotations into a Store A cache without a TimelineEvent."""
+    if not file_path or not line_annotations:
+        return
+    abs_path = os.path.abspath(file_path)
+    func_cache = cache.setdefault(function or "unknown", {})
+    file_cache = func_cache.setdefault(abs_path, {})
+    for line_no, annotation_strs in line_annotations.items():
+        line_cache = file_cache.setdefault(line_no, {})
+        line_cache.update(_parse_annotation_tokens(annotation_strs))
+
+
 def _merge_event_annotations_into(
     cache: dict[str, dict[str, dict[int, dict[str, str]]]],
     event,
@@ -87,13 +104,12 @@ def _merge_event_annotations_into(
     """Merge a single event's line_annotations into a Store A cache."""
     if event.kind != "step" or not event.file_path or event.line <= 0:
         return
-    func_name = event.function or "unknown"
-    file_path = os.path.abspath(event.file_path)
-    func_cache = cache.setdefault(func_name, {})
-    file_cache = func_cache.setdefault(file_path, {})
-    for line_no, annotation_strs in (event.line_annotations or {}).items():
-        line_cache = file_cache.setdefault(line_no, {})
-        line_cache.update(_parse_annotation_tokens(annotation_strs))
+    merge_line_annotations_into_cache(
+        cache,
+        event.file_path,
+        event.function or "unknown",
+        event.line_annotations or {},
+    )
 
 
 def _cache_to_annotations(
