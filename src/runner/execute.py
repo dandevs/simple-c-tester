@@ -354,7 +354,7 @@ def _line_text(file_path: str, line_number: int) -> str:
 
 
 async def _line_has_likely_call(file_path: str, line_number: int, binary_path: str = "") -> bool:
-    content = _source_line(file_path, line_number)
+    content = _line_text(file_path, line_number)
     if not content:
         return False
 
