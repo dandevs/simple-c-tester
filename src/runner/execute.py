@@ -12,6 +12,7 @@ from urllib import parse as urllib_parse
 import state as global_state
 from state import state, active_processes, subprocess_columns
 from models import Test, TestState, TimelineEvent
+from .expression_tokenizer import tokenize_line
 from .makefile import (
     refresh_dependency_graph,
     generate_makefile,
@@ -121,11 +122,14 @@ def _test_key(test: Test) -> str:
 def _append_debug_log(test: Test, message: str) -> None:
     if not message:
         return
+    run = test.current_run
+    if run is None:
+        return
     for line in message.replace("\r", "").split("\n"):
         if line:
-            test.debug_logs.append(line)
-    if len(test.debug_logs) > MAX_DEBUG_LOG_LINES:
-        test.debug_logs = test.debug_logs[-MAX_DEBUG_LOG_LINES:]
+            run.debug_logs.append(line)
+    if len(run.debug_logs) > MAX_DEBUG_LOG_LINES:
+        run.debug_logs = run.debug_logs[-MAX_DEBUG_LOG_LINES:]
 
 
 def _append_timeline_event(
@@ -144,8 +148,11 @@ def _append_timeline_event(
     trigger_label: str = "",
     trigger_message: str = "",
 ) -> None:
+    run = test.current_run
+    if run is None:
+        return
     event = TimelineEvent(
-        index=len(test.timeline_events) + 1,
+        index=len(run.timeline_events) + 1,
         timestamp=time.monotonic(),
         kind=kind,
         message=message,
@@ -161,13 +168,16 @@ def _append_timeline_event(
         trigger_label=trigger_label,
         trigger_message=trigger_message,
     )
-    test.timeline_events.append(event)
-    if len(test.timeline_events) > MAX_TIMELINE_EVENTS:
-        test.timeline_events = test.timeline_events[-MAX_TIMELINE_EVENTS:]
+    run.timeline_events.append(event)
+    if len(run.timeline_events) > MAX_TIMELINE_EVENTS:
+        run.timeline_events = run.timeline_events[-MAX_TIMELINE_EVENTS:]
 
 
 def _is_manual_debug_mode(test: Test) -> bool:
-    for event in reversed(test.timeline_events):
+    run = test.current_run
+    if run is None:
+        return False
+    for event in reversed(run.timeline_events):
         if event.kind == "run_start":
             return "manual debug" in event.message.lower()
     return False
@@ -267,8 +277,11 @@ async def _emit_skipped_standalone_exprs(
 
 
 def _start_timeline_run(test: Test, reason: str) -> None:
+    run = test.current_run
+    if run is None:
+        return
     run_index = (
-        sum(1 for event in test.timeline_events if event.kind == "run_start") + 1
+        sum(1 for event in run.timeline_events if event.kind == "run_start") + 1
     )
     _append_timeline_event(test, "run_start", f"run {run_index}: {reason}")
 
@@ -322,12 +335,22 @@ def _line_text(file_path: str, line_number: int) -> str:
     return lines[line_number - 1]
 
 
+def _extract_call_names_tokenized(line: str) -> set[str]:
+    tokens = tokenize_line(line)
+    calls: set[str] = set()
+    for i, tok in enumerate(tokens):
+        if tok.type == "identifier" and tok.value not in _CONTROL_WORDS:
+            if i + 1 < len(tokens) and tokens[i + 1].value == "(":
+                calls.add(tok.value)
+    return calls
+
+
 async def _line_has_likely_call(file_path: str, line_number: int, binary_path: str = "") -> bool:
     content = _line_text(file_path, line_number)
     if not content:
         return False
 
-    call_names = set(_CALL_RE.findall(content)) - _CONTROL_WORDS
+    call_names = _extract_call_names_tokenized(content)
     if not call_names:
         return False
 
@@ -586,34 +609,68 @@ def _test_from_key(test_key: str) -> Test | None:
     return None
 
 
-async def _auto_trace_step(controller: GdbMIController, stop_event: DebugStopEvent, binary_path: str = "", always_step_in: bool = False) -> DebugStopEvent:
+async def _auto_trace_step(
+    controller: GdbMIController,
+    stop_event: DebugStopEvent,
+    binary_path: str = "",
+    always_step_in: bool = False,
+    same_line_count: int = 0,
+) -> tuple[DebugStopEvent, int]:
     if stop_event_is_terminal(stop_event):
-        return stop_event
+        return stop_event, 0
 
     if not stop_event.file_path or stop_event.line <= 0:
-        return await controller.next()
+        return await controller.next(), 0
+
+    async def _step_out_until_moved(current: DebugStopEvent) -> DebugStopEvent:
+        for _ in range(5):
+            if stop_event_is_terminal(current):
+                break
+            nxt = await controller.step_out()
+            if stop_event_is_terminal(nxt):
+                return nxt
+            if nxt.file_path != current.file_path or nxt.line != current.line:
+                return nxt
+            current = nxt
+        return current
 
     in_user_code = _is_user_code_path(stop_event.file_path)
     if not in_user_code:
-        return await controller.step_out()
+        return await _step_out_until_moved(stop_event), 0
 
     if always_step_in:
         next_event = await controller.step_in()
-        if not stop_event_is_terminal(next_event) and not _is_user_code_path(next_event.file_path):
-            return await controller.step_out()
-        return next_event
+        if not stop_event_is_terminal(next_event):
+            if not _is_user_code_path(next_event.file_path):
+                return await _step_out_until_moved(next_event), 0
+            # Detect getting stuck on the same line after repeated step-ins
+            if (next_event.file_path == stop_event.file_path and
+                next_event.line == stop_event.line and
+                next_event.line > 0):
+                same_line_count += 1
+                if same_line_count >= 3:
+                    return await _step_out_until_moved(next_event), 0
+            else:
+                same_line_count = 0
+            entered_new_function = (next_event.function or "").strip() != (stop_event.function or "").strip()
+            if entered_new_function and not _line_text(next_event.file_path, next_event.line).strip():
+                return await _step_out_until_moved(next_event), 0
+        return next_event, same_line_count
 
     wants_step_in = await _line_has_likely_call(stop_event.file_path, stop_event.line, binary_path)
     next_event = await (controller.step_in() if wants_step_in else controller.next())
 
     if wants_step_in and not stop_event_is_terminal(next_event) and not _is_user_code_path(next_event.file_path):
-        return await controller.step_out()
+        return await _step_out_until_moved(next_event), 0
 
-    return next_event
+    return next_event, 0
 
 
 def _latest_source_timeline_event(test: Test) -> TimelineEvent | None:
-    for event in reversed(test.timeline_events):
+    run = test.current_run
+    if run is None:
+        return None
+    for event in reversed(run.timeline_events):
         if event.file_path and event.line > 0:
             return event
     return None
@@ -844,8 +901,10 @@ def _merge_trigger_matches(
 
 
 def update_annotation_cache(test: Test, event: TimelineEvent) -> None:
-    """Merge event line_annotations into test.annotation_cache (Store A)."""
-    _merge_event_annotations_into(test.annotation_cache, event)
+    """Merge event line_annotations into the current run's annotation_cache (Store A)."""
+    run = test.current_run
+    if run is not None:
+        _merge_event_annotations_into(run.annotation_cache, event)
 
 
 async def _record_stop_event(
@@ -888,34 +947,126 @@ async def _record_stop_event(
         trigger_label=primary.label if primary is not None else "",
         trigger_message=primary.message if primary is not None else "",
     )
-    event = test.timeline_events[-1]
-    update_annotation_cache(test, event)
+    run = test.current_run
+    if run is not None:
+        event = run.timeline_events[-1]
+        update_annotation_cache(test, event)
+
+
+_FAILURE_STDERR_INDICATORS = (
+    "free():", "malloc():", "realloc():", "calloc():",
+    "double free", "corruption", "invalid pointer", "invalid size",
+    "segmentation fault", "sigsegv", "sigabrt", "assertion",
+    "error:", "abort", "heap", "asan", "sanitizer",
+    "munmap_chunk", "glibc detected",
+)
+
+
+_USER_SPACE_INDICATORS = (
+    "free():", "malloc():", "realloc():", "calloc():",
+    "double free", "corruption", "invalid pointer", "invalid size",
+    "heap", "asan", "sanitizer", "munmap_chunk", "glibc detected",
+    "assertion", "error:",
+)
+
+_SYSTEM_INDICATORS = (
+    "segmentation fault", "sigsegv", "sigabrt", "abort",
+    "received signal", "aborted", "fatal",
+)
+
+
+def _extract_failure_stderr(test: Test) -> tuple[str, str]:
+    """Pull stderr / debug-log lines that explain why a test died.
+
+    Returns (user_space_message, system_message).
+    """
+    run = test.current_run
+    if run is None:
+        return "", ""
+    candidates: list[str] = []
+
+    # Timeline stderr events (plain-binary mode)
+    for event in run.timeline_events:
+        if event.kind == "stderr" and event.message:
+            candidates.append(event.message.strip())
+
+    # Plain binary stderr buffer
+    if run.stderr.strip():
+        lines = [l.strip() for l in run.stderr.strip().splitlines() if l.strip()]
+        candidates.extend(lines)
+
+    # GDB console / log output (auto-trace mode) – target stderr arrives as &"..." records
+    if run.debug_logs:
+        logs = [l.strip() for l in run.debug_logs if l.strip()]
+        candidates.extend(logs)
+
+    user_errors: list[str] = []
+    system_errors: list[str] = []
+    for c in candidates:
+        c_lower = c.lower()
+        if any(ind in c_lower for ind in _USER_SPACE_INDICATORS):
+            user_errors.append(c)
+        elif any(ind in c_lower for ind in _SYSTEM_INDICATORS):
+            system_errors.append(c)
+        else:
+            # Fallback: if it has any failure indicator, treat as user space
+            if any(ind in c_lower for ind in _FAILURE_STDERR_INDICATORS):
+                user_errors.append(c)
+
+    user_msg = " | ".join(dict.fromkeys(user_errors))
+    system_msg = " | ".join(dict.fromkeys(system_errors))
+    if not user_msg and not system_msg and candidates:
+        # No classified errors – treat last few candidates as system
+        system_msg = " | ".join(dict.fromkeys(candidates[-3:]))
+    return user_msg, system_msg
 
 
 def _apply_terminal_stop(test: Test, stop_event: DebugStopEvent) -> None:
     code = stop_event.exit_code
     if stop_event.reason == "exited-normally":
         code = 0 if code is None else code
-    test.debug_exited = True
-    test.debug_running = False
-    test.debug_exit_code = code
+    run = test.current_run
+    if run is not None:
+        run.debug_exited = True
+        run.debug_running = False
+        run.debug_exit_code = code
 
     if stop_event.reason.startswith("exited") and (code is None or code == 0):
         test.state = TestState.PASSED
     else:
         test.state = TestState.FAILED
+        reason = _stop_reason_message(stop_event)
+        user_err, system_err = _extract_failure_stderr(test)
+        parts: list[str] = []
+        if user_err:
+            parts.append(user_err)
+        if system_err:
+            parts.append(system_err)
+        if parts:
+            reason = f"{reason}\n{'─' * 40}\n{'\n'.join(parts)}"
+        _append_timeline_event(
+            test,
+            "test_failed",
+            f"FAIL ({stop_event.reason}): {reason}",
+        )
     test.time_state_changed = time.monotonic()
 
 
 def _debug_callbacks(test: Test):
+    captured_run = test.current_run
+
     def _on_target_output(chunk: str) -> None:
-        test.stdout += chunk
-        test.stdout_raw += chunk.encode(errors="replace")
+        if test.current_run is not captured_run or captured_run is None:
+            return
+        captured_run.stdout += chunk
+        captured_run.stdout_raw += chunk.encode(errors="replace")
         for line in chunk.replace("\r", "").split("\n"):
             if line:
                 _append_timeline_event(test, "stdout", line, stream="stdout")
 
     def _on_console_output(chunk: str) -> None:
+        if test.current_run is not captured_run or captured_run is None:
+            return
         _append_debug_log(test, chunk)
 
     return _on_target_output, _on_console_output
@@ -990,8 +1141,10 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
     if make_proc.returncode != 0:
         if test.state == TestState.CANCELLED:
             return False, binary_path
-        test.compile_err = make_stderr.decode(errors="replace")
-        test.compile_err_raw = make_stderr
+        run = test.current_run
+        if run is not None:
+            run.compile_err = make_stderr.decode(errors="replace")
+            run.compile_err_raw = make_stderr
         test.state = TestState.FAILED
         test.time_state_changed = time.monotonic()
         global_state.dep_graph_ready = False
@@ -999,8 +1152,10 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
         _append_timeline_event(test, "compile_failed", "compile failed")
         return False, binary_path
 
-    test.compile_err = ""
-    test.compile_err_raw = b""
+    run = test.current_run
+    if run is not None:
+        run.compile_err = ""
+        run.compile_err_raw = b""
     _append_timeline_event(test, "compile_ok", "compile succeeded")
     return True, binary_path
 
@@ -1026,8 +1181,10 @@ async def _run_plain_binary(test: Test, binary_path: str, proc_env: dict[str, st
                 await asyncio.sleep(0.05)
                 continue
             if e.errno == errno.ENOENT:
-                test.stderr = f"test executable missing: ./{binary_path}"
-                test.stderr_raw = b""
+                run = test.current_run
+                if run is not None:
+                    run.stderr = f"test executable missing: ./{binary_path}"
+                    run.stderr_raw = b""
                 test.state = TestState.FAILED
                 test.time_state_changed = time.monotonic()
                 return
@@ -1044,10 +1201,12 @@ async def _run_plain_binary(test: Test, binary_path: str, proc_env: dict[str, st
     process_key = _test_key(test)
     active_processes[process_key] = run_proc
 
-    test.stdout = ""
-    test.stdout_raw = b""
-    test.stderr = ""
-    test.stderr_raw = b""
+    run = test.current_run
+    if run is not None:
+        run.stdout = ""
+        run.stdout_raw = b""
+        run.stderr = ""
+        run.stderr_raw = b""
     _append_timeline_event(test, "run_start", f"running {binary_path}")
 
     async def _read_stream(
@@ -1067,12 +1226,14 @@ async def _run_plain_binary(test: Test, binary_path: str, proc_env: dict[str, st
             dest_raw.append(line)
 
             if is_stdout:
-                test.stdout += decoded_line
-                test.stdout_raw += line
+                if run is not None:
+                    run.stdout += decoded_line
+                    run.stdout_raw += line
                 _append_timeline_event(test, "stdout", decoded_line.rstrip("\n"), stream="stdout")
             else:
-                test.stderr += decoded_line
-                test.stderr_raw += line
+                if run is not None:
+                    run.stderr += decoded_line
+                    run.stderr_raw += line
                 _append_timeline_event(test, "stderr", decoded_line.rstrip("\n"), stream="stderr")
 
     stdout_parts: list[str] = []
@@ -1087,10 +1248,11 @@ async def _run_plain_binary(test: Test, binary_path: str, proc_env: dict[str, st
     if active_processes.get(process_key) is run_proc:
         active_processes.pop(process_key, None)
 
-    test.stdout = "".join(stdout_parts)
-    test.stdout_raw = b"".join(stdout_raw_parts)
-    test.stderr = "".join(stderr_parts)
-    test.stderr_raw = b"".join(stderr_raw_parts)
+    if run is not None:
+        run.stdout = "".join(stdout_parts)
+        run.stdout_raw = b"".join(stdout_raw_parts)
+        run.stderr = "".join(stderr_parts)
+        run.stderr_raw = b"".join(stderr_raw_parts)
 
     if test.state == TestState.CANCELLED:
         return
@@ -1140,10 +1302,11 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
     controller.set_target_output_callback(target_callback)
     controller.set_console_output_callback(console_callback)
 
-    test.debug_running = True
-    test.debug_exited = False
-    test.debug_exit_code = None
-    test.timeline_selected_event_index = -1
+    run = test.run()
+    run.debug_running = True
+    run.debug_exited = False
+    run.debug_exit_code = None
+    run.timeline_selected_event_index = -1
     _append_timeline_event(test, "debug_start", f"gdb trace start: {binary_path}")
 
     await controller.start()
@@ -1179,7 +1342,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         # Merge annotations into the DWARF cache even for non-triggered stops
         if line_annotations:
             merge_line_annotations_into_cache(
-                test.annotation_cache,
+                run.annotation_cache,
                 stop_event.file_path,
                 stop_event.function or "unknown",
                 line_annotations,
@@ -1225,15 +1388,31 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
         if test.state == TestState.CANCELLED:
             _append_timeline_event(test, "debug_cancelled", "cancelled while tracing")
             return
-        stop_event = await _auto_trace_step(controller, stop_event, binary_path, always_step_in=True)
+        stop_event, _ = await _auto_trace_step(
+            controller, stop_event, binary_path, always_step_in=False
+        )
         await _capture_story_stop(stop_event)
         step_count += 1
 
     if step_count >= max_steps and not stop_event_is_terminal(stop_event):
         _append_timeline_event(test, "debug_limit", f"step cap reached ({max_steps})")
+        user_err, system_err = _extract_failure_stderr(test)
+        reason = f"auto trace exceeded {max_steps} steps"
+        parts: list[str] = []
+        if user_err:
+            parts.append(user_err)
+        if system_err:
+            parts.append(system_err)
+        if parts:
+            reason = f"{reason}\n{'─' * 40}\n{'\n'.join(parts)}"
+        _append_timeline_event(
+            test,
+            "test_failed",
+            f"FAIL (step-limit): {reason}",
+        )
         test.state = TestState.FAILED
-        test.debug_running = False
-        test.debug_exited = True
+        run.debug_running = False
+        run.debug_exited = True
         test.time_state_changed = time.monotonic()
         _persist_story_annotations(test)
         return
@@ -1266,8 +1445,8 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         if test.timeline_capture_enabled or global_state.timeline_capture_enabled:
             _ensure_debug_build_mode(True)
 
-        test.timeline_events = []
-        test.annotation_cache.clear()
+        from models import TestRun
+        test.current_run = TestRun()
         _start_timeline_run(test, "scheduled")
         compiled, binary_path = await _compile_binary_for_test(test, proc_env)
         if test.state == TestState.CANCELLED:
@@ -1276,11 +1455,8 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
             return
 
         test.time_start = time.monotonic()
-        test.stdout = ""
-        test.stdout_raw = b""
-        test.stderr = ""
-        test.stderr_raw = b""
-        test.debug_logs = []
+        run = test.run()
+        run.time_start = test.time_start
 
         if test.timeline_capture_enabled or global_state.timeline_capture_enabled:
             await _run_auto_debug_trace(test, binary_path, proc_env)
@@ -1290,13 +1466,20 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         raise
     except Exception as e:
         if test.state != TestState.CANCELLED:
-            test.stderr = f"runner error: {e}"
-            test.stderr_raw = b""
+            run = test.current_run
+            if run is not None:
+                run.stderr = f"runner error: {e}"
+                run.stderr_raw = b""
             test.state = TestState.FAILED
             test.time_state_changed = time.monotonic()
             global_state.dep_graph_ready = False
             global_state.dep_graph_reason = "runner error"
             _append_timeline_event(test, "runner_error", str(e))
+            _append_timeline_event(
+                test,
+                "test_failed",
+                f"FAIL (runner-error): {e}",
+            )
     finally:
         if current_task is not None and _active_run_tasks.get(process_key) is current_task:
             _active_run_tasks.pop(process_key, None)
@@ -1322,17 +1505,17 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
 
     _ensure_debug_build_mode(True)
 
+    from models import TestRun
+    test.current_run = TestRun()
+    run = test.run()
+
     test.state = TestState.RUNNING
     test.time_start = time.monotonic()
     test.time_state_changed = test.time_start
-    test.stdout = ""
-    test.stdout_raw = b""
-    test.stderr = ""
-    test.stderr_raw = b""
-    test.debug_logs = []
-    test.debug_running = True
-    test.debug_exited = False
-    test.debug_exit_code = None
+    run.time_start = test.time_start
+    run.debug_running = True
+    run.debug_exited = False
+    run.debug_exit_code = None
     test.debug_precision_mode = "precise" if precision_mode == "precise" else "loose"
     _start_timeline_run(test, "manual debug")
 
@@ -1341,7 +1524,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
 
     compiled, binary_path = await _compile_binary_for_test(test, proc_env)
     if not compiled:
-        test.debug_running = False
+        run.debug_running = False
         return
 
     controller = GdbMIController(f"./{binary_path}", env=proc_env)
@@ -1415,7 +1598,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
         )
         if _stop_has_source_location(initial_stop):
             save_debug_line(initial_stop.file_path, initial_stop.line)
-        test.timeline_selected_event_index = -1
+        run.timeline_selected_event_index = -1
         _schedule_story_annotations_persist(test)
 
         if stop_event_is_terminal(initial_stop):
@@ -1427,7 +1610,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
     except Exception as e:
         _append_timeline_event(test, "debug_error", str(e))
         if test.state != TestState.CANCELLED:
-            test.stderr = f"debug error: {e}"
+            run.stderr = f"debug error: {e}"
             test.state = TestState.FAILED
             test.time_state_changed = time.monotonic()
         await stop_debug_session(test)
@@ -1441,11 +1624,13 @@ async def stop_debug_session(test: Test, persist_annotations: bool = True) -> No
         if active_processes.get(test_key) is controller.proc:
             active_processes.pop(test_key, None)
 
-    test.debug_running = False
-    if not test.debug_exited:
-        test.debug_exited = True
-        test.debug_exit_code = None
-        _append_timeline_event(test, "debug_end", "debug session stopped")
+    run = test.current_run
+    if run is not None:
+        run.debug_running = False
+        if not run.debug_exited:
+            run.debug_exited = True
+            run.debug_exit_code = None
+    _append_timeline_event(test, "debug_end", "debug session stopped")
 
     pending = _annotation_persist_tasks.pop(test_key, None)
     if pending is not None and not pending.done():
@@ -1500,10 +1685,12 @@ async def cancel_test_and_restore_normal_build(test: Test) -> None:
         test.time_start = 0.0
         test.time_state_changed = time.monotonic()
 
-    test.debug_running = False
-    if not test.debug_exited:
-        test.debug_exited = True
-        test.debug_exit_code = None
+    run = test.current_run
+    if run is not None:
+        run.debug_running = False
+        if not run.debug_exited:
+            run.debug_exited = True
+            run.debug_exit_code = None
 
     restore_normal_build_mode()
 
@@ -1531,7 +1718,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
                 program_counter=latest_event.program_counter if latest_event is not None else 0,
                 function=latest_event.function if latest_event is not None else "",
             )
-            stop_event = await _auto_trace_step(controller, current_stop, controller.binary_path)
+            stop_event, _ = await _auto_trace_step(controller, current_stop, controller.binary_path)
     elif action == "step_in":
         stop_event = await controller.step_in()
     elif action == "step_out":
@@ -1562,7 +1749,9 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
     )
     if _stop_has_source_location(stop_event):
         save_debug_line(stop_event.file_path, stop_event.line)
-    test.timeline_selected_event_index = -1
+    run = test.current_run
+    if run is not None:
+        run.timeline_selected_event_index = -1
     _schedule_story_annotations_persist(test)
     if stop_event_is_terminal(stop_event):
         _apply_terminal_stop(test, stop_event)
@@ -1572,7 +1761,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
 
 
 async def debug_step_next(test: Test) -> DebugStopEvent | None:
-    return await _debug_step(test, "auto")
+    return await _debug_step(test, "next")
 
 
 async def debug_step_in(test: Test) -> DebugStopEvent | None:

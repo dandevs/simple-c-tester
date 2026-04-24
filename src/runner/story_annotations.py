@@ -133,15 +133,23 @@ def _cache_to_annotations(
 # Main annotation pipeline
 # ---------------------------------------------------------------------------
 
-def _compute_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
+def _compute_story_annotations(test: Test, event_boundary: int | None = None) -> dict[str, dict[int, list[str]]]:
     """Compute inline annotations from timeline event line_annotations."""
-    aggregate = getattr(test, "aggregate_annotations", True)
+    run = test.current_run
+    if run is None:
+        return {}
 
-    if aggregate and test.annotation_cache:
-        return _cache_to_annotations(test.annotation_cache)
+    if event_boundary is not None:
+        aggregate = False
+        boundary = event_boundary
+    else:
+        aggregate = run.aggregate_annotations
+        boundary = run.timeline_selected_event_index
 
-    boundary = test.timeline_selected_event_index
-    events = test.timeline_events
+    if aggregate and run.annotation_cache:
+        return _cache_to_annotations(run.annotation_cache)
+
+    events = run.timeline_events
     if not aggregate and boundary >= 0:
         events = events[: boundary + 1]
 
@@ -160,16 +168,27 @@ _MAX_ANNOTATION_CACHE_SIZE = 256
 _annotation_cache: dict[tuple[str, int, bool, int], dict[str, dict[int, list[str]]]] = {}
 
 
-def get_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
+def get_story_annotations(test: Test, event_boundary: int | None = None) -> dict[str, dict[int, list[str]]]:
     """Return cached inline annotations for the test.
 
     The result is a mapping of:
         absolute_file_path -> line_number -> [annotation_strings]
+
+    When ``event_boundary`` is provided, annotations are computed only from
+    timeline events up to (and including) that index, regardless of the
+    test's ``aggregate_annotations`` setting.  This is used in card-stack
+    mode so that each visible card shows its own accumulated annotation
+    history.
     """
+    run = test.current_run
     test_key = os.path.abspath(test.source_path)
-    event_count = len(test.timeline_events)
-    aggregate = getattr(test, "aggregate_annotations", True)
-    boundary = test.timeline_selected_event_index
+    event_count = len(run.timeline_events) if run is not None else 0
+    if event_boundary is not None:
+        aggregate = False
+        boundary = event_boundary
+    else:
+        aggregate = run.aggregate_annotations if run is not None else True
+        boundary = run.timeline_selected_event_index if run is not None else -1
 
     cache_key = (test_key, event_count, aggregate, boundary)
     cached = _annotation_cache.get(cache_key)
@@ -179,7 +198,7 @@ def get_story_annotations(test: Test) -> dict[str, dict[int, list[str]]]:
     if len(_annotation_cache) >= _MAX_ANNOTATION_CACHE_SIZE:
         _annotation_cache.clear()
 
-    annotations = _compute_story_annotations(test)
+    annotations = _compute_story_annotations(test, event_boundary=event_boundary)
     _annotation_cache[cache_key] = annotations
     return annotations
 

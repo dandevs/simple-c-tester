@@ -5,6 +5,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 import state as global_state
+from runner.story_annotations import get_story_annotations
 from .source_utils import display_path, detect_language, load_source_lines
 
 STORY_META_HIGHLIGHT = "#89dceb"
@@ -120,9 +121,9 @@ def render_code_panel(
     frames,
     selected_frame_index,
     source_cache,
-    annotations=None,
+    test,
 ):
-    """Render the card-based code panel using pre-computed annotations."""
+    """Render the card-based code panel with per-card annotation history."""
     if code_widget is None:
         return
 
@@ -148,6 +149,15 @@ def render_code_panel(
 
     for index in range(start_index, end_index):
         event = frames[index]
+        selected = index == selected_frame_index
+
+        if event.kind == "test_failed":
+            fail_text = Text(event.message, style="bold red")
+            renderables.append(fail_text)
+            if index < end_index - 1:
+                renderables.append(Text("-" * width, style="#3a3f4b"))
+            continue
+
         source_path = os.path.abspath(event.file_path)
         source_lines = load_source_lines(source_path, source_cache)
         if not source_lines:
@@ -156,13 +166,14 @@ def render_code_panel(
         line_number = event.line
         snippet_start = max(1, line_number - lines_above)
         snippet_end = min(len(source_lines), line_number + lines_below)
-        selected = index == selected_frame_index
 
         title = build_frame_title(event, selected)
 
         number_width = len(str(max(1, snippet_end)))
         code_width = max(1, width - (number_width + 3))
-        file_annotations = annotations.get(source_path, {}) if annotations else {}
+        # Each card shows its own accumulated annotation history up to this event
+        card_annotations = get_story_annotations(test, event_boundary=event.index)
+        file_annotations = card_annotations.get(source_path, {}) if card_annotations else {}
         snippet_text = build_frame_snippet(
             source_path,
             source_lines,
@@ -243,6 +254,10 @@ def render_full_file_panel(
     if selected < 0 or selected >= total:
         selected = total - 1
     event = frames[selected]
+
+    if event.kind == "test_failed":
+        code_widget.update(Text(event.message, style="bold red"))
+        return
 
     source_path = os.path.abspath(event.file_path)
     source_lines = load_source_lines(source_path, source_cache)

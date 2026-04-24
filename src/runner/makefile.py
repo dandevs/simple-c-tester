@@ -198,7 +198,10 @@ def update_dep_graph_readiness() -> None:
         global_state.dep_graph_reason = "no tests discovered"
         return
 
-    if any(test.compile_err.strip() for test in tests):
+    if any(
+        (test.current_run.compile_err.strip() if test.current_run is not None else "")
+        for test in tests
+    ):
         global_state.dep_graph_ready = False
         global_state.dep_graph_reason = "compile errors present"
         return

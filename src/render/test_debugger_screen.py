@@ -348,16 +348,26 @@ class TestDebuggerScreen(Screen[None]):
         self._set_footer_text(f"Timeline capture {mode} for {self.test.name}.")
 
     async def action_rerun_test(self) -> None:
-        if self.test.debug_running or is_debug_active(self.test):
-            running_action = self._action_task is not None and not self._action_task.done()
-            if running_action:
-                await self._force_restart_debug_session()
-                self._set_footer_text("Debugger force-restarted from beginning.")
-                return
-            await self._run_action(self._restart_debug_session(), "Debugger restarted.")
-            return
+        is_manual = self._is_manual_debug_story()
 
-        if self._is_manual_debug_story():
+        run = self.test.current_run
+        debug_running = run.debug_running if run is not None else False
+        if debug_running or is_debug_active(self.test):
+            if is_manual:
+                running_action = self._action_task is not None and not self._action_task.done()
+                if running_action:
+                    await self._force_restart_debug_session()
+                    self._set_footer_text("Debugger force-restarted from beginning.")
+                    return
+                await self._run_action(self._restart_debug_session(), "Debugger restarted.")
+                return
+            else:
+                from runner.execute import _cancel_active_run_for_manual_debug
+                await _cancel_active_run_for_manual_debug(self.test)
+                self._queue_story_capture("Story capture restarted.")
+                return
+
+        if is_manual:
             await self._run_action(
                 self._restart_debug_session(),
                 "Debugger restarted.",
@@ -368,7 +378,9 @@ class TestDebuggerScreen(Screen[None]):
 
     def _queue_story_capture(self, footer_message: str | None = None) -> None:
         self._reset_story_state()
-        self.test.aggregate_annotations = True
+        run = self.test.current_run
+        if run is not None:
+            run.aggregate_annotations = True
         self._follow_latest_frame = False
         clear_debug_line()
         self.test.state = TestState.PENDING
@@ -385,7 +397,9 @@ class TestDebuggerScreen(Screen[None]):
     async def _restart_debug_session(self) -> None:
         await stop_debug_session(self.test)
         self._reset_story_state()
-        self.test.aggregate_annotations = False
+        run = self.test.current_run
+        if run is not None:
+            run.aggregate_annotations = False
         await start_debug_session(self.test, precision_mode=self.test.debug_precision_mode)
 
     async def _force_restart_debug_session(self) -> None:
@@ -410,23 +424,17 @@ class TestDebuggerScreen(Screen[None]):
 
         await stop_debug_session(self.test)
         self._reset_story_state()
-        self.test.aggregate_annotations = False
+        run = self.test.current_run
+        if run is not None:
+            run.aggregate_annotations = False
         self._refresh_view(force=True)
         self._set_footer_text("Force restarting debugger...")
         await start_debug_session(self.test, precision_mode=self.test.debug_precision_mode)
 
     def _reset_story_state(self) -> None:
-        self.test.timeline_events = []
-        self.test.annotation_cache.clear()
+        from models import TestRun
+        self.test.current_run = TestRun()
         invalidate_story_annotation_cache(self.test)
-        self.test.debug_logs = []
-        self.test.stdout = ""
-        self.test.stdout_raw = b""
-        self.test.stderr = ""
-        self.test.stderr_raw = b""
-        self.test.compile_err = ""
-        self.test.compile_err_raw = b""
-        self.test.timeline_selected_event_index = -1
         self._line_frames_cache_key = None
         self._line_frames_cache = []
         self._line_frames_last_event_count = 0
@@ -455,7 +463,9 @@ class TestDebuggerScreen(Screen[None]):
             self._variables_task.cancel()
             self._variables_task = None
         self._reset_story_state()
-        self.test.aggregate_annotations = False
+        run = self.test.current_run
+        if run is not None:
+            run.aggregate_annotations = False
         self._refresh_view(force=True)
         self._set_footer_text("Starting debugger...")
 
@@ -563,17 +573,20 @@ class TestDebuggerScreen(Screen[None]):
         )
 
     def _update_selected_event_index_from_frame(self, frame) -> None:
+        run = self.test.current_run
+        if run is None:
+            return
         try:
-            idx = self.test.timeline_events.index(frame)
+            idx = run.timeline_events.index(frame)
         except ValueError:
             idx = -1
         is_manual = self._is_manual_debug_story()
         if not is_manual and self.selected_frame_index == 0:
-            self.test.timeline_selected_event_index = -1
-            self.test.aggregate_annotations = True
+            run.timeline_selected_event_index = -1
+            run.aggregate_annotations = True
         else:
-            self.test.timeline_selected_event_index = idx
-            self.test.aggregate_annotations = False
+            run.timeline_selected_event_index = idx
+            run.aggregate_annotations = False
         if is_manual and frame.file_path and frame.line > 0:
             save_debug_line(frame.file_path, frame.line)
         _schedule_story_annotations_persist(self.test)
@@ -766,7 +779,9 @@ class TestDebuggerScreen(Screen[None]):
         return False
 
     def _signature(self) -> tuple:
-        last_event = self.test.timeline_events[-1] if self.test.timeline_events else None
+        run = self.test.current_run
+        timeline_events = run.timeline_events if run is not None else []
+        last_event = timeline_events[-1] if timeline_events else None
         last_event_sig = (
             last_event.kind,
             last_event.timestamp,
@@ -774,15 +789,20 @@ class TestDebuggerScreen(Screen[None]):
             last_event.line,
             last_event.message,
         ) if last_event else ()
+        debug_running = run.debug_running if run is not None else False
+        debug_exited = run.debug_exited if run is not None else False
+        debug_exit_code = run.debug_exit_code if run is not None else None
+        debug_logs_len = len(run.debug_logs) if run is not None else 0
+        compile_err = run.compile_err if run is not None else ""
         return (
             self.test.state,
             self.test.time_state_changed,
-            len(self.test.timeline_events),
-            self.test.debug_running,
-            self.test.debug_exited,
-            self.test.debug_exit_code,
+            len(timeline_events),
+            debug_running,
+            debug_exited,
+            debug_exit_code,
             self.test.timeline_capture_enabled,
-            len(self.test.debug_logs),
+            debug_logs_len,
             last_event_sig,
             self.selected_frame_index,
             len(self._variables_cache),
@@ -792,7 +812,7 @@ class TestDebuggerScreen(Screen[None]):
             int(self.size.height),
             self.full_file_view,
             self.test.story_filter_profile,
-            self.test.compile_err,
+            compile_err,
         )
 
     def _base_footer_text(self) -> str:
@@ -896,12 +916,14 @@ class TestDebuggerScreen(Screen[None]):
 
     def _line_frames(self):
         skip_seq = max(1, int(global_state.tsv_skip_seq_lines))
+        run = self.test.current_run
+        debug_running = run.debug_running if run is not None else False
         debug_mode = (
             is_debug_active(self.test)
-            or self.test.debug_running
+            or debug_running
             or self._is_manual_debug_story()
         )
-        events = self.test.timeline_events
+        events = run.timeline_events if run is not None else []
         event_count = len(events)
 
         same_settings = (
@@ -918,7 +940,8 @@ class TestDebuggerScreen(Screen[None]):
             frames = [
                 event
                 for event in events
-                if event_has_useful_source_line(event.file_path, event.line, self._source_cache)
+                if event.kind == "test_failed"
+                or event_has_useful_source_line(event.file_path, event.line, self._source_cache)
             ]
             if not debug_mode and skip_seq > 1 and len(frames) > 1:
                 filtered = [frames[0]]
@@ -969,7 +992,8 @@ class TestDebuggerScreen(Screen[None]):
 
         frames = self._line_frames_cache
         for event in appended:
-            if not event_has_useful_source_line(event.file_path, event.line, self._source_cache):
+            is_fail_event = event.kind == "test_failed"
+            if not is_fail_event and not event_has_useful_source_line(event.file_path, event.line, self._source_cache):
                 continue
 
             if debug_mode or skip_seq <= 1 or not frames:
@@ -1002,7 +1026,10 @@ class TestDebuggerScreen(Screen[None]):
         return frames
 
     def _is_manual_debug_story(self) -> bool:
-        for event in reversed(self.test.timeline_events):
+        run = self.test.current_run
+        if run is None:
+            return False
+        for event in reversed(run.timeline_events):
             if event.kind != "run_start":
                 continue
             message = event.message.lower()
@@ -1032,19 +1059,20 @@ class TestDebuggerScreen(Screen[None]):
         self._refresh_view(force=True)
 
     def _render_code_panel(self) -> None:
-        has_compile_err = bool(self.test.compile_err.strip())
+        run = self.test.current_run
+        compile_err = run.compile_err if run is not None else ""
+        has_compile_err = bool(compile_err.strip())
         is_active = is_debug_active(self.test) or self.test.state == TestState.RUNNING
         is_manual = self._is_manual_debug_story()
         if has_compile_err and not is_active and not is_manual:
             if self.code_widget is not None:
-                self.code_widget.update(Text.from_ansi(self.test.compile_err))
+                self.code_widget.update(Text.from_ansi(compile_err))
             return
         frames = self._line_frames()
 
-        from runner.story_annotations import get_story_annotations
-        annotations = get_story_annotations(self.test)
-
         if self.full_file_view:
+            from runner.story_annotations import get_story_annotations
+            annotations = get_story_annotations(self.test)
             render_full_file_panel(
                 self.code_widget,
                 frames,
@@ -1058,7 +1086,7 @@ class TestDebuggerScreen(Screen[None]):
                 frames,
                 self.selected_frame_index,
                 self._source_cache,
-                annotations=annotations,
+                test=self.test,
             )
 
     def _render_variables_panel(self, selected_event) -> None:
@@ -1140,7 +1168,9 @@ class TestDebuggerScreen(Screen[None]):
         total = len(frames)
         if total > 0 and self._follow_latest_frame and is_debug_active(self.test):
             self.selected_frame_index = total - 1
-            self.test.timeline_selected_event_index = -1
+            run = self.test.current_run
+            if run is not None:
+                run.timeline_selected_event_index = -1
         self.selected_frame_index = ensure_selected_frame_index(
             self.selected_frame_index, total
         )

@@ -155,12 +155,13 @@ class TestOutputScreen(Screen[None]):
         self.app.pop_screen()
 
     def _signature(self) -> tuple:
+        run = self.test.current_run
         return (
             self.test.state,
             self.test.time_state_changed,
-            self.test.stdout,
-            self.test.stderr,
-            self.test.compile_err,
+            run.stdout if run is not None else "",
+            run.stderr if run is not None else "",
+            run.compile_err if run is not None else "",
         )
 
     def _tick(self) -> None:

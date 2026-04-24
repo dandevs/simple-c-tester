@@ -13,19 +13,22 @@ def has_active_tests() -> bool:
 
 
 def display_state_signature() -> tuple:
-    return tuple(
-        (
-            test.name,
-            test.state,
-            test.time_start,
-            test.time_state_changed,
-            test.stdout,
-            test.stderr,
-            test.compile_err,
-            len(test.timeline_events),
-            test.debug_running,
-            test.debug_exited,
-            test.debug_exit_code,
+    sigs = []
+    for test in state.all_tests:
+        run = test.current_run
+        sigs.append(
+            (
+                test.name,
+                test.state,
+                test.time_start,
+                test.time_state_changed,
+                run.stdout if run is not None else "",
+                run.stderr if run is not None else "",
+                run.compile_err if run is not None else "",
+                len(run.timeline_events) if run is not None else 0,
+                run.debug_running if run is not None else False,
+                run.debug_exited if run is not None else False,
+                run.debug_exit_code if run is not None else None,
+            )
         )
-        for test in state.all_tests
-    )
+    return tuple(sigs)

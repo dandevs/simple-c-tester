@@ -19,16 +19,24 @@ def get_test_output(test: Test) -> list[Text] | None:
             return Text(plain)
         return None
 
+    run = test.current_run
+    compile_err_raw = run.compile_err_raw if run is not None else b""
+    compile_err = run.compile_err if run is not None else ""
+    stderr_raw = run.stderr_raw if run is not None else b""
+    stderr = run.stderr if run is not None else ""
+    stdout_raw = run.stdout_raw if run is not None else b""
+    stdout = run.stdout if run is not None else ""
+
     if test.state == TestState.FAILED:
-        if test.compile_err_raw or test.compile_err.strip():
-            compile_text = _to_text(test.compile_err_raw, test.compile_err)
+        if compile_err_raw or compile_err.strip():
+            compile_text = _to_text(compile_err_raw, compile_err)
             if compile_text and compile_text.plain.strip():
                 for line in compile_text.split(allow_blank=True):
                     sections.append(line)
             return _strip_trailing(sections)
 
-        stderr_text = _to_text(test.stderr_raw, test.stderr)
-        stdout_text = _to_text(test.stdout_raw, test.stdout)
+        stderr_text = _to_text(stderr_raw, stderr)
+        stdout_text = _to_text(stdout_raw, stdout)
         if stderr_text and stderr_text.plain.strip():
             for line in stderr_text.split(allow_blank=True):
                 sections.append(line)
@@ -39,7 +47,7 @@ def get_test_output(test: Test) -> list[Text] | None:
                 sections.append(line)
         return _strip_trailing(sections)
 
-    stdout_text = _to_text(test.stdout_raw, test.stdout)
+    stdout_text = _to_text(stdout_raw, stdout)
     if stdout_text and stdout_text.plain.strip():
         for line in stdout_text.split(allow_blank=True):
             sections.append(line)
