@@ -30,18 +30,24 @@ class GlobalVariableEntry:
 
 GlobalVariableIndex = dict[str, GlobalVariableEntry]
 
-_global_index_cache: dict[str, GlobalVariableIndex] = {}
+_fallback_global_index_cache: dict[str, GlobalVariableIndex] = {}
 
 
-def get_global_variables(binary_path: str) -> GlobalVariableIndex:
+def get_global_variables(binary_path: str, cache=None) -> GlobalVariableIndex:
     """Load and cache a global-variable index for the given binary path."""
     if not binary_path or not os.path.isfile(binary_path):
         return {}
     abs_path = os.path.abspath(binary_path)
-    if abs_path in _global_index_cache:
-        return _global_index_cache[abs_path]
+    if cache is not None:
+        if abs_path in cache.global_index_cache:
+            return cache.global_index_cache[abs_path]
+        index = _load_global_index(abs_path)
+        cache.global_index_cache[abs_path] = index
+        return index
+    if abs_path in _fallback_global_index_cache:
+        return _fallback_global_index_cache[abs_path]
     index = _load_global_index(abs_path)
-    _global_index_cache[abs_path] = index
+    _fallback_global_index_cache[abs_path] = index
     return index
 
 

@@ -39,14 +39,12 @@ def _merge_latest_annotations(annotation_strs: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Source-line helpers (self-contained cache)
+# Source-line helpers
 # ---------------------------------------------------------------------------
 
-_source_line_cache: dict[str, list[str]] = {}
-
-
-def _load_source_lines(file_path: str) -> list[str]:
-    cached = _source_line_cache.get(file_path)
+def _load_source_lines(file_path: str, cache=None) -> list[str]:
+    line_cache = cache.source_line_cache if cache is not None else {}
+    cached = line_cache.get(file_path)
     if cached is not None:
         return cached
     try:
@@ -54,14 +52,14 @@ def _load_source_lines(file_path: str) -> list[str]:
             lines = handle.read().splitlines()
     except OSError:
         lines = []
-    _source_line_cache[file_path] = lines
+    line_cache[file_path] = lines
     return lines
 
 
-def _line_text(file_path: str, line_number: int) -> str:
+def _line_text(file_path: str, line_number: int, cache=None) -> str:
     if not file_path or line_number <= 0:
         return ""
-    lines = _load_source_lines(file_path)
+    lines = _load_source_lines(file_path, cache=cache)
     if line_number > len(lines):
         return ""
     return lines[line_number - 1]
@@ -164,11 +162,7 @@ def _compute_story_annotations(test: Test, event_boundary: int | None = None) ->
 # Public API with caching
 # ---------------------------------------------------------------------------
 
-_MAX_ANNOTATION_CACHE_SIZE = 256
-_annotation_cache: dict[tuple[str, int, bool, int], dict[str, dict[int, list[str]]]] = {}
-
-
-def get_story_annotations(test: Test, event_boundary: int | None = None) -> dict[str, dict[int, list[str]]]:
+def get_story_annotations(test: Test, event_boundary: int | None = None, cache=None) -> dict[str, dict[int, list[str]]]:
     """Return cached inline annotations for the test.
 
     The result is a mapping of:
@@ -191,24 +185,20 @@ def get_story_annotations(test: Test, event_boundary: int | None = None) -> dict
         boundary = run.timeline_selected_event_index if run is not None else -1
 
     cache_key = (test_key, event_count, aggregate, boundary)
-    cached = _annotation_cache.get(cache_key)
+    ann_cache = cache.annotation_cache if cache is not None else {}
+    cached = ann_cache.get(cache_key)
     if cached is not None:
         return cached
 
-    if len(_annotation_cache) >= _MAX_ANNOTATION_CACHE_SIZE:
-        _annotation_cache.clear()
-
     annotations = _compute_story_annotations(test, event_boundary=event_boundary)
-    _annotation_cache[cache_key] = annotations
+    ann_cache[cache_key] = annotations
     return annotations
 
 
-def invalidate_story_annotation_cache(test: Test) -> None:
+def invalidate_story_annotation_cache(test: Test, cache=None) -> None:
     """Remove cached annotations for a test (e.g. after new events)."""
-    test_key = os.path.abspath(test.source_path)
-    keys_to_remove = [k for k in _annotation_cache if k[0] == test_key]
-    for key in keys_to_remove:
-        del _annotation_cache[key]
+    if cache is not None:
+        cache.annotation_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +206,8 @@ def invalidate_story_annotation_cache(test: Test) -> None:
 # ---------------------------------------------------------------------------
 
 def format_story_annotations_for_db(
-    annotations: dict[str, dict[int, list[str]]]
+    annotations: dict[str, dict[int, list[str]]],
+    cache=None,
 ) -> dict[str, list[list]]:
     """Convert annotation dict to db.json list format.
 
@@ -226,7 +217,7 @@ def format_story_annotations_for_db(
     for file_path, line_map in annotations.items():
         sorted_lines = sorted(line_map.items())
         result[file_path] = [
-            [_line_text(file_path, line).strip(), line, list(arr)]
+            [_line_text(file_path, line, cache=cache).strip(), line, list(arr)]
             for line, arr in sorted_lines
         ]
     return result

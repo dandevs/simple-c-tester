@@ -28,7 +28,7 @@ _NON_USER_PREFIXES = (
     "/nix/",
 )
 
-_function_index_cache: dict[str, FunctionIndex] = {}
+_fallback_function_index_cache: dict[str, FunctionIndex] = {}
 
 
 @dataclass(frozen=True)
@@ -62,11 +62,12 @@ class FunctionIndex:
         return name in self.user_function_names
 
 
-def get_function_index(binary_path: str) -> FunctionIndex:
+def get_function_index(binary_path: str, cache=None) -> FunctionIndex:
     if not binary_path:
         return FunctionIndex()
     abs_path = os.path.abspath(binary_path)
-    cached = _function_index_cache.get(abs_path)
+    cache_dict = cache.function_index_cache if cache is not None else _fallback_function_index_cache
+    cached = cache_dict.get(abs_path)
     if cached is not None:
         return cached
     if not os.path.isfile(abs_path):
@@ -77,11 +78,11 @@ def get_function_index(binary_path: str) -> FunctionIndex:
         with open(abs_path, "rb") as binary_file:
             elf_file = ELFFile(binary_file)
             if not elf_file.has_dwarf_info():
-                _function_index_cache[abs_path] = FunctionIndex()
+                cache_dict[abs_path] = FunctionIndex()
                 return FunctionIndex()
             dwarf_info = elf_file.get_dwarf_info()
             index = _build_function_index(dwarf_info)
-            _function_index_cache[abs_path] = index
+            cache_dict[abs_path] = index
             return index
     except Exception:
         return FunctionIndex()

@@ -29,7 +29,7 @@ class DwarfTypeInfo:
     pointed_to_type: "DwarfTypeInfo | None" = None
 
 
-_type_index_cache: dict[str, dict[tuple[str, str, int], DwarfTypeInfo]] = {}
+_fallback_type_index_cache: dict[str, dict[tuple[str, str, int], DwarfTypeInfo]] = {}
 
 
 def resolve_variable_type(
@@ -37,15 +37,22 @@ def resolve_variable_type(
     variable_name: str,
     file_path: str = "",
     line: int = 0,
+    cache=None,
 ) -> DwarfTypeInfo | None:
     if not binary_path or not variable_name:
         return None
 
     abs_binary = os.path.abspath(binary_path)
-    if abs_binary not in _type_index_cache:
-        _type_index_cache[abs_binary] = _build_type_index(abs_binary)
 
-    index = _type_index_cache[abs_binary]
+    if cache is not None:
+        if abs_binary not in cache.type_index_cache:
+            cache.type_index_cache[abs_binary] = _build_type_index(abs_binary)
+        index = cache.type_index_cache[abs_binary]
+    else:
+        if abs_binary not in _fallback_type_index_cache:
+            _fallback_type_index_cache[abs_binary] = _build_type_index(abs_binary)
+        index = _fallback_type_index_cache[abs_binary]
+
     if file_path:
         abs_file = os.path.abspath(file_path)
         result = index.get((variable_name, abs_file, line))

@@ -50,6 +50,37 @@ class TestRun:
 
 
 @dataclass
+class DwarfCache:
+    """Caches for DWARF metadata and runtime annotations.
+
+    Binary metadata caches (dwarf_loader, function_index, global_index,
+    type_index) are expensive to build and persist across runs when the binary
+    is unchanged. Runtime caches (source_line, annotation) are reset every run.
+    """
+
+    dwarf_loader_cache: dict[str, any] = field(default_factory=dict)
+    function_index_cache: dict[str, any] = field(default_factory=dict)
+    global_index_cache: dict[str, any] = field(default_factory=dict)
+    type_index_cache: dict[str, any] = field(default_factory=dict)
+    source_line_cache: dict[str, list[str]] = field(default_factory=dict)
+    annotation_cache: dict[tuple, dict] = field(default_factory=dict)
+    last_binary_path: str = ""
+    last_binary_mtime: int = 0
+
+    def reset_binary_caches(self) -> None:
+        """Clear caches tied to binary metadata."""
+        self.dwarf_loader_cache.clear()
+        self.function_index_cache.clear()
+        self.global_index_cache.clear()
+        self.type_index_cache.clear()
+
+    def reset_runtime_caches(self) -> None:
+        """Clear caches tied to runtime source/annotation data."""
+        self.source_line_cache.clear()
+        self.annotation_cache.clear()
+
+
+@dataclass
 class Test:
     name: str = ""
     time_start: float = 0.0
@@ -70,6 +101,7 @@ class Test:
     story_annotations: dict[str, list[list]] = field(default_factory=dict)
     # All per-run mutable state lives here.  Replaced on every run.
     current_run: TestRun | None = None
+    dwarf_cache: DwarfCache = field(default_factory=DwarfCache)
 
     def run(self) -> TestRun:
         """Return the active TestRun, raising if none exists.

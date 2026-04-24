@@ -347,6 +347,20 @@ class TestDebuggerScreen(Screen[None]):
         mode = "enabled" if self.test.timeline_capture_enabled else "disabled"
         self._set_footer_text(f"Timeline capture {mode} for {self.test.name}.")
 
+    def _maybe_refresh_dwarf_cache(self) -> None:
+        from runner.artifacts import test_binary_path
+        binary_path = test_binary_path(self.test.source_path)
+        try:
+            current_mtime = int(os.path.getmtime(binary_path)) if os.path.exists(binary_path) else 0
+        except OSError:
+            current_mtime = 0
+        cache = self.test.dwarf_cache
+        if cache.last_binary_path != binary_path or cache.last_binary_mtime != current_mtime:
+            cache.reset_binary_caches()
+            cache.last_binary_path = binary_path
+            cache.last_binary_mtime = current_mtime
+        cache.reset_runtime_caches()
+
     async def action_rerun_test(self) -> None:
         is_manual = self._is_manual_debug_story()
 
@@ -377,6 +391,7 @@ class TestDebuggerScreen(Screen[None]):
         self._queue_story_capture("Auto-started story capture.")
 
     def _queue_story_capture(self, footer_message: str | None = None) -> None:
+        self._maybe_refresh_dwarf_cache()
         self._reset_story_state()
         run = self.test.current_run
         if run is not None:
@@ -396,6 +411,7 @@ class TestDebuggerScreen(Screen[None]):
 
     async def _restart_debug_session(self) -> None:
         await stop_debug_session(self.test)
+        self._maybe_refresh_dwarf_cache()
         self._reset_story_state()
         run = self.test.current_run
         if run is not None:
@@ -423,6 +439,7 @@ class TestDebuggerScreen(Screen[None]):
                 pass
 
         await stop_debug_session(self.test)
+        self._maybe_refresh_dwarf_cache()
         self._reset_story_state()
         run = self.test.current_run
         if run is not None:
@@ -432,9 +449,10 @@ class TestDebuggerScreen(Screen[None]):
         await start_debug_session(self.test, precision_mode=self.test.debug_precision_mode)
 
     def _reset_story_state(self) -> None:
+        self._maybe_refresh_dwarf_cache()
         from models import TestRun
         self.test.current_run = TestRun()
-        invalidate_story_annotation_cache(self.test)
+        invalidate_story_annotation_cache(self.test, self.test.dwarf_cache)
         self._line_frames_cache_key = None
         self._line_frames_cache = []
         self._line_frames_last_event_count = 0
@@ -462,6 +480,7 @@ class TestDebuggerScreen(Screen[None]):
         if self._variables_task is not None and not self._variables_task.done():
             self._variables_task.cancel()
             self._variables_task = None
+        self._maybe_refresh_dwarf_cache()
         self._reset_story_state()
         run = self.test.current_run
         if run is not None:
@@ -1072,7 +1091,7 @@ class TestDebuggerScreen(Screen[None]):
 
         if self.full_file_view:
             from runner.story_annotations import get_story_annotations
-            annotations = get_story_annotations(self.test)
+            annotations = get_story_annotations(self.test, cache=self.test.dwarf_cache)
             render_full_file_panel(
                 self.code_widget,
                 frames,

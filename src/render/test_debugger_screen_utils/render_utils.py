@@ -172,7 +172,7 @@ def render_code_panel(
         number_width = len(str(max(1, snippet_end)))
         code_width = max(1, width - (number_width + 3))
         # Each card shows its own accumulated annotation history up to this event
-        card_annotations = get_story_annotations(test, event_boundary=event.index)
+        card_annotations = get_story_annotations(test, event_boundary=event.index, cache=test.dwarf_cache)
         file_annotations = card_annotations.get(source_path, {}) if card_annotations else {}
         snippet_text = build_frame_snippet(
             source_path,

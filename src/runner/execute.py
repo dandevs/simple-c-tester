@@ -22,9 +22,6 @@ from .makefile import (
 from .artifacts import test_binary_path
 from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
 from .dwarf_core import (
-    DwarfCoreApi,
-    DwarfResolveRequest,
-    create_dwarf_core_api,
     get_function_index,
     FunctionIndex,
     resolve_variable_type,
@@ -77,7 +74,6 @@ _BREAKPOINTS_FILE_PATH = os.environ.get(
 )
 _editor_breakpoints_cache: list[tuple[str, int]] = []
 _editor_breakpoints_mtime_ns: int | None = None
-_dwarf_core_api: DwarfCoreApi = create_dwarf_core_api()
 _annotation_persist_tasks: dict[str, asyncio.Task] = {}
 
 
@@ -184,8 +180,8 @@ def _is_manual_debug_mode(test: Test) -> bool:
 
 
 def _persist_story_annotations(test: Test) -> None:
-    annotations = get_story_annotations(test)
-    db_formatted = format_story_annotations_for_db(annotations)
+    annotations = get_story_annotations(test, cache=test.dwarf_cache)
+    db_formatted = format_story_annotations_for_db(annotations, cache=test.dwarf_cache)
     from .makefile import save_story_annotations
     save_story_annotations(_test_key(test), db_formatted)
 
@@ -249,10 +245,11 @@ async def _emit_skipped_standalone_exprs(
             binary_path=binary_path,
             file_path=stop_event.file_path,
             line=stop_event.line,
+            cache=test.dwarf_cache,
         )
 
     for line_num in range(prev.line + 1, stop_event.line):
-        line_text = _line_text(stop_event.file_path, line_num)
+        line_text = _line_text(stop_event.file_path, line_num, cache=test.dwarf_cache)
         if _is_standalone_expression_line(line_text):
             synthetic_stop = DebugStopEvent(
                 file_path=stop_event.file_path,
@@ -311,8 +308,9 @@ def _stop_reason_message(stop_event: DebugStopEvent) -> str:
     return stop_event.raw or "debug stop"
 
 
-def _load_source_lines(file_path: str) -> list[str]:
-    cached = _source_line_cache.get(file_path)
+def _load_source_lines(file_path: str, cache=None) -> list[str]:
+    line_cache = cache.source_line_cache if cache is not None else _source_line_cache
+    cached = line_cache.get(file_path)
     if cached is not None:
         return cached
 
@@ -322,14 +320,14 @@ def _load_source_lines(file_path: str) -> list[str]:
     except OSError:
         lines = []
 
-    _source_line_cache[file_path] = lines
+    line_cache[file_path] = lines
     return lines
 
 
-def _line_text(file_path: str, line_number: int) -> str:
+def _line_text(file_path: str, line_number: int, cache=None) -> str:
     if not file_path or line_number <= 0:
         return ""
-    lines = _load_source_lines(file_path)
+    lines = _load_source_lines(file_path, cache=cache)
     if line_number > len(lines):
         return ""
     return lines[line_number - 1]
@@ -345,8 +343,8 @@ def _extract_call_names_tokenized(line: str) -> set[str]:
     return calls
 
 
-async def _line_has_likely_call(file_path: str, line_number: int, binary_path: str = "") -> bool:
-    content = _line_text(file_path, line_number)
+async def _line_has_likely_call(file_path: str, line_number: int, binary_path: str = "", cache=None) -> bool:
+    content = _line_text(file_path, line_number, cache=cache)
     if not content:
         return False
 
@@ -354,14 +352,14 @@ async def _line_has_likely_call(file_path: str, line_number: int, binary_path: s
     if not call_names:
         return False
 
-    user_functions = await _discover_user_function_names(binary_path)
+    user_functions = await _discover_user_function_names(binary_path, cache=cache)
     if not user_functions:
         return False
 
     return any(name in user_functions for name in call_names)
 
 
-async def _discover_user_function_names(binary_path: str = "") -> set[str]:
+async def _discover_user_function_names(binary_path: str = "", cache=None) -> set[str]:
     global _user_function_cache_key
     global _user_function_cache
 
@@ -374,7 +372,7 @@ async def _discover_user_function_names(binary_path: str = "") -> set[str]:
         if _user_function_cache_key == cache_key:
             return _user_function_cache
         try:
-            index = await asyncio.to_thread(get_function_index, binary_path)
+            index = await asyncio.to_thread(get_function_index, binary_path, cache=cache)
             if index.user_function_names:
                 _user_function_cache_key = cache_key
                 _user_function_cache = set(index.user_function_names)
@@ -615,6 +613,7 @@ async def _auto_trace_step(
     binary_path: str = "",
     always_step_in: bool = False,
     same_line_count: int = 0,
+    cache=None,
 ) -> tuple[DebugStopEvent, int]:
     if stop_event_is_terminal(stop_event):
         return stop_event, 0
@@ -653,11 +652,11 @@ async def _auto_trace_step(
             else:
                 same_line_count = 0
             entered_new_function = (next_event.function or "").strip() != (stop_event.function or "").strip()
-            if entered_new_function and not _line_text(next_event.file_path, next_event.line).strip():
+            if entered_new_function and not _line_text(next_event.file_path, next_event.line, cache=cache).strip():
                 return await _step_out_until_moved(next_event), 0
         return next_event, same_line_count
 
-    wants_step_in = await _line_has_likely_call(stop_event.file_path, stop_event.line, binary_path)
+    wants_step_in = await _line_has_likely_call(stop_event.file_path, stop_event.line, binary_path, cache=cache)
     next_event = await (controller.step_in() if wants_step_in else controller.next())
 
     if wants_step_in and not stop_event_is_terminal(next_event) and not _is_user_code_path(next_event.file_path):
@@ -685,6 +684,7 @@ async def _enrich_variable_types(
     binary_path: str,
     file_path: str,
     line: int,
+    cache=None,
 ) -> list[tuple[str, str, str]]:
     if not binary_path or not file_path or line <= 0:
         return variables
@@ -696,7 +696,7 @@ async def _enrich_variable_types(
             name, value = var_tuple
         try:
             type_info = await asyncio.to_thread(
-                resolve_variable_type, binary_path, name, file_path, line
+                resolve_variable_type, binary_path, name, file_path, line, cache=cache
             )
             type_hint = _format_dwarf_type(type_info) if type_info else ""
         except Exception:
@@ -709,11 +709,12 @@ async def _capture_global_variables(
     controller: GdbMIController,
     binary_path: str,
     local_variables: list[tuple[str, str, str]],
+    cache=None,
 ) -> list[tuple[str, str, str]]:
     if not binary_path:
         return []
     try:
-        index = await asyncio.to_thread(get_global_variables, binary_path)
+        index = await asyncio.to_thread(get_global_variables, binary_path, cache=cache)
     except Exception:
         return []
     if not index:
@@ -730,7 +731,7 @@ async def _capture_global_variables(
                 continue
             prefix = "[global]" if entry.linkage_name else "[static]"
             type_info = await asyncio.to_thread(
-                resolve_variable_type, binary_path, entry.name, entry.file_path, entry.line
+                resolve_variable_type, binary_path, entry.name, entry.file_path, entry.line, cache=cache
             )
             type_hint = _format_dwarf_type(type_info) if type_info else ""
             results.append((f"{prefix} {entry.name}", value, type_hint))
@@ -744,6 +745,7 @@ async def _capture_scope_variables(
     binary_path: str = "",
     file_path: str = "",
     line: int = 0,
+    cache=None,
 ) -> list[tuple[str, str, str]]:
     async def _expand_children(
         var_name: str,
@@ -845,7 +847,7 @@ async def _capture_scope_variables(
             seen.add(name)
             deduped.append(var_tuple)
 
-        enriched = await _enrich_variable_types(deduped, binary_path, file_path, line)
+        enriched = await _enrich_variable_types(deduped, binary_path, file_path, line, cache=cache)
         return enriched[:250]
     except Exception:
         return []
@@ -856,6 +858,7 @@ async def _capture_scope_variables_fast(
     binary_path: str = "",
     file_path: str = "",
     line: int = 0,
+    cache=None,
 ) -> list[tuple[str, str, str]]:
     """Capture lightweight frame variables without deep expansion.
 
@@ -879,7 +882,7 @@ async def _capture_scope_variables_fast(
             seen.add(name)
             deduped.append(var_tuple)
 
-        enriched = await _enrich_variable_types(deduped, binary_path, file_path, line)
+        enriched = await _enrich_variable_types(deduped, binary_path, file_path, line, cache=cache)
         return enriched[:120]
     except Exception:
         return []
@@ -921,7 +924,7 @@ async def _record_stop_event(
     if line_annotations is not None:
         resolved_annotations = line_annotations
     elif debugger is not None and stop_event.file_path and stop_event.line > 0:
-        source_line = _line_text(stop_event.file_path, stop_event.line)
+        source_line = _line_text(stop_event.file_path, stop_event.line, cache=test.dwarf_cache)
         if source_line:
             try:
                 resolved_annotations = await resolve_line_annotations(
@@ -1327,10 +1330,11 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             binary_path=binary_path,
             file_path=stop_event.file_path,
             line=stop_event.line,
+            cache=test.dwarf_cache,
         )
         line_annotations: dict[int, list[str]] = {}
         if stop_event.file_path and stop_event.line > 0:
-            source_line = _line_text(stop_event.file_path, stop_event.line)
+            source_line = _line_text(stop_event.file_path, stop_event.line, cache=test.dwarf_cache)
             if source_line:
                 try:
                     line_annotations = await resolve_line_annotations(
@@ -1358,12 +1362,13 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
                 binary_path=binary_path,
                 file_path=stop_event.file_path,
                 line=stop_event.line,
+                cache=test.dwarf_cache,
             )
             var_decision = story_filters.evaluate_with_variables(stop_event, variables)
             matches = _merge_trigger_matches(matches, var_decision.matches)
 
         if matches:
-            global_vars = await _capture_global_variables(controller, binary_path, variables)
+            global_vars = await _capture_global_variables(controller, binary_path, variables, cache=test.dwarf_cache)
             variables = variables + global_vars
             await _record_stop_event(
                 test,
@@ -1389,7 +1394,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             _append_timeline_event(test, "debug_cancelled", "cancelled while tracing")
             return
         stop_event, _ = await _auto_trace_step(
-            controller, stop_event, binary_path, always_step_in=False
+            controller, stop_event, binary_path, always_step_in=False, cache=test.dwarf_cache
         )
         await _capture_story_stop(stop_event)
         step_count += 1
@@ -1447,6 +1452,17 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
 
         from models import TestRun
         test.current_run = TestRun()
+        binary_path = test_binary_path(test.source_path)
+        try:
+            current_mtime = int(os.path.getmtime(binary_path)) if os.path.exists(binary_path) else 0
+        except OSError:
+            current_mtime = 0
+        cache = test.dwarf_cache
+        if cache.last_binary_path != binary_path or cache.last_binary_mtime != current_mtime:
+            cache.reset_binary_caches()
+            cache.last_binary_path = binary_path
+            cache.last_binary_mtime = current_mtime
+        cache.reset_runtime_caches()
         _start_timeline_run(test, "scheduled")
         compiled, binary_path = await _compile_binary_for_test(test, proc_env)
         if test.state == TestState.CANCELLED:
@@ -1507,6 +1523,17 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
 
     from models import TestRun
     test.current_run = TestRun()
+    binary_path = test_binary_path(test.source_path)
+    try:
+        current_mtime = int(os.path.getmtime(binary_path)) if os.path.exists(binary_path) else 0
+    except OSError:
+        current_mtime = 0
+    cache = test.dwarf_cache
+    if cache.last_binary_path != binary_path or cache.last_binary_mtime != current_mtime:
+        cache.reset_binary_caches()
+        cache.last_binary_path = binary_path
+        cache.last_binary_mtime = current_mtime
+    cache.reset_runtime_caches()
     run = test.run()
 
     test.state = TestState.RUNNING
@@ -1586,8 +1613,9 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
                 binary_path=binary_path,
                 file_path=initial_stop.file_path,
                 line=initial_stop.line,
+                cache=test.dwarf_cache,
             )
-            global_vars = await _capture_global_variables(controller, binary_path, vars_for_event)
+            global_vars = await _capture_global_variables(controller, binary_path, vars_for_event, cache=test.dwarf_cache)
             vars_for_event = vars_for_event + global_vars
         await _record_stop_event(
             test,
@@ -1718,7 +1746,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
                 program_counter=latest_event.program_counter if latest_event is not None else 0,
                 function=latest_event.function if latest_event is not None else "",
             )
-            stop_event, _ = await _auto_trace_step(controller, current_stop, controller.binary_path)
+            stop_event, _ = await _auto_trace_step(controller, current_stop, controller.binary_path, cache=test.dwarf_cache)
     elif action == "step_in":
         stop_event = await controller.step_in()
     elif action == "step_out":
@@ -1737,8 +1765,9 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
             binary_path=controller.binary_path,
             file_path=stop_event.file_path,
             line=stop_event.line,
+            cache=test.dwarf_cache,
         )
-        global_vars = await _capture_global_variables(controller, controller.binary_path, vars_for_event)
+        global_vars = await _capture_global_variables(controller, controller.binary_path, vars_for_event, cache=test.dwarf_cache)
         vars_for_event = vars_for_event + global_vars
     await _record_stop_event(
         test,
