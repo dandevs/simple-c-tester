@@ -24,6 +24,7 @@ _STANDALONE_IGNORE_RE = re.compile(
     r"\b(return|break|continue|goto|if|else|for|while|do|switch|case|default|sizeof|typeof)\b"
 )
 _CONTROL_FLOW_RE = re.compile(r"^\s*(return|break|continue|goto|if|else|for|while|do|switch|case|default)\b")
+_RETURN_RE = re.compile(r"\breturn\b")
 _ANOMALOUS_LITERAL_VALUES = {
     "0x0",
     "(nil)",
@@ -100,6 +101,8 @@ def evaluate_trigger(
         return _first_hit_line(ctx, runtime_state)
     if trigger_id == "standalone_expr":
         return _standalone_expr(ctx)
+    if trigger_id == "return_statement":
+        return _return_statement(ctx)
     return None
 
 
@@ -231,6 +234,16 @@ def _assert_line(ctx: StoryStopContext) -> TriggerMatch | None:
         trigger_id="assert_line",
         label="Assert",
         message=f"assert/expect at L{ctx.stop_event.line}",
+    )
+
+
+def _return_statement(ctx: StoryStopContext) -> TriggerMatch | None:
+    if not _RETURN_RE.search(ctx.line_text):
+        return None
+    return TriggerMatch(
+        trigger_id="return_statement",
+        label="Return",
+        message=f"return at L{ctx.stop_event.line}",
     )
 
 

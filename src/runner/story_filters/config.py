@@ -35,6 +35,7 @@ def story_filter_profile_triggers(profile: str) -> tuple[str, ...]:
             "first_hit_function",
             "first_hit_line",
             "standalone_expr",
+            "return_statement",
         )
     return (
         "function_enter",
@@ -48,6 +49,7 @@ def story_filter_profile_triggers(profile: str) -> tuple[str, ...]:
         "sync_event",
         "first_hit_function",
         "standalone_expr",
+        "return_statement",
     )
 
 
