@@ -55,7 +55,7 @@ Cross-platform (Linux/macOS/Windows, CPython 3.9). Run from `c/`: `../out/cteste
 src/main.py        entry, argparse, asyncio.run
 src/app.py         TestRunnerApp (Textual)
 src/state.py       global mutable state singleton
-src/models/        Test, Suite, AppState, TestState
+src/models/        Test, Suite, AppState, TestState, TestRun, DwarfCache
 src/render/        tree/box rendering, labels, screen classes, Test Story UI
 src/render/test_output_screen.py   TestOutputScreen class
 src/render/test_debugger_screen.py  TestDebuggerScreen class
@@ -68,7 +68,7 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 
 - `src/runner/makefile.py` — `generate_makefile()`, include path resolution (`resolve_include_dirs` via iterative `gcc -E`), project source discovery and `libproject.a` build
 - `src/runner/execute.py` — `run_test()` invokes `make` then the binary; `state_changed()` dispatches tests via `asyncio.ensure_future()`; also owns Test Story/debug session orchestration, editor-breakpoint cache loading, and cancellation/rebuild restore flow
-- `src/runner/dwarf_core/` — reusable DWARF resolver core for line-table lookup, source-expression parsing, and inline variable annotations
+- `src/runner/dwarf_core/` — reusable DWARF resolver core for line-table lookup, source-expression parsing, and inline variable annotations. All functions accept an optional `cache` parameter (a `DwarfCache` instance) instead of using module-level caches.
 - `src/runner/story_filters/` — profile config (`minimal`/`balanced`/`all`), trigger matcher set (function enter/exit, branch, loop milestones, goto, assert, anomaly, sync, first-hit), and decision engine
 - `src/runner/debugger.py` — gdb MI controller used for Test Story capture and variable expansion
 - `src/runner/state.py` — helpers for checking completion state
@@ -78,17 +78,17 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 
 ### `src/runner/execute.py` — Orchestration Layer
 Core async runner and debug/session lifecycle. ~1650 lines.
-- **`run_test(test, on_complete)`** — Entry point. Clears timeline, compiles via `make`, then runs plain binary or auto debug trace.
+- **`run_test(test, on_complete)`** — Entry point. Creates a fresh `TestRun`, checks binary mtime against `test.dwarf_cache`, resets binary caches if the binary changed, always resets runtime caches, compiles via `make`, then runs plain binary or auto debug trace.
 - **`_run_auto_debug_trace(test, binary_path, proc_env)`** — Starts `GdbMIController`, configures it, creates a `StoryFilterEngine`, and runs the capture loop.
   - Inner **`_capture_story_stop(stop_event)`** — Called at **every** gdb stop.
     - Always calls `_capture_scope_variables_fast()` and `resolve_line_annotations()`.
-    - Always merges annotations into `test.annotation_cache` via `merge_line_annotations_into_cache()`.
+    - Always merges annotations into `run.annotation_cache` via `merge_line_annotations_into_cache()`.
     - Uses `StoryFilterEngine.evaluate_without_variables()` / `evaluate_with_variables()` to decide matches.
     - Only calls `_record_stop_event()` (creates a visible card) when `matches` is non-empty.
   - Loop calls `_auto_trace_step(..., always_step_in=True)` so auto trace enters every function.
 - **`_auto_trace_step(controller, stop_event, binary_path, always_step_in=False)`** — Chooses next gdb command. When `always_step_in=True`, unconditionally steps into user-code functions.
 - **`_record_stop_event(..., line_annotations=None)`** — Appends a `TimelineEvent`. Accepts pre-computed annotations to avoid double work.
-- **`start_debug_session(test, precision_mode)`** / **`stop_debug_session(test)`** — Manual debug lifecycle. Sets up breakpoints, initial stop, and teardown.
+- **`start_debug_session(test, precision_mode)`** / **`stop_debug_session(test)`** — Manual debug lifecycle. Creates fresh `TestRun`, checks binary mtime against `test.dwarf_cache`, resets caches as needed, sets up breakpoints, initial stop, and teardown.
 - **`_debug_step(test, action)`** — Handles manual actions (`next`, `auto`, `step_in`, `step_out`, `continue`, `interrupt`). `auto` uses `_auto_trace_step` with heuristic stepping.
 - **`_capture_scope_variables(controller, ...)`** — Deep recursive variable expansion (gdb `var_create` / `var_list_children`).
 - **`_capture_scope_variables_fast(controller, ...)`** — Lightweight frame variables without deep expansion. Used for cache population and synthetic events.
@@ -122,11 +122,12 @@ Decides which debug stops become visible timeline cards.
 
 ### `src/runner/story_annotations.py` — Annotation Cache & Pipeline
 Builds inline `[expr=value]` annotations for the story viewer.
-- **`get_story_annotations(test)`** — Public API. Returns `{abs_path: {line: [annotation_strs]}}`. LRU-cached by `(test_key, event_count, aggregate, boundary)`.
-- **`_compute_story_annotations(test)`** — Reads `test.annotation_cache` when `aggregate=True`, or slices events up to `timeline_selected_event_index` when `aggregate=False`.
+- **`get_story_annotations(test, event_boundary=None, cache=None)`** — Public API. Returns `{abs_path: {line: [annotation_strs]}}`. Uses `cache.annotation_cache` when provided; otherwise uses a temporary dict.
+- **`_compute_story_annotations(test)`** — Reads `run.annotation_cache` when `aggregate=True`, or slices events up to `timeline_selected_event_index` when `aggregate=False`.
 - **`merge_line_annotations_into_cache(cache, file_path, function, line_annotations)`** — Injects resolved annotations directly into the Store A cache **without** requiring a `TimelineEvent`. Used by `_capture_story_stop` for non-triggered stops.
 - **`_merge_event_annotations_into(cache, event)`** — Merges a `TimelineEvent`'s `line_annotations` into the cache. Delegates to `merge_line_annotations_into_cache()` internally.
-- **`format_story_annotations_for_db()`** — Converts dict to db.json list format `[[lineText, lineNo, [str...]], ...]`.
+- **`format_story_annotations_for_db(annotations, cache=None)`** — Converts dict to db.json list format `[[lineText, lineNo, [str...]], ...]`. Uses `cache.source_line_cache` when provided.
+- **`invalidate_story_annotation_cache(test, cache=None)`** — Clears annotation cache for a test (called on screen unmount or before new runs).
 
 ### `src/runner/annotation_resolver.py` — Per-Line Expression Evaluation
 - **`resolve_line_annotations(line_text, line_number, debugger)`** — Extracts C expressions from source via `extract_expressions()` and evaluates each via `debugger.evaluate_expression()`. Returns `{line_number: ["[expr=val]", ...]}`.
@@ -134,10 +135,9 @@ Builds inline `[expr=value]` annotations for the story viewer.
 
 ### `src/runner/dwarf_core/` — DWARF Resolver
 Provides DWARF-backed liveness and inline annotations.
-- **`api.py`** — `DwarfCoreApi`:
-  - `load(request)` → `DwarfLoaderResponse` (line index + scope index). Cached per binary path.
-  - `resolve(request)` → `DwarfResolveResponse` (location + annotations).
-  - `parse_source_expression(request)` → tokenizes and normalizes C expressions.
+- **`function_index.py`** — `get_function_index(binary_path, cache=None)`: Builds a `FunctionIndex` from DWARF. Uses `cache.function_index_cache` when provided; falls back to a module-level fallback dict for backward compatibility.
+- **`global_index.py`** — `get_global_variables(binary_path, cache=None)`: Builds a `GlobalVariableIndex` from DWARF. Uses `cache.global_index_cache` when provided.
+- **`type_resolver.py`** — `resolve_variable_type(binary_path, variable_name, file_path, line, cache=None)`: Resolves variable type info from DWARF. Uses `cache.type_index_cache` when provided.
 - **`variable_scopes.py`** — `build_scope_index(line_index, dwarf_info)`:
   - Walks DWARF DIEs for `DW_TAG_variable` / `DW_TAG_formal_parameter`.
   - Parses `DW_AT_location` (exprloc or loclist) into `DwarfVariableLiveRange`s.
@@ -148,14 +148,16 @@ Provides DWARF-backed liveness and inline annotations.
 - **`models.py`** — Dataclasses: `DwarfLoaderResponse`, `DwarfScopeIndex`, `DwarfResolveRequest`, `ResolvedVariableAnnotation`, `DwarfLineIndex`, etc.
 - **`loader.py`** — `load_dwarf_data()` → parses ELF/DWARF, builds line index and scope index.
 - **`line_index.py`** — `lookup_address()` for PC-to-source mapping.
+- **`api.py`** — Previously housed `DwarfCoreApi` and `create_dwarf_core_api`; both were removed as dead code. The module now only contains a docstring.
 
 ### `src/render/test_debugger_screen.py` — Test Story / Debug UI
 Textual `Screen` subclass for the debug/story view.
 - **`TestDebuggerScreen`**:
   - `on_mount()` — enables `timeline_capture_enabled`, starts debug session if idle.
-  - `on_unmount()` — cancels debug, clears `annotation_cache` and `debugLine` from db.json.
-  - `_line_frames()` — Builds visible frame list from `test.timeline_events`. Applies sequential-line thinning (`tsv_skip_seq_lines`) only in non-debug mode.
-  - `_render_code_panel()` — Renders full-file view (`render_full_file_panel`) or card stack (`render_code_panel`). Uses `get_story_annotations(test)` for inline annotations.
+  - `on_unmount()` — cancels debug, clears `story_annotations` and `debugLine` from db.json.
+  - `_maybe_refresh_dwarf_cache()` — Checks binary mtime against `test.dwarf_cache.last_binary_mtime`. If the binary changed, resets binary caches and updates tracking fields. Always resets runtime caches. Called before every user-initiated restart.
+  - `_line_frames()` — Builds visible frame list from `run.timeline_events`. Applies sequential-line thinning (`tsv_skip_seq_lines`) only in non-debug mode.
+  - `_render_code_panel()` — Renders full-file view (`render_full_file_panel`) or card stack (`render_code_panel`). Uses `get_story_annotations(test, cache=test.dwarf_cache)` for inline annotations.
   - `_render_variables_panel(selected_event)` — Shows variables. Uses `_variables_cache` for expanded vars when debug is active; falls back to `event.variables` otherwise.
   - `_fetch_expanded_variables_for_frame()` — Async deep expansion via `_capture_scope_variables()` for the selected frame.
   - Actions: `action_step_next()`, `action_step_in()`, `action_step_out()`, `action_continue_run()`, `action_interrupt_run()`, `action_toggle_precision()`, `action_toggle_full_file_view()`, `action_toggle_timeline()`, timeline scrub (`left`/`right`), etc.
@@ -164,17 +166,17 @@ Textual `Screen` subclass for the debug/story view.
 ### `src/render/test_debugger_screen_utils/`
 - **`source_utils.py`** — `load_source_lines()`, `display_path()`, `detect_language()`.
 - **`frame_utils.py`** — `ensure_selected_frame_index()`, `compute_frame_cards_window()`, `event_has_useful_source_line()`.
-- **`render_utils.py`** — `build_frame_snippet()`, `build_variables_tree()`, `render_code_panel()`, `render_full_file_panel()`.
+- **`render_utils.py`** — `build_frame_snippet()`, `build_variables_tree()`, `render_code_panel()`, `render_full_file_panel()`. `render_code_panel` passes `cache=test.dwarf_cache` to `get_story_annotations()`.
 
 ### Data Flow Summary (Auto Trace)
-1. `run_test()` compiles binary → `_run_auto_debug_trace()` starts `GdbMIController`.
+1. `run_test()` creates fresh `TestRun`, checks binary mtime against `test.dwarf_cache`, resets caches, compiles binary → `_run_auto_debug_trace()` starts `GdbMIController`.
 2. Loop: `_auto_trace_step(always_step_in=True)` advances gdb into every function.
 3. At every stop, `_capture_story_stop()`:
    a. Captures lightweight variables + resolves line annotations.
-   b. Merges annotations into `test.annotation_cache` unconditionally.
+   b. Merges annotations into `run.annotation_cache` unconditionally.
    c. Runs `StoryFilterEngine` to decide if this stop is "interesting".
-   d. If matches exist: captures full variables + globals → `_record_stop_event()` → `test.timeline_events.append()`.
-4. UI (`TestDebuggerScreen`) reads `test.timeline_events` for cards and `test.annotation_cache` (via `get_story_annotations()`) for full-file inline annotations.
+   d. If matches exist: captures full variables + globals → `_record_stop_event()` → `run.timeline_events.append()`.
+4. UI (`TestDebuggerScreen`) reads `run.timeline_events` for cards and `run.annotation_cache` (via `get_story_annotations(test, cache=test.dwarf_cache)`) for full-file inline annotations.
 
 ## Key Behaviors
 - Compilation goes through `make -f test_build/Makefile`, not direct `gcc` — enables incremental builds via `.d` dependency files
@@ -199,18 +201,24 @@ Textual `Screen` subclass for the debug/story view.
 - Variables expansion is driven by gdb MI (`pygdbmi`) and is frame-aware; expand/collapse state and per-frame scroll position are preserved in the viewer
 - In non-manual story mode, initial frame selection now starts at the first frame/card (index `0`) when no prior selection is valid
 - Aggregate variable annotations merge all captured variables from all timeline events into a single pool, shown only on card 0 in auto mode after the test completes; per-card variables are shown for cards 1+ and for manual debug mode
-- `test.aggregate_annotations` (bool, default `True`) controls whether `_compute_story_annotations()` processes all events or respects `timeline_selected_event_index`; it is toggled based on card selection (True on card 0 in auto mode, False otherwise), ensuring db.json annotations match the currently selected card scope
+- `run.aggregate_annotations` (bool, default `True`) controls whether `_compute_story_annotations()` processes all events or respects `timeline_selected_event_index`; it is toggled based on card selection (True on card 0 in auto mode, False otherwise), ensuring db.json annotations match the currently selected card scope
 - When a test fails with a compile error in auto story mode, the TSV card view is replaced with the gcc compile error output (with ANSI colors preserved) in the debug screen; manual debug mode keeps the normal card view behavior
 - The `on_unmount()` lifecycle hook on `TestDebuggerScreen` clears both `story_annotations` (saved as empty dict to db.json) and `debugLine` (removed from db.json), ensuring no stale state persists after exiting the screen regardless of exit path
 - A `debugLine` root-level entry is written to `test_build/db.json` in manual debug mode, tracking the currently selected card's source location (`{"filePath": "...", "lineNumber": N}`); it is updated on every card navigation (arrow keys, mouse click, drag) and on every debugger step; it is cleared on screen unmount
+
+## Per-Run State Isolation (TestRun + DwarfCache)
+- **`TestRun`** dataclass holds all mutable state for a single test execution (`timeline_events`, `annotation_cache`, `debug_logs`, `stdout`, `stderr`, `compile_err`, `debug_running`, `debug_exited`, `debug_exit_code`, `aggregate_annotations`, `timeline_selected_event_index`). A fresh `TestRun()` is created on every `run_test()` and `start_debug_session()`.
+- **`DwarfCache`** dataclass holds all DWARF/annotation caches (`dwarf_loader_cache`, `function_index_cache`, `global_index_cache`, `type_index_cache`, `source_line_cache`, `annotation_cache`) plus binary tracking fields (`last_binary_path`, `last_binary_mtime`). Owned by `Test` and persists across runs.
+- **Binary metadata caches** (dwarf_loader, function_index, global_index, type_index) are expensive to rebuild; they persist when the binary is unchanged (detected via mtime comparison).
+- **Runtime caches** (source_line, annotation) are cheap and depend on execution behavior; they are reset on every run.
+- `_debug_callbacks()` in `execute.py` captures the `TestRun` instance at setup time so old async tasks from previous runs silently drop data if a newer run has superseded them.
 
 ## Watch Mode Details
 - Observes repo root (`.`) recursively — no need to pre-build watched directory lists
 - File change handling is serialized via an `asyncio.Lock` in `handle_file_changes()` to prevent overlapping/racy requeue passes during rapid saves
 - DebounceHandler tracks event kinds per-path (`dict[str, set[str]]`) and supports `modified`, `created`, `deleted`, `moved` events
 - Directory-only `modified` events are filtered as noise (editors touching directory metadata should not trigger reruns)
-- `test_build/breakpoints.json` updates refresh the in-memory editor-breakpoint cache for manual debug without forcing pro
-ject rebuilds
+- `test_build/breakpoints.json` updates refresh the in-memory editor-breakpoint cache for manual debug without forcing project rebuilds
 - `tests/*.c` changes use precision reruns:
   - existing test file edited → rerun only that test (via dependency mapping or direct source match)
   - new test file created → add and run only that test
@@ -232,7 +240,7 @@ ject rebuilds
 - `pyelftools` powers DWARF-backed inline annotation resolution; if it's unavailable (or a binary has no DWARF info), resolver calls degrade gracefully to no inline annotations without breaking test execution or UI rendering
 - Inline annotations in the story viewer are resolver-backed when DWARF is available; card frames now carry `resolved_annotations` alongside the existing raw captured variables
 - Full-file variable annotations in db.json are driven by a DWARF scope index that parses per-variable location lists (`DW_AT_location`) to determine exact PC live ranges, then maps those ranges to source lines via the line index; annotations only appear on lines where a captured variable is both alive (per DWARF) and referenced by name (per regex)
-- The DWARF scope index is built lazily and cached inside `DwarfCoreApi`; if DWARF is unavailable or parsing fails, `_compute_story_annotations()` falls back to the previous snippet-window regex approach
+- The DWARF scope index is built lazily inside the per-Test `DwarfCache`; if DWARF is unavailable or parsing fails, `_compute_story_annotations()` falls back to the previous snippet-window regex approach
 - Card frames use a fast variable-capture path by default so story startup stays responsive; deeper recursive variable expansion is reserved for the heavier anomaly/debug paths
 - The pex entry point is `main:entry` (not `src.main:entry`)
 - On Linux systems with PEP 668 (`externally-managed-environment`), install deps in a virtualenv (`python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`) for local source runs
