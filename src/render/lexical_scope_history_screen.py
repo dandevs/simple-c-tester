@@ -178,6 +178,7 @@ class LexicalScopeHistoryScreen(Screen[None]):
             root = run.scope_buckets[abs_path]
             file_label = self._file_node_label(abs_path, root)
             file_node = self.tree_widget.root.add(file_label, data=_BucketTreeData(bucket=root))
+            file_node.expand()
             leaf = self._add_bucket_children(file_node, root)
             if first_leaf is None and leaf is not None:
                 first_leaf = leaf
@@ -204,6 +205,7 @@ class LexicalScopeHistoryScreen(Screen[None]):
         for child in bucket.children:
             label = self._bucket_node_label(child)
             child_node = parent_node.add(label, data=_BucketTreeData(bucket=child))
+            child_node.expand()
             leaf = self._add_bucket_children(child_node, child)
             if first_leaf is None:
                 first_leaf = leaf if leaf is not None else child_node
@@ -320,14 +322,26 @@ class LexicalScopeHistoryScreen(Screen[None]):
                             if idx.blocks:
                                 sample_block = idx.blocks[0]
                                 lines.append(Text(f"  Sample block: {sample_block}"))
-                            # Check if any block could contain a sample PC
+                            # Check PC-based lookup
                             non_zero_events = [ev for ev in run.timeline_events if ev.program_counter != 0]
                             if non_zero_events:
-                                sample_pc = non_zero_events[0].program_counter
-                                matching = [b for b in idx.blocks if b.low_pc <= sample_pc < b.high_pc]
-                                lines.append(Text(f"Blocks matching PC 0x{sample_pc:x}: {len(matching)}"))
-                                if matching:
-                                    lines.append(Text(f"  Match: {matching[0]}"))
+                                sample_ev = non_zero_events[0]
+                                pc_match = [b for b in idx.blocks if b.low_pc <= sample_ev.program_counter < b.high_pc]
+                                lines.append(Text(f"PC lookup 0x{sample_ev.program_counter:x}: {len(pc_match)} blocks"))
+                                # Check line-based lookup
+                                line_chain = idx.get_scope_chain_by_line(sample_ev.file_path, sample_ev.line)
+                                lines.append(Text(f"Line lookup {display_path(sample_ev.file_path)}:{sample_ev.line}: {len(line_chain)} blocks"))
+                                if line_chain:
+                                    for i, blk in enumerate(line_chain):
+                                        lines.append(Text(f"  [{i}] {blk.tag} {blk.function_name} lines {blk.start_loc.line}-{blk.end_loc.line}"))
+                                else:
+                                    # Debug: show all block file paths
+                                    all_paths = set()
+                                    for b in idx.blocks:
+                                        if b.start_loc.file_path:
+                                            all_paths.add(os.path.abspath(b.start_loc.file_path))
+                                    lines.append(Text(f"  Block file paths: {all_paths}"))
+                                    lines.append(Text(f"  Event abs path: {os.path.abspath(sample_ev.file_path)}"))
                         else:
                             err = getattr(response, "error", None)
                             if err:
