@@ -68,7 +68,7 @@ src/runner/artifacts.py  path/name mangling for build artifacts
 
 - `src/runner/makefile.py` — `generate_makefile()`, include path resolution (`resolve_include_dirs` via iterative `gcc -E`), project source discovery and `libproject.a` build
 - `src/runner/execute.py` — `run_test()` invokes `make` then the binary; `state_changed()` dispatches tests via `asyncio.ensure_future()`; also owns Test Story/debug session orchestration, editor-breakpoint cache loading, and cancellation/rebuild restore flow
-- `src/runner/dwarf_core/` — reusable DWARF resolver core for line-table lookup, source-expression parsing, and inline variable annotations. All functions accept an optional `cache` parameter (a `DwarfCache` instance) instead of using module-level caches.
+- `src/runner/dwarf_core/` — reusable DWARF resolver core for line-table lookup, source-expression parsing, inline variable annotations, and lexical scope extraction. All functions accept an optional `cache` parameter (a `DwarfCache` instance) instead of using module-level caches.
 - `src/runner/story_filters/` — profile config (`minimal`/`balanced`/`all`), trigger matcher set (function enter/exit, branch, loop milestones, goto, assert, anomaly, sync, first-hit), and decision engine
 - `src/runner/debugger.py` — gdb MI controller used for Test Story capture and variable expansion
 - `src/runner/state.py` — helpers for checking completion state
@@ -142,11 +142,16 @@ Provides DWARF-backed liveness and inline annotations.
   - Walks DWARF DIEs for `DW_TAG_variable` / `DW_TAG_formal_parameter`.
   - Parses `DW_AT_location` (exprloc or loclist) into `DwarfVariableLiveRange`s.
   - Maps live PC ranges to source lines via `line_index` → `DwarfScopeIndex(file_lines={abs_path: {line: (var_names,)}})`.
+- **`lexical_scopes.py`** — `build_lexical_scope_index(line_index, dwarf_info)`:
+  - Walks DWARF DIEs for `DW_TAG_subprogram`, `DW_TAG_lexical_block`, and `DW_TAG_inlined_subroutine`.
+  - Extracts `DW_AT_low_pc`/`DW_AT_high_pc` for each block and maps to source lines.
+  - Builds a `LexicalScopeIndex` containing `DwarfScopeBlock` entries with parent-child relationships.
+  - `LexicalScopeIndex.get_scope_chain(pc)` returns all enclosing blocks outermost-first.
 - **`resolver.py`** — `resolve_inline_annotations()`:
   - `_resolve_with_loaded_data()` → `_resolve_location()` + `_build_runtime_variable_map()` + `_build_annotations()`.
   - `_check_liveness()` — consults optional `liveness_checker` (the scope index).
-- **`models.py`** — Dataclasses: `DwarfLoaderResponse`, `DwarfScopeIndex`, `DwarfResolveRequest`, `ResolvedVariableAnnotation`, `DwarfLineIndex`, etc.
-- **`loader.py`** — `load_dwarf_data()` → parses ELF/DWARF, builds line index and scope index.
+- **`models.py`** — Dataclasses: `DwarfLoaderResponse`, `DwarfScopeIndex`, `DwarfScopeBlock`, `LexicalScopeIndex`, `DwarfResolveRequest`, `ResolvedVariableAnnotation`, `DwarfLineIndex`, etc.
+- **`loader.py`** — `load_dwarf_data()` → parses ELF/DWARF, builds line index, scope index, and lexical scope index.
 - **`line_index.py`** — `lookup_address()` for PC-to-source mapping.
 - **`api.py`** — Previously housed `DwarfCoreApi` and `create_dwarf_core_api`; both were removed as dead code. The module now only contains a docstring.
 
@@ -207,11 +212,12 @@ Textual `Screen` subclass for the debug/story view.
 - A `debugLine` root-level entry is written to `test_build/db.json` in manual debug mode, tracking the currently selected card's source location (`{"filePath": "...", "lineNumber": N}`); it is updated on every card navigation (arrow keys, mouse click, drag) and on every debugger step; it is cleared on screen unmount
 
 ## Per-Run State Isolation (TestRun + DwarfCache)
-- **`TestRun`** dataclass holds all mutable state for a single test execution (`timeline_events`, `annotation_cache`, `debug_logs`, `stdout`, `stderr`, `compile_err`, `debug_running`, `debug_exited`, `debug_exit_code`, `aggregate_annotations`, `timeline_selected_event_index`). A fresh `TestRun()` is created on every `run_test()` and `start_debug_session()`.
-- **`DwarfCache`** dataclass holds all DWARF/annotation caches (`dwarf_loader_cache`, `function_index_cache`, `global_index_cache`, `type_index_cache`, `source_line_cache`, `annotation_cache`) plus binary tracking fields (`last_binary_path`, `last_binary_mtime`). Owned by `Test` and persists across runs.
-- **Binary metadata caches** (dwarf_loader, function_index, global_index, type_index) are expensive to rebuild; they persist when the binary is unchanged (detected via mtime comparison).
+- **`TestRun`** dataclass holds all mutable state for a single test execution (`timeline_events`, `annotation_cache`, `scope_buckets`, `debug_logs`, `stdout`, `stderr`, `compile_err`, `debug_running`, `debug_exited`, `debug_exit_code`, `aggregate_annotations`, `timeline_selected_event_index`). A fresh `TestRun()` is created on every `run_test()` and `start_debug_session()`.
+- **`DwarfCache`** dataclass holds all DWARF/annotation caches (`dwarf_loader_cache`, `function_index_cache`, `global_index_cache`, `type_index_cache`, `lexical_scope_cache`, `source_line_cache`, `annotation_cache`) plus binary tracking fields (`last_binary_path`, `last_binary_mtime`). Owned by `Test` and persists across runs.
+- **Binary metadata caches** (dwarf_loader, function_index, global_index, type_index, lexical_scope) are expensive to rebuild; they persist when the binary is unchanged (detected via mtime comparison).
 - **Runtime caches** (source_line, annotation) are cheap and depend on execution behavior; they are reset on every run.
 - `_debug_callbacks()` in `execute.py` captures the `TestRun` instance at setup time so old async tasks from previous runs silently drop data if a newer run has superseded them.
+- **Scope buckets**: Each `TimelineEvent` is placed into a nested tree of `ScopeBucket` objects (one tree per source file). Buckets represent DWARF lexical blocks mapped to source line ranges. The `latest_event` field on each bucket holds the most recent event whose PC fell inside that block (and its deepest matching child). This enables block-aware navigation and filtering in the story viewer.
 
 ## Watch Mode Details
 - Observes repo root (`.`) recursively — no need to pre-build watched directory lists

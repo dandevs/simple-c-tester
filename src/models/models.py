@@ -23,6 +23,22 @@ class TimelineEvent:
 
 
 @dataclass
+class ScopeBucket:
+    """A source-level lexical scope bucket derived from DWARF block data.
+
+    Each bucket represents a contiguous line range (e.g. a function body or a
+    ``{}`` block).  Buckets are nested: ``children`` holds inner blocks.
+    ``latest_event`` is the most recent :class:`TimelineEvent` whose PC fell
+    inside this bucket (and therefore inside the deepest matching child first).
+    """
+
+    start_line: int = 0
+    end_line: int = 0
+    children: list["ScopeBucket"] = field(default_factory=list)
+    latest_event: TimelineEvent | None = None
+
+
+@dataclass
 class TestRun:
     """Mutable state for a single test execution.  A fresh instance is created
     for every run so that stale async tasks from previous runs cannot corrupt
@@ -47,6 +63,8 @@ class TestRun:
     annotation_cache: dict[str, dict[str, dict[int, dict[str, str]]]] = field(
         default_factory=dict
     )
+    # abs_file_path -> root ScopeBucket (function scope) with nested children
+    scope_buckets: dict[str, ScopeBucket] = field(default_factory=dict)
 
 
 @dataclass
@@ -62,6 +80,7 @@ class DwarfCache:
     function_index_cache: dict[str, any] = field(default_factory=dict)
     global_index_cache: dict[str, any] = field(default_factory=dict)
     type_index_cache: dict[str, any] = field(default_factory=dict)
+    lexical_scope_cache: dict[str, any] = field(default_factory=dict)
     source_line_cache: dict[str, list[str]] = field(default_factory=dict)
     annotation_cache: dict[tuple, dict] = field(default_factory=dict)
     last_binary_path: str = ""
@@ -73,6 +92,7 @@ class DwarfCache:
         self.function_index_cache.clear()
         self.global_index_cache.clear()
         self.type_index_cache.clear()
+        self.lexical_scope_cache.clear()
 
     def reset_runtime_caches(self) -> None:
         """Clear caches tied to runtime source/annotation data."""

@@ -1,6 +1,7 @@
 import os
 
 from .line_index import build_line_index
+from .lexical_scopes import build_lexical_scope_index
 from .models import (
     DwarfCompilationUnit,
     DwarfCoreError,
@@ -62,11 +63,13 @@ def load_dwarf_data(request: DwarfLoaderRequest) -> DwarfLoaderResponse:
             compilation_units = _collect_compilation_units(dwarf_info)
             line_index = build_line_index(compilation_units)
             scope_index = _build_scope_index(dwarf_info, line_index)
+            lexical_scope_index = build_lexical_scope_index(line_index, dwarf_info)
             return DwarfLoaderResponse(
                 ok=True,
                 compilation_units=compilation_units,
                 line_index=line_index,
                 scope_index=scope_index,
+                lexical_scope_index=lexical_scope_index,
                 pyelftools_available=True,
                 dwarf_info_available=True,
             )

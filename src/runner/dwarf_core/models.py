@@ -65,6 +65,49 @@ class DwarfScopeIndex:
 
 
 @dataclass(frozen=True)
+class DwarfScopeBlock:
+    """A single lexical scope (function or ``{}`` block) from DWARF."""
+
+    die_offset: int
+    parent_die_offset: int | None
+    depth: int
+    low_pc: int
+    high_pc: int
+    tag: str
+    start_loc: DwarfSourceLocation
+    end_loc: DwarfSourceLocation
+    function_name: str = ""
+
+
+@dataclass(frozen=True)
+class LexicalScopeIndex:
+    """Index of all lexical blocks in a binary, with PC-based lookup."""
+
+    blocks: tuple[DwarfScopeBlock, ...] = ()
+
+    def get_scope_chain(self, pc: int) -> list[DwarfScopeBlock]:
+        """Return all blocks enclosing *pc*, outermost (function) first."""
+        inner = self._innermost_block(pc)
+        if inner is None:
+            return []
+        by_offset = {b.die_offset: b for b in self.blocks}
+        chain: list[DwarfScopeBlock] = []
+        current: DwarfScopeBlock | None = inner
+        while current is not None:
+            chain.append(current)
+            parent_offset = current.parent_die_offset
+            current = by_offset.get(parent_offset) if parent_offset is not None else None
+        return list(reversed(chain))
+
+    def _innermost_block(self, pc: int) -> DwarfScopeBlock | None:
+        """Return the narrowest block that contains *pc*."""
+        candidates = [b for b in self.blocks if b.low_pc <= pc < b.high_pc]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda b: b.high_pc - b.low_pc)
+
+
+@dataclass(frozen=True)
 class DwarfLoaderRequest:
     binary_path: str
 
@@ -75,6 +118,7 @@ class DwarfLoaderResponse:
     compilation_units: tuple[DwarfCompilationUnit, ...] = ()
     line_index: DwarfLineIndex = DwarfLineIndex()
     scope_index: DwarfScopeIndex = DwarfScopeIndex()
+    lexical_scope_index: LexicalScopeIndex = LexicalScopeIndex()
     pyelftools_available: bool = True
     dwarf_info_available: bool = True
     error: DwarfCoreError | None = None

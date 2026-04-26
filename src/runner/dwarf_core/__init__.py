@@ -1,6 +1,7 @@
 from .function_index import FunctionEntry, FunctionIndex, get_function_index
 from .global_index import GlobalVariableEntry, GlobalVariableIndex, get_global_variables, evaluate_global
 from .type_resolver import DwarfTypeInfo, resolve_variable_type
+from .lexical_scopes import build_lexical_scope_index
 from .models import (
     DwarfAddressLookupRequest,
     DwarfAddressLookupResponse,
@@ -16,9 +17,11 @@ from .models import (
     DwarfLocationRange,
     DwarfResolveRequest,
     DwarfResolveResponse,
+    DwarfScopeBlock,
     DwarfScopeIndex,
     DwarfSourceLocation,
     DwarfVariableLiveRange,
+    LexicalScopeIndex,
     ResolvedVariableAnnotation,
     SourceExpressionParseRequest,
     SourceExpressionParseResponse,
@@ -58,10 +61,12 @@ __all__ = [
     "DwarfResolveResponse",
     "DwarfResolverInput",
     "DwarfResolverOutput",
+    "DwarfScopeBlock",
     "DwarfScopeIndex",
     "DwarfSourceLocation",
     "DwarfTypeInfo",
     "DwarfVariableLiveRange",
+    "LexicalScopeIndex",
     "evaluate_global",
     "FunctionEntry",
     "FunctionIndex",
@@ -72,6 +77,7 @@ __all__ = [
     "resolve_variable_type",
     "SourceExpressionParseRequest",
     "SourceExpressionParseResponse",
+    "build_lexical_scope_index",
     "build_line_index",
     "build_scope_index",
     "get_function_index",

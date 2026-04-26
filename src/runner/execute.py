@@ -11,7 +11,7 @@ from urllib import parse as urllib_parse
 
 import state as global_state
 from state import state, active_processes, subprocess_columns
-from models import Test, TestState, TimelineEvent
+from models import ScopeBucket, Test, TestState, TimelineEvent
 from .expression_tokenizer import tokenize_line
 from .makefile import (
     refresh_dependency_graph,
@@ -24,6 +24,7 @@ from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
 from .dwarf_core import (
     get_function_index,
     FunctionIndex,
+    load_dwarf_data,
     resolve_variable_type,
 )
 from .dwarf_core.global_index import get_global_variables, evaluate_global
@@ -271,6 +272,17 @@ async def _emit_skipped_standalone_exprs(
                 ],
                 debugger=controller,
             )
+            run = test.current_run
+            if run is not None and run.timeline_events:
+                event = run.timeline_events[-1]
+                scope_index = await _get_or_load_lexical_scope_index(binary_path, cache=test.dwarf_cache)
+                if scope_index is not None and synthetic_stop.program_counter:
+                    try:
+                        scope_chain = scope_index.get_scope_chain(synthetic_stop.program_counter)
+                        if scope_chain:
+                            _update_scope_buckets(test, event, scope_chain)
+                    except Exception:
+                        pass
 
 
 def _start_timeline_run(test: Test, reason: str) -> None:
@@ -956,6 +968,71 @@ async def _record_stop_event(
         update_annotation_cache(test, event)
 
 
+async def _get_or_load_lexical_scope_index(
+    binary_path: str,
+    cache=None,
+):
+    """Return the LexicalScopeIndex for *binary_path*, loading+caching on first use."""
+    if not binary_path:
+        return None
+    abs_binary = os.path.abspath(binary_path)
+    cache_dict = cache.lexical_scope_cache if cache is not None else {}
+    cached = cache_dict.get(abs_binary)
+    if cached is not None:
+        return cached
+    try:
+        response = await asyncio.to_thread(
+            load_dwarf_data, __import__("runner.dwarf_core.models", fromlist=["DwarfLoaderRequest"]).DwarfLoaderRequest(binary_path=abs_binary)
+        )
+    except Exception:
+        return None
+    if not getattr(response, "ok", False):
+        return None
+    index = getattr(response, "lexical_scope_index", None)
+    if cache is not None:
+        cache.lexical_scope_cache[abs_binary] = index
+    return index
+
+
+def _update_scope_buckets(
+    test: Test,
+    event: TimelineEvent,
+    scope_chain: list,
+) -> None:
+    """Place *event* into the deepest scope bucket matching its file + line range."""
+    run = test.current_run
+    if run is None or not event.file_path or not scope_chain:
+        return
+    abs_path = os.path.abspath(event.file_path)
+    root = run.scope_buckets.get(abs_path)
+
+    # The outermost block in the chain is the function/subprogram
+    func_block = scope_chain[0]
+    if root is None:
+        root = ScopeBucket(
+            start_line=func_block.start_loc.line,
+            end_line=func_block.end_loc.line,
+        )
+        run.scope_buckets[abs_path] = root
+
+    current = root
+    # Walk inner blocks, creating children as needed
+    for block in scope_chain[1:]:
+        start_line = block.start_loc.line
+        end_line = block.end_loc.line
+        child = None
+        for c in current.children:
+            if c.start_line == start_line and c.end_line == end_line:
+                child = c
+                break
+        if child is None:
+            child = ScopeBucket(start_line=start_line, end_line=end_line)
+            current.children.append(child)
+        current = child
+
+    current.latest_event = event
+
+
 _FAILURE_STDERR_INDICATORS = (
     "free():", "malloc():", "realloc():", "calloc():",
     "double free", "corruption", "invalid pointer", "invalid size",
@@ -1379,6 +1456,16 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
                 debugger=controller,
                 line_annotations=line_annotations,
             )
+            # Update scope buckets for the newly recorded event
+            event = run.timeline_events[-1]
+            scope_index = await _get_or_load_lexical_scope_index(binary_path, cache=test.dwarf_cache)
+            if scope_index is not None and stop_event.program_counter:
+                try:
+                    scope_chain = scope_index.get_scope_chain(stop_event.program_counter)
+                    if scope_chain:
+                        _update_scope_buckets(test, event, scope_chain)
+                except Exception:
+                    pass
         await _emit_skipped_standalone_exprs(
             test, stop_event, story_filters, controller, fast_variables, binary_path
         )
@@ -1624,6 +1711,16 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
             variables=vars_for_event,
             debugger=controller,
         )
+        if run.timeline_events:
+            event = run.timeline_events[-1]
+            scope_index = await _get_or_load_lexical_scope_index(binary_path, cache=test.dwarf_cache)
+            if scope_index is not None and initial_stop.program_counter:
+                try:
+                    scope_chain = scope_index.get_scope_chain(initial_stop.program_counter)
+                    if scope_chain:
+                        _update_scope_buckets(test, event, scope_chain)
+                except Exception:
+                    pass
         if _stop_has_source_location(initial_stop):
             save_debug_line(initial_stop.file_path, initial_stop.line)
         run.timeline_selected_event_index = -1
@@ -1776,9 +1873,20 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
         variables=vars_for_event,
         debugger=controller,
     )
+    # Update scope buckets for the newly recorded event
+    run = test.current_run
+    if run is not None and run.timeline_events:
+        event = run.timeline_events[-1]
+        scope_index = await _get_or_load_lexical_scope_index(controller.binary_path, cache=test.dwarf_cache)
+        if scope_index is not None and stop_event.program_counter:
+            try:
+                scope_chain = scope_index.get_scope_chain(stop_event.program_counter)
+                if scope_chain:
+                    _update_scope_buckets(test, event, scope_chain)
+            except Exception:
+                pass
     if _stop_has_source_location(stop_event):
         save_debug_line(stop_event.file_path, stop_event.line)
-    run = test.current_run
     if run is not None:
         run.timeline_selected_event_index = -1
     _schedule_story_annotations_persist(test)
