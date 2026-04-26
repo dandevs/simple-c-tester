@@ -350,7 +350,11 @@ class TestDebuggerScreen(Screen[None]):
 
     async def action_show_scope_history(self) -> None:
         from .lexical_scope_history_screen import LexicalScopeHistoryScreen
-        self.app.push_screen(LexicalScopeHistoryScreen(self.test))
+        focused_event = None
+        frames = self._line_frames()
+        if frames and 0 <= self.selected_frame_index < len(frames):
+            focused_event = frames[self.selected_frame_index]
+        self.app.push_screen(LexicalScopeHistoryScreen(self.test, focused_event=focused_event))
 
     def _maybe_refresh_dwarf_cache(self) -> None:
         from runner.artifacts import test_binary_path
