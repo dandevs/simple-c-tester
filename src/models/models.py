@@ -28,14 +28,18 @@ class ScopeBucket:
 
     Each bucket represents a contiguous line range (e.g. a function body or a
     ``{}`` block).  Buckets are nested: ``children`` holds inner blocks.
-    ``latest_event`` is the most recent :class:`TimelineEvent` whose PC fell
-    inside this bucket (and therefore inside the deepest matching child first).
+    ``latest_events`` accumulates visits to this bucket.  While the execution
+    stays inside the bucket the last entry is *replaced*; when execution leaves
+    and returns a *new* entry is appended.
     """
 
     start_line: int = 0
     end_line: int = 0
+    low_pc: int = 0
+    high_pc: int = 0
     children: list["ScopeBucket"] = field(default_factory=list)
-    latest_event: TimelineEvent | None = None
+    latest_events: list[TimelineEvent] = field(default_factory=list)
+    parent: "ScopeBucket | None" = None
 
 
 @dataclass
@@ -65,6 +69,8 @@ class TestRun:
     )
     # abs_file_path -> root ScopeBucket (function scope) with nested children
     scope_buckets: dict[str, ScopeBucket] = field(default_factory=dict)
+    # The bucket whose latest_events[-1] is currently being replaced
+    open_scope_bucket: ScopeBucket | None = None
 
 
 @dataclass

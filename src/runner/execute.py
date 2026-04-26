@@ -280,7 +280,7 @@ async def _emit_skipped_standalone_exprs(
                     try:
                         scope_chain = scope_index.get_scope_chain(synthetic_stop.program_counter)
                         if scope_chain:
-                            _update_scope_buckets(test, event, scope_chain)
+                            _update_scope_buckets(test, event, scope_chain, is_synthetic=True)
                     except Exception:
                         pass
 
@@ -998,20 +998,41 @@ def _update_scope_buckets(
     test: Test,
     event: TimelineEvent,
     scope_chain: list,
+    is_synthetic: bool = False,
 ) -> None:
-    """Place *event* into the deepest scope bucket matching its file + line range."""
+    """Place *event* into the deepest scope bucket matching its file + line range.
+
+    While execution stays inside the same deepest bucket, the last entry in
+    ``latest_events`` is replaced.  When the PC leaves the bucket (or the
+    current line reaches the bucket's ``end_line``) and later returns, a new
+    entry is appended.
+
+    *is_synthetic* stops (e.g. standalone-expression fabrications) never
+    trigger bucket closure so that a skipped-over ``end_line`` does not
+    spuriously close the bucket.
+    """
     run = test.current_run
     if run is None or not event.file_path or not scope_chain:
         return
     abs_path = os.path.abspath(event.file_path)
     root = run.scope_buckets.get(abs_path)
 
-    # The outermost block in the chain is the function/subprogram
+    # Close the previously open bucket if execution left its range
+    prev_open = run.open_scope_bucket
+    if prev_open is not None:
+        pc_left = not (prev_open.low_pc <= event.program_counter < prev_open.high_pc)
+        line_at_end = event.line >= prev_open.end_line
+        if pc_left or (line_at_end and not is_synthetic):
+            run.open_scope_bucket = None
+
+    # Ensure the root bucket exists (function / subprogram scope)
     func_block = scope_chain[0]
     if root is None:
         root = ScopeBucket(
             start_line=func_block.start_loc.line,
             end_line=func_block.end_loc.line,
+            low_pc=func_block.low_pc,
+            high_pc=func_block.high_pc,
         )
         run.scope_buckets[abs_path] = root
 
@@ -1026,11 +1047,25 @@ def _update_scope_buckets(
                 child = c
                 break
         if child is None:
-            child = ScopeBucket(start_line=start_line, end_line=end_line)
+            child = ScopeBucket(
+                start_line=start_line,
+                end_line=end_line,
+                low_pc=block.low_pc,
+                high_pc=block.high_pc,
+                parent=current,
+            )
             current.children.append(child)
         current = child
 
-    current.latest_event = event
+    # Replace or append depending on whether this bucket is still open
+    if run.open_scope_bucket is current:
+        if current.latest_events:
+            current.latest_events[-1] = event
+        else:
+            current.latest_events.append(event)
+    else:
+        current.latest_events.append(event)
+        run.open_scope_bucket = current
 
 
 _FAILURE_STDERR_INDICATORS = (
@@ -1463,7 +1498,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
                 try:
                     scope_chain = scope_index.get_scope_chain(stop_event.program_counter)
                     if scope_chain:
-                        _update_scope_buckets(test, event, scope_chain)
+                        _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
                 except Exception:
                     pass
         await _emit_skipped_standalone_exprs(
@@ -1718,7 +1753,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
                 try:
                     scope_chain = scope_index.get_scope_chain(initial_stop.program_counter)
                     if scope_chain:
-                        _update_scope_buckets(test, event, scope_chain)
+                        _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
                 except Exception:
                     pass
         if _stop_has_source_location(initial_stop):
@@ -1882,7 +1917,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
             try:
                 scope_chain = scope_index.get_scope_chain(stop_event.program_counter)
                 if scope_chain:
-                    _update_scope_buckets(test, event, scope_chain)
+                    _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
             except Exception:
                 pass
     if _stop_has_source_location(stop_event):
