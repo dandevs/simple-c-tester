@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, field
 
 from .source_parser_models import SourceExpressionMatch
@@ -90,6 +91,34 @@ class LexicalScopeIndex:
         inner = self._innermost_block(pc)
         if inner is None:
             return []
+        by_offset = {b.die_offset: b for b in self.blocks}
+        chain: list[DwarfScopeBlock] = []
+        current: DwarfScopeBlock | None = inner
+        while current is not None:
+            chain.append(current)
+            parent_offset = current.parent_die_offset
+            current = by_offset.get(parent_offset) if parent_offset is not None else None
+        return list(reversed(chain))
+
+    def get_scope_chain_by_line(self, file_path: str, line: int) -> list[DwarfScopeBlock]:
+        """Return all blocks enclosing *line* in *file_path*, outermost first.
+
+        Falls back to line-range matching when PC-based lookup fails due to
+        address-space mismatches (e.g. PIE runtime vs DWARF file-relative).
+        """
+        abs_path = os.path.abspath(file_path)
+        # Find all blocks whose line range contains the target line
+        candidates = [
+            b
+            for b in self.blocks
+            if b.start_loc.file_path and b.end_loc.file_path
+            and os.path.abspath(b.start_loc.file_path) == abs_path
+            and b.start_loc.line <= line <= b.end_loc.line
+        ]
+        if not candidates:
+            return []
+        # Pick the innermost (smallest line range)
+        inner = min(candidates, key=lambda b: b.end_loc.line - b.start_loc.line)
         by_offset = {b.die_offset: b for b in self.blocks}
         chain: list[DwarfScopeBlock] = []
         current: DwarfScopeBlock | None = inner

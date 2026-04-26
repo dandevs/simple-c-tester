@@ -279,6 +279,8 @@ async def _emit_skipped_standalone_exprs(
                 if scope_index is not None and synthetic_stop.program_counter:
                     try:
                         scope_chain = scope_index.get_scope_chain(synthetic_stop.program_counter)
+                        if not scope_chain and event.file_path and event.line > 0:
+                            scope_chain = scope_index.get_scope_chain_by_line(event.file_path, event.line)
                         if scope_chain:
                             _update_scope_buckets(test, event, scope_chain, is_synthetic=True)
                     except Exception:
@@ -1497,6 +1499,8 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             if scope_index is not None and stop_event.program_counter:
                 try:
                     scope_chain = scope_index.get_scope_chain(stop_event.program_counter)
+                    if not scope_chain and stop_event.file_path and stop_event.line > 0:
+                        scope_chain = scope_index.get_scope_chain_by_line(stop_event.file_path, stop_event.line)
                     if scope_chain:
                         _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
                 except Exception:
@@ -1752,6 +1756,8 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
             if scope_index is not None and initial_stop.program_counter:
                 try:
                     scope_chain = scope_index.get_scope_chain(initial_stop.program_counter)
+                    if not scope_chain and initial_stop.file_path and initial_stop.line > 0:
+                        scope_chain = scope_index.get_scope_chain_by_line(initial_stop.file_path, initial_stop.line)
                     if scope_chain:
                         _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
                 except Exception:
@@ -1916,6 +1922,8 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
         if scope_index is not None and stop_event.program_counter:
             try:
                 scope_chain = scope_index.get_scope_chain(stop_event.program_counter)
+                if not scope_chain and stop_event.file_path and stop_event.line > 0:
+                    scope_chain = scope_index.get_scope_chain_by_line(stop_event.file_path, stop_event.line)
                 if scope_chain:
                     _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
             except Exception:
