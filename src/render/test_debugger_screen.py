@@ -260,6 +260,7 @@ class TestDebuggerScreen(Screen[None]):
         Binding("ctrl+j", "toggle_full_file_view", "", show=False),
         Binding("ctrl+m", "toggle_full_file_view", "", show=False),
         Binding("enter", "toggle_full_file_view", "", show=False),
+        Binding("h", "show_scope_history", "History"),
     ]
 
     def __init__(self, test: Test):
@@ -346,6 +347,10 @@ class TestDebuggerScreen(Screen[None]):
         self.test.timeline_capture_enabled = not self.test.timeline_capture_enabled
         mode = "enabled" if self.test.timeline_capture_enabled else "disabled"
         self._set_footer_text(f"Timeline capture {mode} for {self.test.name}.")
+
+    async def action_show_scope_history(self) -> None:
+        from .lexical_scope_history_screen import LexicalScopeHistoryScreen
+        self.app.push_screen(LexicalScopeHistoryScreen(self.test))
 
     def _maybe_refresh_dwarf_cache(self) -> None:
         from runner.artifacts import test_binary_path

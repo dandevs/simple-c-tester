@@ -16,6 +16,7 @@ from .output import (
 from .tree import render_tree, render_node, render_tree_stdout
 from .test_output_screen import TestOutputScreen
 from .test_debugger_screen import TestDebuggerScreen
+from .lexical_scope_history_screen import LexicalScopeHistoryScreen
 
 __all__ = [
     "OutputBoxRenderMeta",
@@ -32,4 +33,5 @@ __all__ = [
     "render_tree_stdout",
     "TestOutputScreen",
     "TestDebuggerScreen",
+    "LexicalScopeHistoryScreen",
 ]
