@@ -263,9 +263,9 @@ class LexicalScopeHistoryScreen(Screen[None]):
     def _build_debug_info(self) -> list[Text]:
         """Build diagnostic lines showing internal state."""
         lines: list[Text] = []
-        lines.append(Text("═" * 40, style="#2e3440"))
+        lines.append(Text("═" * 50, style="#2e3440"))
         lines.append(Text("DEBUG  Lexical Scope History", style="bold #ffd166"))
-        lines.append(Text("═" * 40, style="#2e3440"))
+        lines.append(Text("═" * 50, style="#2e3440"))
 
         run = self.test.current_run
         if run is None:
@@ -277,8 +277,52 @@ class LexicalScopeHistoryScreen(Screen[None]):
         lines.append(Text(f"Timeline events (total): {len(run.timeline_events)}"))
         lines.append(Text(f"Scope buckets (files): {len(run.scope_buckets)}"))
 
+        # Check dwarf_cache lexical_scope_cache
+        cache = self.test.dwarf_cache
+        has_lexical_cache = hasattr(cache, "lexical_scope_cache")
+        lines.append(Text(f"DwarfCache has lexical_scope_cache: {has_lexical_cache}"))
+        if has_lexical_cache:
+            lines.append(Text(f"  Cached binaries: {list(cache.lexical_scope_cache.keys())}"))
+
+        # Show sample timeline event PCs
+        if run.timeline_events:
+            sample = run.timeline_events[:3]
+            lines.append(Text("Sample event PCs:"))
+            for ev in sample:
+                pc_hex = f"0x{ev.program_counter:x}" if ev.program_counter else "0"
+                lines.append(Text(f"  {ev.kind} @ {display_path(ev.file_path)}:{ev.line}  PC={pc_hex}"))
+
         if not run.scope_buckets:
-            lines.append(Text("[DEBUG] No scope buckets! _update_scope_buckets was never called or scope_chain was empty.", style="bold red"))
+            lines.append(Text("[DEBUG] No scope buckets! Diagnosing...", style="bold red"))
+            # Try to load lexical scope index synchronously for diagnostics
+            try:
+                from runner.artifacts import test_binary_path
+                binary_path = test_binary_path(self.test.source_path)
+                lines.append(Text(f"Binary path: {binary_path}"))
+                if os.path.exists(binary_path):
+                    lines.append(Text(f"Binary exists: yes ({os.path.getsize(binary_path)} bytes)"))
+                    # Try to load DWARF
+                    try:
+                        from runner.dwarf_core.loader import load_dwarf_data
+                        from runner.dwarf_core.models import DwarfLoaderRequest
+                        response = load_dwarf_data(DwarfLoaderRequest(binary_path=binary_path))
+                        lines.append(Text(f"DWARF load ok: {response.ok}"))
+                        if response.ok:
+                            idx = response.lexical_scope_index
+                            lines.append(Text(f"LexicalScopeIndex blocks: {len(idx.blocks)}"))
+                            if idx.blocks:
+                                sample_block = idx.blocks[0]
+                                lines.append(Text(f"  Sample block: {sample_block}"))
+                        else:
+                            err = getattr(response, "error", None)
+                            if err:
+                                lines.append(Text(f"DWARF error: {err.code} - {err.message}", style="bold red"))
+                    except Exception as e:
+                        lines.append(Text(f"DWARF load exception: {e}", style="bold red"))
+                else:
+                    lines.append(Text("Binary exists: NO", style="bold red"))
+            except Exception as e:
+                lines.append(Text(f"Diagnostic exception: {e}", style="bold red"))
             return lines
 
         for abs_path, root in sorted(run.scope_buckets.items()):
@@ -301,7 +345,7 @@ class LexicalScopeHistoryScreen(Screen[None]):
         else:
             lines.append(Text("[DEBUG] tree_widget is None", style="bold red"))
 
-        lines.append(Text("─" * 40, style="#2e3440"))
+        lines.append(Text("─" * 50, style="#2e3440"))
         return lines
 
     def _build_event_cards(self, events: list[TimelineEvent]) -> list:
