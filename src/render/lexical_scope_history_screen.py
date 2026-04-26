@@ -286,11 +286,18 @@ class LexicalScopeHistoryScreen(Screen[None]):
 
         # Show sample timeline event PCs
         if run.timeline_events:
-            sample = run.timeline_events[:3]
-            lines.append(Text("Sample event PCs:"))
-            for ev in sample:
+            lines.append(Text("Sample event PCs (first 3):"))
+            for ev in run.timeline_events[:3]:
                 pc_hex = f"0x{ev.program_counter:x}" if ev.program_counter else "0"
                 lines.append(Text(f"  {ev.kind} @ {display_path(ev.file_path)}:{ev.line}  PC={pc_hex}"))
+            # Show events with non-zero PC
+            non_zero = [ev for ev in run.timeline_events if ev.program_counter != 0]
+            lines.append(Text(f"Events with non-zero PC: {len(non_zero)} / {len(run.timeline_events)}"))
+            if non_zero:
+                lines.append(Text("First non-zero PC events:"))
+                for ev in non_zero[:3]:
+                    pc_hex = f"0x{ev.program_counter:x}"
+                    lines.append(Text(f"  {ev.kind} @ {display_path(ev.file_path)}:{ev.line}  PC={pc_hex}"))
 
         if not run.scope_buckets:
             lines.append(Text("[DEBUG] No scope buckets! Diagnosing...", style="bold red"))
@@ -313,6 +320,14 @@ class LexicalScopeHistoryScreen(Screen[None]):
                             if idx.blocks:
                                 sample_block = idx.blocks[0]
                                 lines.append(Text(f"  Sample block: {sample_block}"))
+                            # Check if any block could contain a sample PC
+                            non_zero_events = [ev for ev in run.timeline_events if ev.program_counter != 0]
+                            if non_zero_events:
+                                sample_pc = non_zero_events[0].program_counter
+                                matching = [b for b in idx.blocks if b.low_pc <= sample_pc < b.high_pc]
+                                lines.append(Text(f"Blocks matching PC 0x{sample_pc:x}: {len(matching)}"))
+                                if matching:
+                                    lines.append(Text(f"  Match: {matching[0]}"))
                         else:
                             err = getattr(response, "error", None)
                             if err:
