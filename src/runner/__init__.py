@@ -39,6 +39,7 @@ from .makefile import (
     save_story_annotations,
     save_debug_line,
     clear_debug_line,
+    save_dependency_db,
 )
 from .state import all_tests_finished, has_active_tests, display_state_signature
 
@@ -80,6 +81,7 @@ __all__ = [
     "save_story_annotations",
     "save_debug_line",
     "clear_debug_line",
+    "save_dependency_db",
     "all_tests_finished",
     "has_active_tests",
     "display_state_signature",
