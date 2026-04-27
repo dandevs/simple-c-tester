@@ -20,3 +20,4 @@ tsv_show_reason_about = False
 debug_precision_mode_preference = "precise"
 story_filter_profile_preference = "balanced"
 debug_line: dict | None = None
+app_active = False

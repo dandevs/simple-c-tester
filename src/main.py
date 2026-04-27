@@ -18,6 +18,7 @@ from runner import (
     refresh_dependency_graph,
     prime_editor_breakpoints_cache,
     _terminate_active_processes,
+    save_dependency_db,
 )
 from app import TestRunnerApp
 from runner.story_filters import normalized_story_filter_profile
@@ -122,9 +123,13 @@ async def _main():
     state.available_runners = args.parallel
 
     app = TestRunnerApp(args.watch, args.output_lines, args.theme, args.timeline)
+    global_state.app_active = True
+    save_dependency_db()
     try:
         await app.run_async()
     finally:
+        global_state.app_active = False
+        save_dependency_db()
         app.stop_observer()
         await _terminate_active_processes()
         if not args.watch:

@@ -308,7 +308,7 @@ def save_dependency_db(changed_test_keys: set[str] | None = None) -> None:
             entry["story_annotations"] = test.story_annotations
         tests_payload[test_key] = entry
 
-    payload = {"tests": tests_payload}
+    payload = {"tests": tests_payload, "active": global_state.app_active}
     payload["preferences"] = {
         "debug_precision_mode": _normalized_precision_mode(
             global_state.debug_precision_mode_preference
