@@ -24,10 +24,10 @@ from .debugger import GdbMIController, DebugStopEvent, stop_event_is_terminal
 from .dwarf_core import (
     get_function_index,
     FunctionIndex,
-    load_dwarf_data,
     resolve_variable_type,
 )
 from .dwarf_core.global_index import get_global_variables, evaluate_global
+from .source_scopes import get_source_scope_chain
 from .story_filters import StoryFilterEngine, TriggerMatch, normalized_story_filter_profile
 from .story_annotations import (
     get_story_annotations,
@@ -275,16 +275,18 @@ async def _emit_skipped_standalone_exprs(
             run = test.current_run
             if run is not None and run.timeline_events:
                 event = run.timeline_events[-1]
-                scope_index = await _get_or_load_lexical_scope_index(binary_path, cache=test.dwarf_cache)
-                if scope_index is not None and synthetic_stop.program_counter:
-                    try:
-                        scope_chain = scope_index.get_scope_chain(synthetic_stop.program_counter)
-                        if not scope_chain and event.file_path and event.line > 0:
-                            scope_chain = scope_index.get_scope_chain_by_line(event.file_path, event.line)
-                        if scope_chain:
-                            _update_scope_buckets(test, event, scope_chain, is_synthetic=True)
-                    except Exception:
-                        pass
+                scope_chain = _scope_chain_for_event(
+                    file_path=event.file_path,
+                    line=event.line,
+                    cache=test.dwarf_cache,
+                )
+                if scope_chain:
+                    _update_scope_buckets(
+                        test,
+                        event,
+                        scope_chain,
+                        is_synthetic=True,
+                    )
 
 
 def _start_timeline_run(test: Test, reason: str) -> None:
@@ -970,30 +972,37 @@ async def _record_stop_event(
         update_annotation_cache(test, event)
 
 
-async def _get_or_load_lexical_scope_index(
-    binary_path: str,
-    cache=None,
-):
-    """Return the LexicalScopeIndex for *binary_path*, loading+caching on first use."""
-    if not binary_path:
-        return None
-    abs_binary = os.path.abspath(binary_path)
-    cache_dict = cache.lexical_scope_cache if cache is not None else {}
-    cached = cache_dict.get(abs_binary)
-    if cached is not None:
-        return cached
-    try:
-        response = await asyncio.to_thread(
-            load_dwarf_data, __import__("runner.dwarf_core.models", fromlist=["DwarfLoaderRequest"]).DwarfLoaderRequest(binary_path=abs_binary)
-        )
-    except Exception:
-        return None
-    if not getattr(response, "ok", False):
-        return None
-    index = getattr(response, "lexical_scope_index", None)
-    if cache is not None:
-        cache.lexical_scope_cache[abs_binary] = index
-    return index
+def _scope_chain_for_event(file_path: str, line: int, cache=None) -> list:
+    return get_source_scope_chain(file_path=file_path, line_number=line, cache=cache)
+
+
+def _scope_contains_line(bucket: ScopeBucket, line: int) -> bool:
+    return bucket.start_line <= line <= bucket.end_line
+
+
+def _same_source_file(bucket: ScopeBucket, abs_file_path: str) -> bool:
+    if not bucket.source_file_path:
+        return False
+    return os.path.abspath(bucket.source_file_path) == abs_file_path
+
+
+def _path_to_root(bucket: ScopeBucket) -> list[ScopeBucket]:
+    path: list[ScopeBucket] = []
+    current = bucket
+    while current is not None:
+        path.append(current)
+        current = current.parent
+    path.reverse()
+    return path
+
+
+def _nearest_function_bucket(bucket: ScopeBucket) -> ScopeBucket | None:
+    current = bucket
+    while current is not None:
+        if current.scope_kind == "function":
+            return current
+        current = current.parent
+    return None
 
 
 def _update_scope_buckets(
@@ -1002,16 +1011,13 @@ def _update_scope_buckets(
     scope_chain: list,
     is_synthetic: bool = False,
 ) -> None:
-    """Place *event* into the deepest scope bucket matching its file + line range.
+    """Record *event* into the deepest scope bucket matching its file + line range.
 
-    While execution stays inside the same deepest bucket, the last entry in
-    ``latest_events`` is replaced.  When the PC leaves the bucket (or the
-    current line reaches the bucket's ``end_line``) and later returns, a new
-    entry is appended.
+    Every event is appended to ``latest_events`` so that the full execution
+    history of each scope can be replayed later.
 
-    *is_synthetic* stops (e.g. standalone-expression fabrications) never
-    trigger bucket closure so that a skipped-over ``end_line`` does not
-    spuriously close the bucket.
+    *is_synthetic* stops never trigger bucket closure so that a skipped-over
+    ``end_line`` does not spuriously close the bucket.
     """
     run = test.current_run
     if run is None or not event.file_path or not scope_chain:
@@ -1019,30 +1025,33 @@ def _update_scope_buckets(
     abs_path = os.path.abspath(event.file_path)
     root = run.scope_buckets.get(abs_path)
 
-    # Close the previously open bucket if execution left its range
-    prev_open = run.open_scope_bucket
-    if prev_open is not None:
-        pc_left = not (prev_open.low_pc <= event.program_counter < prev_open.high_pc)
-        line_at_end = event.line >= prev_open.end_line
-        if pc_left or (line_at_end and not is_synthetic):
-            run.open_scope_bucket = None
-
-    # Ensure the root bucket exists (function / subprogram scope)
-    func_block = scope_chain[0]
+    # Ensure the root bucket exists (file scope: full file range)
     if root is None:
+        source_lines = _load_source_lines(abs_path, cache=test.dwarf_cache)
+        file_end_line = len(source_lines)
         root = ScopeBucket(
-            start_line=func_block.start_loc.line,
-            end_line=func_block.end_loc.line,
-            low_pc=func_block.low_pc,
-            high_pc=func_block.high_pc,
+            start_line=1,
+            end_line=max(event.line, file_end_line if file_end_line > 0 else event.line),
+            source_file_path=abs_path,
+            scope_kind="file",
         )
         run.scope_buckets[abs_path] = root
+    else:
+        source_lines = _load_source_lines(abs_path, cache=test.dwarf_cache)
+        file_end_line = len(source_lines)
+        root.start_line = 1
+        root.end_line = max(
+            root.end_line,
+            event.line,
+            file_end_line if file_end_line > 0 else event.line,
+        )
 
     current = root
-    # Walk inner blocks, creating children as needed
-    for block in scope_chain[1:]:
-        start_line = block.start_loc.line
-        end_line = block.end_loc.line
+    created_chain: list[ScopeBucket] = []
+    # Walk parsed scopes (function -> inner blocks), creating children as needed
+    for block in scope_chain:
+        start_line = block.start_line
+        end_line = block.end_line
         child = None
         for c in current.children:
             if c.start_line == start_line and c.end_line == end_line:
@@ -1052,22 +1061,132 @@ def _update_scope_buckets(
             child = ScopeBucket(
                 start_line=start_line,
                 end_line=end_line,
-                low_pc=block.low_pc,
-                high_pc=block.high_pc,
+                source_file_path=block.source_file_path,
+                scope_kind=getattr(block, "kind", "block") or "block",
                 parent=current,
             )
             current.children.append(child)
         current = child
+        if current.scope_kind != "file":
+            created_chain.append(current)
 
-    # Replace or append depending on whether this bucket is still open
-    if run.open_scope_bucket is current:
-        if current.latest_events:
-            current.latest_events[-1] = event
-        else:
-            current.latest_events.append(event)
+    if not created_chain:
+        run.open_scope_chain = []
+        run.open_scope_bucket = None
+        return
+
+    deepest = created_chain[-1]
+    function_bucket = _nearest_function_bucket(deepest)
+    if function_bucket is None:
+        run.open_scope_chain = []
+        run.open_scope_bucket = None
+        return
+
+    # Full path excluding file root: [function, ...inner]
+    full_path = [b for b in _path_to_root(deepest) if b.scope_kind != "file"]
+    if not full_path:
+        run.open_scope_chain = []
+        run.open_scope_bucket = None
+        return
+
+    if full_path[0] is not function_bucket:
+        full_path = [function_bucket] + [b for b in full_path if b is not function_bucket]
+
+    current_inner_chain = full_path[1:]
+
+    function_stack = run.open_function_stack
+    inner_chains = run.open_inner_scope_chains
+
+    def _sync_stacks() -> None:
+        if len(inner_chains) > len(function_stack):
+            del inner_chains[len(function_stack):]
+        while len(inner_chains) < len(function_stack):
+            inner_chains.append([])
+
+    _sync_stacks()
+
+    in_stack_idx = -1
+    for idx in range(len(function_stack) - 1, -1, -1):
+        fn = function_stack[idx]
+        if fn is function_bucket:
+            in_stack_idx = idx
+            break
+
+    if in_stack_idx >= 0:
+        # Returning to an existing active function frame.
+        del function_stack[in_stack_idx + 1:]
+        del inner_chains[in_stack_idx + 1:]
+        _sync_stacks()
     else:
-        current.latest_events.append(event)
-        run.open_scope_bucket = current
+        # Entering a new function invocation.
+        function_stack.append(function_bucket)
+        inner_chains.append([])
+
+    current_fn_index = len(function_stack) - 1
+    previous_inner_chain = list(inner_chains[current_fn_index])
+
+    # Function entry semantics:
+    # - first time this invocation frame is seen => append
+    # - subsequent stops in same invocation => replace
+    if in_stack_idx >= 0:
+        if function_bucket.latest_events:
+            function_bucket.latest_events[-1] = event
+        else:
+            function_bucket.latest_events.append(event)
+    else:
+        function_bucket.latest_events.append(event)
+
+    # Inner scope semantics within this function invocation.
+    prefix_len = 0
+    max_prefix = min(len(previous_inner_chain), len(current_inner_chain))
+    while (
+        prefix_len < max_prefix
+        and previous_inner_chain[prefix_len] is current_inner_chain[prefix_len]
+    ):
+        prefix_len += 1
+
+    for i in range(prefix_len):
+        bucket = current_inner_chain[i]
+        if bucket.latest_events:
+            bucket.latest_events[-1] = event
+        else:
+            bucket.latest_events.append(event)
+
+    for i in range(prefix_len, len(current_inner_chain)):
+        current_inner_chain[i].latest_events.append(event)
+
+    # Map the exact event object to the deepest non-file bucket for robust history lookup.
+    run.event_scope_bucket_by_event_id[id(event)] = deepest
+
+    # Close ended inner scopes for this frame.
+    next_inner_chain = list(current_inner_chain)
+    if not is_synthetic:
+        while (
+            next_inner_chain
+            and _same_source_file(next_inner_chain[-1], abs_path)
+            and event.line >= next_inner_chain[-1].end_line
+        ):
+            next_inner_chain.pop()
+    inner_chains[current_fn_index] = next_inner_chain
+
+    # Pop completed function frames from top-of-stack.
+    if not is_synthetic:
+        while (
+            function_stack
+            and _same_source_file(function_stack[-1], abs_path)
+            and event.line >= function_stack[-1].end_line
+        ):
+            function_stack.pop()
+            inner_chains.pop()
+
+    # Keep legacy fields in sync for any existing readers.
+    if function_stack:
+        active_inner = inner_chains[-1] if inner_chains else []
+        run.open_scope_chain = [function_stack[-1], *active_inner]
+        run.open_scope_bucket = run.open_scope_chain[-1]
+    else:
+        run.open_scope_chain = []
+        run.open_scope_bucket = None
 
 
 _FAILURE_STDERR_INDICATORS = (
@@ -1495,16 +1614,13 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             )
             # Update scope buckets for the newly recorded event
             event = run.timeline_events[-1]
-            scope_index = await _get_or_load_lexical_scope_index(binary_path, cache=test.dwarf_cache)
-            if scope_index is not None and stop_event.program_counter:
-                try:
-                    scope_chain = scope_index.get_scope_chain(stop_event.program_counter)
-                    if not scope_chain and stop_event.file_path and stop_event.line > 0:
-                        scope_chain = scope_index.get_scope_chain_by_line(stop_event.file_path, stop_event.line)
-                    if scope_chain:
-                        _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
-                except Exception:
-                    pass
+            scope_chain = _scope_chain_for_event(
+                file_path=stop_event.file_path,
+                line=stop_event.line,
+                cache=test.dwarf_cache,
+            )
+            if scope_chain:
+                _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
         await _emit_skipped_standalone_exprs(
             test, stop_event, story_filters, controller, fast_variables, binary_path
         )
@@ -1752,16 +1868,18 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
         )
         if run.timeline_events:
             event = run.timeline_events[-1]
-            scope_index = await _get_or_load_lexical_scope_index(binary_path, cache=test.dwarf_cache)
-            if scope_index is not None and initial_stop.program_counter:
-                try:
-                    scope_chain = scope_index.get_scope_chain(initial_stop.program_counter)
-                    if not scope_chain and initial_stop.file_path and initial_stop.line > 0:
-                        scope_chain = scope_index.get_scope_chain_by_line(initial_stop.file_path, initial_stop.line)
-                    if scope_chain:
-                        _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
-                except Exception:
-                    pass
+            scope_chain = _scope_chain_for_event(
+                file_path=initial_stop.file_path,
+                line=initial_stop.line,
+                cache=test.dwarf_cache,
+            )
+            if scope_chain:
+                _update_scope_buckets(
+                    test,
+                    event,
+                    scope_chain,
+                    is_synthetic=False,
+                )
         if _stop_has_source_location(initial_stop):
             save_debug_line(initial_stop.file_path, initial_stop.line)
         run.timeline_selected_event_index = -1
@@ -1918,16 +2036,13 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
     run = test.current_run
     if run is not None and run.timeline_events:
         event = run.timeline_events[-1]
-        scope_index = await _get_or_load_lexical_scope_index(controller.binary_path, cache=test.dwarf_cache)
-        if scope_index is not None and stop_event.program_counter:
-            try:
-                scope_chain = scope_index.get_scope_chain(stop_event.program_counter)
-                if not scope_chain and stop_event.file_path and stop_event.line > 0:
-                    scope_chain = scope_index.get_scope_chain_by_line(stop_event.file_path, stop_event.line)
-                if scope_chain:
-                    _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
-            except Exception:
-                pass
+        scope_chain = _scope_chain_for_event(
+            file_path=stop_event.file_path,
+            line=stop_event.line,
+            cache=test.dwarf_cache,
+        )
+        if scope_chain:
+            _update_scope_buckets(test, event, scope_chain, is_synthetic=False)
     if _stop_has_source_location(stop_event):
         save_debug_line(stop_event.file_path, stop_event.line)
     if run is not None:

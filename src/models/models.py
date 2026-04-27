@@ -24,7 +24,7 @@ class TimelineEvent:
 
 @dataclass
 class ScopeBucket:
-    """A source-level lexical scope bucket derived from DWARF block data.
+    """A source-level lexical scope bucket derived from source parsing.
 
     Each bucket represents a contiguous line range (e.g. a function body or a
     ``{}`` block).  Buckets are nested: ``children`` holds inner blocks.
@@ -37,6 +37,8 @@ class ScopeBucket:
     end_line: int = 0
     low_pc: int = 0
     high_pc: int = 0
+    source_file_path: str = ""
+    scope_kind: str = "block"
     children: list["ScopeBucket"] = field(default_factory=list)
     latest_events: list[TimelineEvent] = field(default_factory=list)
     parent: "ScopeBucket | None" = None
@@ -71,6 +73,14 @@ class TestRun:
     scope_buckets: dict[str, ScopeBucket] = field(default_factory=dict)
     # The bucket whose latest_events[-1] is currently being replaced
     open_scope_bucket: ScopeBucket | None = None
+    # Open non-file scope chain (for the currently active function context)
+    open_scope_chain: list[ScopeBucket] = field(default_factory=list)
+    # Active function invocation stack (caller -> callee)
+    open_function_stack: list[ScopeBucket] = field(default_factory=list)
+    # Per-function open inner-scope chains, parallel to open_function_stack
+    open_inner_scope_chains: list[list[ScopeBucket]] = field(default_factory=list)
+    # Recorded event object id -> deepest non-file bucket at record time
+    event_scope_bucket_by_event_id: dict[int, ScopeBucket] = field(default_factory=dict)
 
 
 @dataclass

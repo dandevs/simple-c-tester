@@ -351,8 +351,13 @@ class TestDebuggerScreen(Screen[None]):
     async def action_show_scope_history(self) -> None:
         from .lexical_scope_history_screen import LexicalScopeHistoryScreen
         focused_event = None
+        run = self.test.current_run
+        if run is not None and 0 <= run.timeline_selected_event_index < len(run.timeline_events):
+            candidate = run.timeline_events[run.timeline_selected_event_index]
+            if candidate.file_path and candidate.line > 0:
+                focused_event = candidate
         frames = self._line_frames()
-        if frames and 0 <= self.selected_frame_index < len(frames):
+        if focused_event is None and frames and 0 <= self.selected_frame_index < len(frames):
             focused_event = frames[self.selected_frame_index]
         self.app.push_screen(LexicalScopeHistoryScreen(self.test, focused_event=focused_event))
 

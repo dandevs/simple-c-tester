@@ -33,13 +33,16 @@ class LexicalScopeHistoryScreen(Screen[None]):
     }
     #history-code {
         width: 1fr;
+        height: 1fr;
+        min-height: 1;
         border: none;
         padding: 0 1;
     }
     #history-vars-column {
         layout: vertical;
-        width: 35;
-        min-width: 20;
+        width: 25;
+        min-width: 15;
+        height: 1fr;
     }
     #history-vars-panel {
         height: 1;
@@ -81,10 +84,9 @@ class LexicalScopeHistoryScreen(Screen[None]):
         self.last_signature: tuple | None = None
         self._source_cache: dict[str, list[str]] = {}
 
-        # Scope state
-        self.selected_bucket: ScopeBucket | None = None
-        self.bucket_events: list[TimelineEvent] = []
-        self.bucket_event_index = 0
+        # Scope events from the deepest matching bucket
+        self.scope_events: list[TimelineEvent] = []
+        self.scope_event_index = 0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="history-header")
@@ -108,7 +110,7 @@ class LexicalScopeHistoryScreen(Screen[None]):
         if self.vars_tree_widget is not None:
             self.vars_tree_widget.show_root = False
 
-        self._init_scope_from_focused_event()
+        self._build_scope_events()
         self._refresh_view(force=True)
         self.set_interval(0.1, self._tick)
 
@@ -116,76 +118,73 @@ class LexicalScopeHistoryScreen(Screen[None]):
         self.app.pop_screen()
 
     def action_timeline_prev(self) -> None:
-        if self.bucket_events and self.bucket_event_index > 0:
-            self.bucket_event_index -= 1
+        if self.scope_events and self.scope_event_index > 0:
+            self.scope_event_index -= 1
             self._refresh_view(force=True)
 
     def action_timeline_next(self) -> None:
-        if self.bucket_events and self.bucket_event_index < len(self.bucket_events) - 1:
-            self.bucket_event_index += 1
+        if self.scope_events and self.scope_event_index < len(self.scope_events) - 1:
+            self.scope_event_index += 1
             self._refresh_view(force=True)
 
-    def _init_scope_from_focused_event(self) -> None:
+    def _build_scope_events(self) -> None:
+        """Find the deepest bucket for the focused event and use its latest_events."""
         run = self.test.current_run
-        if run is None:
+        if run is None or self.focused_event is None or not self.focused_event.file_path:
+            self.scope_events = []
+            self.scope_event_index = 0
             return
 
+        bucket = run.event_scope_bucket_by_event_id.get(id(self.focused_event))
+        if bucket is None:
+            bucket = self._find_deepest_bucket(
+                self.focused_event.file_path,
+                self.focused_event.line,
+            )
+
+        while bucket is not None and not bucket.latest_events:
+            bucket = bucket.parent
+
+        if bucket is None:
+            self.scope_events = []
+            self.scope_event_index = 0
+            return
+
+        self.scope_events = list(bucket.latest_events)
+
+        # Try to find the focused event's index within the bucket's events
         if self.focused_event is not None:
-            self.selected_bucket = self._find_bucket_for_event(self.focused_event)
-            if self.selected_bucket is not None:
-                self.bucket_events = list(self.selected_bucket.latest_events)
-                # Try to find the focused event's index within the bucket
-                for i, ev in enumerate(self.bucket_events):
-                    if ev.index == self.focused_event.index:
-                        self.bucket_event_index = i
-                        break
-                return
+            for i, ev in enumerate(self.scope_events):
+                if ev.index == self.focused_event.index:
+                    self.scope_event_index = i
+                    break
 
-        # Fallback: select first bucket that has events
-        for abs_path in sorted(run.scope_buckets.keys()):
-            root = run.scope_buckets[abs_path]
-            bucket = self._find_first_bucket_with_events(root)
-            if bucket is not None:
-                self.selected_bucket = bucket
-                self.bucket_events = list(bucket.latest_events)
-                self.bucket_event_index = 0
-                return
-
-    def _find_bucket_for_event(self, event: TimelineEvent) -> ScopeBucket | None:
+    def _find_deepest_bucket(self, file_path: str, line: int) -> ScopeBucket | None:
+        """Return the deepest ScopeBucket whose line range contains *line*."""
         run = self.test.current_run
-        if run is None or not event.file_path:
+        if run is None:
             return None
-        abs_path = os.path.abspath(event.file_path)
+        abs_path = os.path.abspath(file_path)
         root = run.scope_buckets.get(abs_path)
         if root is None:
             return None
-        return self._find_deepest_bucket_for_line(root, event.line)
+        return self._find_deepest_bucket_for_line(root, line)
 
     def _find_deepest_bucket_for_line(self, bucket: ScopeBucket, line: int) -> ScopeBucket | None:
         if not (bucket.start_line <= line <= bucket.end_line):
             return None
-        for child in bucket.children:
+        for child in sorted(bucket.children, key=lambda c: (c.start_line, c.end_line, c.scope_kind)):
             match = self._find_deepest_bucket_for_line(child, line)
             if match is not None:
                 return match
         return bucket
 
-    def _find_first_bucket_with_events(self, bucket: ScopeBucket) -> ScopeBucket | None:
-        if bucket.latest_events:
-            return bucket
-        for child in bucket.children:
-            match = self._find_first_bucket_with_events(child)
-            if match is not None:
-                return match
-        return None
-
     def _signature(self) -> tuple:
         return (
             self.test.state,
             self.test.time_state_changed,
-            id(self.selected_bucket),
-            self.bucket_event_index,
-            len(self.bucket_events),
+            len(self.scope_events),
+            self.scope_event_index,
         )
 
     def _tick(self) -> None:
@@ -209,30 +208,37 @@ class LexicalScopeHistoryScreen(Screen[None]):
         text.append("Scope History", style=f"bold {STORY_META_SELECTED}")
         text.append("  |  ")
         text.append(self.test.name, style="bold")
-        if self.selected_bucket is not None:
-            b = self.selected_bucket
-            text.append("  |  ")
-            text.append(f"lines {b.start_line}-{b.end_line}", style=STORY_HELP)
-            if b.latest_events:
-                text.append(f"  ({len(b.latest_events)} events)", style=STORY_HELP)
         self.header_widget.update(text)
 
     def _render_code(self) -> None:
         if self.code_widget is None:
             return
-        if not self.bucket_events:
-            if self.selected_bucket is None:
-                self.code_widget.update(Text("No scope selected.", style=STORY_HELP))
-            else:
-                self.code_widget.update(Text("No events in selected scope.", style=STORY_HELP))
+        if not self.scope_events or not (0 <= self.scope_event_index < len(self.scope_events)):
+            self.code_widget.update(Text("No events in scope.", style=STORY_HELP))
             return
 
+        current_event = self.scope_events[self.scope_event_index]
+        # Find the event's index in the global timeline so that
+        # get_story_annotations can accumulate annotations up to this point.
+        run = self.test.current_run
+        event_boundary = -1
+        if run is not None:
+            try:
+                event_boundary = run.timeline_events.index(current_event)
+            except ValueError:
+                pass
+
         from runner.story_annotations import get_story_annotations
-        annotations = get_story_annotations(self.test, cache=self.test.dwarf_cache)
+        annotations = get_story_annotations(
+            self.test,
+            event_boundary=event_boundary if event_boundary >= 0 else None,
+            cache=self.test.dwarf_cache,
+        )
+
         render_full_file_panel(
             self.code_widget,
-            self.bucket_events,
-            self.bucket_event_index,
+            [current_event],
+            0,
             self._source_cache,
             annotations=annotations,
         )
@@ -240,8 +246,8 @@ class LexicalScopeHistoryScreen(Screen[None]):
     def _render_variables(self) -> None:
         if self.vars_widget is None or self.vars_tree_widget is None:
             return
-        if not self.bucket_events or not (0 <= self.bucket_event_index < len(self.bucket_events)):
-            self.vars_widget.update(Text("Variables (no event selected)", style=STORY_HELP))
+        if not self.scope_events or not (0 <= self.scope_event_index < len(self.scope_events)):
+            self.vars_widget.update(Text("Variables (no event)", style=STORY_HELP))
             tree = self.vars_tree_widget
             tree.root.set_label("Variables")
             tree.root.remove_children()
@@ -249,17 +255,17 @@ class LexicalScopeHistoryScreen(Screen[None]):
             tree.refresh()
             return
 
-        event = self.bucket_events[self.bucket_event_index]
+        event = self.scope_events[self.scope_event_index]
         build_variables_tree(event.variables, self.vars_tree_widget, self.vars_widget)
 
     def _update_footer(self) -> None:
         if self.footer_widget is None:
             return
-        if self.bucket_events:
-            ev = self.bucket_events[self.bucket_event_index]
+        if self.scope_events:
+            ev = self.scope_events[self.scope_event_index]
             footer = Text()
             footer.append(
-                f"Event {self.bucket_event_index + 1}/{len(self.bucket_events)}",
+                f"Event {self.scope_event_index + 1}/{len(self.scope_events)}",
                 style="bold",
             )
             footer.append("  |  ")
