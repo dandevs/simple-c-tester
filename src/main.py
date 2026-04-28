@@ -95,9 +95,9 @@ def parse_args():
     )
     parser.add_argument(
         "--cflags",
-        type=str,
-        default="",
-        help="Extra compiler/linker flags (e.g. '-lreadline')",
+        nargs=argparse.REMAINDER,
+        default=[],
+        help="Extra compiler/linker flags (e.g. -lreadline -Wextra -Werror)",
     )
     return parser.parse_args()
 
@@ -112,7 +112,7 @@ async def _main():
     global_state.tsv_vars_depth = max(1, int(args.tsv_vars_depth))
     global_state.tsv_variables_height = max(3, int(args.tsv_variables_height))
     global_state.tsv_show_reason_about = bool(args.tsv_show_reason_about)
-    global_state.cflags = args.cflags
+    global_state.cflags = " ".join(args.cflags)
     global_state.story_filter_profile_preference = normalized_story_filter_profile(
         args.story_filter_profile
     )
