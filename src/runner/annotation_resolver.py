@@ -5,21 +5,9 @@ import asyncio
 from .expression_tokenizer import extract_expressions
 from .debugger import GdbMIController
 
-_MAX_VALUE_LENGTH = 40
-
 
 def _has_side_effects(expression: str) -> bool:
     return "++" in expression or "--" in expression
-
-
-def format_annotation(expression: str, value: str) -> str:
-    """Pure function, formats [expr=value] with truncation."""
-    truncated = (
-        value
-        if len(value) <= _MAX_VALUE_LENGTH
-        else value[: _MAX_VALUE_LENGTH - 3] + "..."
-    )
-    return f"[{expression}={truncated}]"
 
 
 async def _evaluate_single_expression(
@@ -36,18 +24,18 @@ async def _evaluate_single_expression(
 
 async def resolve_line_annotations(
     line_text: str, line_number: int, debugger: GdbMIController
-) -> dict[int, list[str]]:
+) -> dict[int, dict[str, str]]:
     """Extract expressions from *line_text* and evaluate them via gdb MI.
 
-    Returns a mapping of {line_number: ["[expr1=val1]", "[expr2=val2]", ...]}.
+    Returns a mapping of {line_number: {expression: value, ...}}.
     Expressions containing ``++`` or ``--`` are skipped for side-effect safety.
     Failed gdb evaluations are silently ignored.
     """
     expressions = extract_expressions(line_text)
     if not expressions:
-        return {line_number: []}
+        return {line_number: {}}
 
-    annotations: list[str] = []
+    annotations: dict[str, str] = {}
     seen: set[str] = set()
 
     for expr in expressions:
@@ -56,14 +44,14 @@ async def resolve_line_annotations(
         seen.add(expr)
         value = await _evaluate_single_expression(debugger, expr)
         if value is not None:
-            annotations.append(format_annotation(expr, value))
+            annotations[expr] = value
 
     return {line_number: annotations}
 
 
 def resolve_line_annotations_sync(
     line_text: str, line_number: int, debugger: GdbMIController
-) -> dict[int, list[str]]:
+) -> dict[int, dict[str, str]]:
     """Synchronous wrapper for :func:`resolve_line_annotations`.
 
     Safe when no event loop is running. If a loop is already active,
@@ -73,4 +61,4 @@ def resolve_line_annotations_sync(
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(resolve_line_annotations(line_text, line_number, debugger))
-    return {line_number: []}
+    return {line_number: {}}

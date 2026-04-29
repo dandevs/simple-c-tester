@@ -15,7 +15,7 @@ class TimelineEvent:
     function: str = ""
     stream: str = ""
     variables: list[tuple[str, str, str]] = field(default_factory=list)
-    line_annotations: dict[int, list[str]] = field(default_factory=dict)
+    line_annotations: dict[int, dict[str, str]] = field(default_factory=dict)
     primary_trigger: str = ""
     trigger_ids: list[str] = field(default_factory=list)
     trigger_label: str = ""

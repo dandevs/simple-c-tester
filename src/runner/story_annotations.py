@@ -1,10 +1,9 @@
 import os
-import re
 
 from models import Test
 
 
-_ANNOTATION_TOKEN_RE = re.compile(r"\[([^=\]]+)=([^\]]*)\]")
+_MAX_VALUE_LENGTH = 40
 
 
 # ---------------------------------------------------------------------------
@@ -13,29 +12,10 @@ _ANNOTATION_TOKEN_RE = re.compile(r"\[([^=\]]+)=([^\]]*)\]")
 
 def _normalize_expr(expr: str) -> str:
     """Normalise a C expression for lookup (e.g. table->count -> table.count)."""
+    import re
     expr = re.sub(r"\s*->\s*", ".", expr)
     expr = re.sub(r"\s*\.\s*", ".", expr)
     return expr
-
-
-# ---------------------------------------------------------------------------
-# Annotation string builders
-# ---------------------------------------------------------------------------
-
-def _merge_latest_annotations(annotation_strs: list[str]) -> list[str]:
-    """Parse annotation tokens and keep only the latest value per expression, preserving last-seen order."""
-    latest: dict[str, str] = {}
-    order: list[str] = []
-    for s in annotation_strs:
-        for match in _ANNOTATION_TOKEN_RE.finditer(s):
-            expr = match.group(1)
-            value = match.group(2)
-            if expr not in latest:
-                order.append(expr)
-            latest[expr] = value
-    if not latest:
-        return []
-    return [" ".join([f"[{expr}={latest[expr]}]" for expr in order])]
 
 
 # ---------------------------------------------------------------------------
@@ -69,30 +49,21 @@ def _line_text(file_path: str, line_number: int, cache=None) -> str:
 # Cache helpers
 # ---------------------------------------------------------------------------
 
-def _parse_annotation_tokens(annotation_strs: list[str]) -> dict[str, str]:
-    """Parse '[expr=value]' strings into a mapping of expr -> value."""
-    result: dict[str, str] = {}
-    for s in annotation_strs:
-        for match in _ANNOTATION_TOKEN_RE.finditer(s):
-            result[match.group(1)] = match.group(2)
-    return result
-
-
 def merge_line_annotations_into_cache(
     cache: dict[str, dict[str, dict[int, dict[str, str]]]],
     file_path: str,
     function: str,
-    line_annotations: dict[int, list[str]],
+    line_annotations: dict[int, dict[str, str]],
 ) -> None:
-    """Merge raw line_annotations into a Store A cache without a TimelineEvent."""
+    """Merge structured line_annotations into a Store A cache without a TimelineEvent."""
     if not file_path or not line_annotations:
         return
     abs_path = os.path.abspath(file_path)
     func_cache = cache.setdefault(function or "unknown", {})
     file_cache = func_cache.setdefault(abs_path, {})
-    for line_no, annotation_strs in line_annotations.items():
+    for line_no, expr_map in line_annotations.items():
         line_cache = file_cache.setdefault(line_no, {})
-        line_cache.update(_parse_annotation_tokens(annotation_strs))
+        line_cache.update(expr_map)
 
 
 def _merge_event_annotations_into(
@@ -110,6 +81,15 @@ def _merge_event_annotations_into(
     )
 
 
+def _format_annotation(expr: str, value: str) -> str:
+    truncated = (
+        value
+        if len(value) <= _MAX_VALUE_LENGTH
+        else value[: _MAX_VALUE_LENGTH - 3] + "..."
+    )
+    return f"[{expr}={truncated}]"
+
+
 def _cache_to_annotations(
     cache: dict[str, dict[str, dict[int, dict[str, str]]]]
 ) -> dict[str, dict[int, list[str]]]:
@@ -122,7 +102,7 @@ def _cache_to_annotations(
                 if not expr_map:
                     continue
                 file_result[line_no] = [
-                    " ".join([f"[{expr}={expr_map[expr]}]" for expr in expr_map])
+                    " ".join([_format_annotation(expr, expr_map[expr]) for expr in expr_map])
                 ]
     return result
 

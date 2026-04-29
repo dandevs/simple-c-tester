@@ -138,7 +138,7 @@ def _append_timeline_event(
     stream: str = "",
     variables: list[tuple[str, str, str]] | None = None,
     program_counter: int = 0,
-    line_annotations: dict[int, list[str]] | None = None,
+    line_annotations: dict[int, dict[str, str]] | None = None,
     primary_trigger: str = "",
     trigger_ids: list[str] | None = None,
     trigger_label: str = "",
@@ -917,10 +917,10 @@ async def _record_stop_event(
     variables: list[tuple[str, str, str]] | None = None,
     trigger_matches: list[TriggerMatch] | None = None,
     debugger: GdbMIController | None = None,
-    line_annotations: dict[int, list[str]] | None = None,
+    line_annotations: dict[int, dict[str, str]] | None = None,
 ) -> None:
     runtime_variables = list(variables or [])
-    resolved_annotations: dict[int, list[str]] = {}
+    resolved_annotations: dict[int, dict[str, str]] = {}
     if line_annotations is not None:
         resolved_annotations = line_annotations
     elif debugger is not None and stop_event.file_path and stop_event.line > 0:
@@ -1332,7 +1332,7 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
             line=stop_event.line,
             cache=test.dwarf_cache,
         )
-        line_annotations: dict[int, list[str]] = {}
+        line_annotations: dict[int, dict[str, str]] = {}
         if stop_event.file_path and stop_event.line > 0:
             source_line = _line_text(stop_event.file_path, stop_event.line, cache=test.dwarf_cache)
             if source_line:
