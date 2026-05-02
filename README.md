@@ -1,3 +1,9 @@
+<p align="center"><strong>ctester</strong></p>
+
+<p align="center">
+  <video src="assets/ctester.webm" controls width="720"></video>
+</p>
+
 # simple-c-tester
 
 simple-c-tester is a C test runner with a Textual TUI.
