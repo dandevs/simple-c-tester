@@ -1,7 +1,7 @@
 <p align="center"><strong>ctester</strong></p>
 
 <p align="center">
-  <video src="https://raw.githubusercontent.com/dandevs/simple-c-tester/main/assets/ctester.webm" controls width="720"></video>
+  <video src="https://media.githubusercontent.com/media/dandevs/simple-c-tester/refs/heads/main/assets/ctester.webm" controls width="720"></video>
 </p>
 
 # simple-c-tester
