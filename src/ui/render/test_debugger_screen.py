@@ -1,7 +1,9 @@
 import os
 import asyncio
 import time
+from rich.console import Console, Group
 from rich.text import Text
+from rich.cells import cell_len
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -34,6 +36,7 @@ from runner import (
 )
 from runner.story_filters import normalized_story_filter_profile
 from runner.story_annotations import invalidate_story_annotation_cache
+from .clipboard import copy_to_clipboard
 from .test_debugger_screen_utils import (
     display_path,
     detect_language,
@@ -295,6 +298,11 @@ class TestDebuggerScreen(Screen[None]):
         self.full_file_view = False
         self._follow_latest_frame = True
         self._mouse_dragging = False
+        # Code panel text selection (click-drag to select + copy)
+        self._code_plain_lines: list[str] = []
+        self._code_selection_anchor: tuple[int, int] | None = None
+        self._code_selection_cursor: tuple[int, int] | None = None
+        self._code_selection_active = False
 
     def compose(self) -> ComposeResult:
         yield Static("", id="debug-header")
@@ -671,13 +679,20 @@ class TestDebuggerScreen(Screen[None]):
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         self._handle_timeline_click(event)
+        if not self._mouse_dragging:
+            self._handle_code_selection_start(event)
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         if self._mouse_dragging:
             self._handle_timeline_drag(event)
+        elif self._code_selection_active:
+            self._handle_code_selection_extend(event)
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
-        self._mouse_dragging = False
+        if self._mouse_dragging:
+            self._mouse_dragging = False
+        elif self._code_selection_active:
+            self._handle_code_selection_finish(event)
 
     def _index_from_column(self, col: int, width: int, total: int) -> int:
         if total <= 1:
@@ -745,6 +760,144 @@ class TestDebuggerScreen(Screen[None]):
         self.selected_frame_index = ensure_selected_frame_index(new_index, total)
         self._update_selected_event_index_from_frame(frames[self.selected_frame_index])
         self._refresh_view(force=True)
+
+    # ----- Code panel text selection (click-drag to copy) ---------------
+
+    def _handle_code_selection_start(self, event: events.MouseDown) -> None:
+        """Begin a text selection in the code panel (below the timeline bar)."""
+        if self.code_widget is None:
+            return
+        pos = self._code_mouse_to_position(event)
+        if pos is None or pos[0] == 0:
+            return  # line 0 is the timeline bar — skip
+        self._capture_code_plain_text()
+        self._code_selection_anchor = pos
+        self._code_selection_cursor = pos
+        self._code_selection_active = True
+        event.prevent_default()
+        event.stop()
+
+    def _handle_code_selection_extend(self, event: events.MouseMove) -> None:
+        """Extend the selection during drag."""
+        pos = self._code_mouse_to_position(event)
+        if pos is None or pos == self._code_selection_cursor:
+            return
+        self._code_selection_cursor = pos
+        self._render_code_with_selection()
+
+    def _handle_code_selection_finish(self, event: events.MouseUp) -> None:
+        """Finish selection: copy to clipboard and restore normal rendering."""
+        pos = self._code_mouse_to_position(event)
+        if pos is not None:
+            self._code_selection_cursor = pos
+        selected_text = self._extract_code_selection()
+        self._code_selection_active = False
+        self._code_selection_anchor = None
+        self._code_selection_cursor = None
+        self._refresh_view(force=True)
+        if selected_text:
+            if copy_to_clipboard(selected_text):
+                self._set_footer_text(f"Copied {len(selected_text)} chars to clipboard.")
+            else:
+                self._set_footer_text(
+                    "Clipboard unavailable. Install pyperclip, wl-copy, or xclip.",
+                    warning=True,
+                )
+        event.prevent_default()
+        event.stop()
+
+    def _code_mouse_to_position(self, event: events.MouseEvent) -> tuple[int, int] | None:
+        """Map a mouse event to a (line_index, char_index) in the code panel."""
+        if self.code_widget is None or not self._code_plain_lines:
+            return None
+        offset = event.get_content_offset(self.code_widget)
+        if offset is None:
+            return None
+        vy = max(0, int(offset.y + self.code_widget.scroll_y))
+        vx = max(0, int(offset.x + self.code_widget.scroll_x))
+        line_idx = min(vy, len(self._code_plain_lines) - 1)
+        line_text = self._code_plain_lines[line_idx]
+        col = self._visual_column_to_index(line_text, vx)
+        return (line_idx, col)
+
+    def _capture_code_plain_text(self) -> None:
+        """Export the current code widget renderable to plain text lines."""
+        if self.code_widget is None:
+            self._code_plain_lines = []
+            return
+        renderable = getattr(self.code_widget, "_renderable", None)
+        if renderable is None:
+            self._code_plain_lines = []
+            return
+        width = max(20, self.code_widget.size.width or 80)
+        console = Console(record=True, width=width, force_terminal=False, color_system=None)
+        console.print(renderable)
+        text = console.export_text()
+        self._code_plain_lines = text.rstrip("\n").split("\n")
+
+    def _code_selection_bounds(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        if self._code_selection_anchor is None or self._code_selection_cursor is None:
+            return None
+        start = self._clamp_code_position(self._code_selection_anchor)
+        end = self._clamp_code_position(self._code_selection_cursor)
+        if start is None or end is None or start == end:
+            return None
+        return (start, end) if start <= end else (end, start)
+
+    def _clamp_code_position(self, pos: tuple[int, int]) -> tuple[int, int] | None:
+        if not self._code_plain_lines:
+            return None
+        li = min(max(0, pos[0]), len(self._code_plain_lines) - 1)
+        length = len(self._code_plain_lines[li])
+        ci = min(max(0, pos[1]), length)
+        return (li, ci)
+
+    def _extract_code_selection(self) -> str:
+        selection = self._code_selection_bounds()
+        if selection is None:
+            return ""
+        (sl, sc), (el, ec) = selection
+        if sl == el:
+            return self._code_plain_lines[sl][sc:ec]
+        parts = [self._code_plain_lines[sl][sc:]]
+        for li in range(sl + 1, el):
+            parts.append(self._code_plain_lines[li])
+        parts.append(self._code_plain_lines[el][:ec])
+        return "\n".join(parts)
+
+    def _render_code_with_selection(self) -> None:
+        """Re-render the code panel as plain text with selection highlights."""
+        if self.code_widget is None or not self._code_plain_lines:
+            return
+        self._capture_code_plain_text()
+        lines = [Text(line) for line in self._code_plain_lines]
+        selection = self._code_selection_bounds()
+        if selection is not None:
+            (sl, sc), (el, ec) = selection
+            for li in range(sl, el + 1):
+                if li >= len(lines):
+                    break
+                rs = sc if li == sl else 0
+                re = ec if li == el else len(lines[li].plain)
+                if rs < re:
+                    lines[li].stylize("reverse", rs, re)
+        self.code_widget.update(Group(*lines))
+
+    @staticmethod
+    def _visual_column_to_index(line: str, visual_column: int) -> int:
+        """Map a visual column offset to a character index (handles wide chars)."""
+        if visual_column <= 0 or not line:
+            return 0
+        current = 0
+        for index, char in enumerate(line):
+            width = max(1, cell_len(char))
+            next_col = current + width
+            if visual_column < next_col:
+                return index
+            if visual_column == next_col:
+                return index + 1
+            current = next_col
+        return len(line)
 
     async def _run_action(
         self,
@@ -1106,6 +1259,11 @@ class TestDebuggerScreen(Screen[None]):
                 self._source_cache,
                 test=self.test,
             )
+
+        # If text selection is active, overlay selection highlights on the
+        # freshly rendered content.
+        if self._code_selection_active:
+            self._render_code_with_selection()
 
     def _render_variables_panel(self, selected_event) -> None:
         if self.vars_widget is None or self.vars_tree_widget is None:

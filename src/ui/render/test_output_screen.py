@@ -1,5 +1,3 @@
-import shutil
-import subprocess
 import os
 import asyncio
 import time
@@ -18,6 +16,7 @@ import state as global_state
 from core.models import Test, TestState
 from .output import get_test_output
 from .styles import TREE_META_STYLE
+from .clipboard import copy_to_clipboard
 from runner import (
     start_debug_session,
     stop_debug_session,
@@ -134,7 +133,7 @@ class TestOutputScreen(Screen[None]):
             event.stop()
             return
 
-        if self._copy_to_clipboard(selected_text):
+        if copy_to_clipboard(selected_text):
             self._set_footer_text("Copied selection to clipboard.")
         else:
             self._set_footer_text(
@@ -281,35 +280,6 @@ class TestOutputScreen(Screen[None]):
                 selected_lines.append(line)
 
         return "\n".join(selected_lines)
-
-    def _copy_to_clipboard(self, text: str) -> bool:
-        try:
-            import pyperclip
-
-            pyperclip.copy(text)
-            return True
-        except Exception:
-            pass
-
-        for command in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
-            executable = command[0]
-            if shutil.which(executable) is None:
-                continue
-            try:
-                result = subprocess.run(
-                    command,
-                    input=text,
-                    text=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-                if result.returncode == 0:
-                    return True
-            except Exception:
-                continue
-
-        return False
 
     def _lines_with_selection(self) -> list[Text]:
         display_lines = [line.copy() for line in self._render_lines]

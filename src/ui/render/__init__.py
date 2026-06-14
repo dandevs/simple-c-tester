@@ -15,6 +15,7 @@ from .output import (
     get_test_output,
     render_output_box,
 )
+from .clipboard import copy_to_clipboard
 from .tree import render_tree, render_tree_stdout
 from .test_output_screen import TestOutputScreen
 from .test_debugger_screen import TestDebuggerScreen
@@ -33,6 +34,7 @@ __all__ = [
     "render_output_box",
     "render_tree",
     "render_tree_stdout",
+    "copy_to_clipboard",
     "TestOutputScreen",
     "TestDebuggerScreen",
 ]
