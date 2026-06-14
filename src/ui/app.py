@@ -185,8 +185,8 @@ class TestRunnerApp(App[None]):
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "Exit", priority=True),
-        Binding("/", "focus_search", "Search", priority=True),
-        Binding("escape", "clear_search", "Clear", priority=True),
+        Binding("/", "focus_search", "Search"),
+        Binding("escape", "clear_search", "Clear"),
         Binding("f", "fold_all", "Fold All"),
         Binding("u", "unfold_all", "Unfold All"),
     ]
@@ -283,11 +283,19 @@ class TestRunnerApp(App[None]):
             self.search_query = event.value
             self._dirty = True
 
+    def _on_main_screen(self) -> bool:
+        """True when no sub-screen (story view, output, modal) is active."""
+        return len(self.screen_stack) <= 1
+
     def action_focus_search(self) -> None:
+        if not self._on_main_screen():
+            return
         if self.search_widget is not None:
             self.search_widget.focus()
 
     def action_clear_search(self) -> None:
+        if not self._on_main_screen():
+            return
         if self.search_widget is None:
             return
         if self.search_widget.value:
@@ -300,10 +308,14 @@ class TestRunnerApp(App[None]):
     # ----- Fold / unfold ------------------------------------------------
 
     def action_fold_all(self) -> None:
+        if not self._on_main_screen():
+            return
         self.collapsed_suites = _collect_all_suite_keys(state.root_suite)
         self._dirty = True
 
     def action_unfold_all(self) -> None:
+        if not self._on_main_screen():
+            return
         self.collapsed_suites.clear()
         self._dirty = True
 
