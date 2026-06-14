@@ -204,7 +204,7 @@ class TestRunnerApp(App[None]):
         min-height: 1;
         padding: 0 1;
         background: transparent;
-        color: ansi_bright_black;
+        color: ansi_white;
     }
     """
 

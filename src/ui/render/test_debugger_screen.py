@@ -225,7 +225,7 @@ class TestDebuggerScreen(Screen[None]):
         height: 1;
         min-height: 1;
         padding: 0 1;
-        color: ansi_bright_black;
+        color: ansi_white;
     }
     """
 

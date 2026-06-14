@@ -113,12 +113,12 @@ def _test_label_base(test: Test, now: float) -> Text:
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.PASSED:
-        text = Text(f"{ICON_PASS} ", style="bright_green")
-        text.append(test.name, style=TEST_DEFAULT_STYLE)
+        text = Text(f"{ICON_PASS} ", style="bold bright_green")
+        text.append(test.name, style="bold bright_green")
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.FAILED:
-        text = Text(f"{ICON_FAIL} ", style="bright_red")
+        text = Text(f"{ICON_FAIL} ", style="bold bright_red")
         text.append(test.name, style="bold bright_red")
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
