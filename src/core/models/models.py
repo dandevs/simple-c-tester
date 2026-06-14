@@ -63,6 +63,10 @@ class TestRun:
     annotation_cache: dict[str, dict[str, dict[int, dict[str, str]]]] = field(
         default_factory=dict
     )
+    # UI render cache: keyed by (width, max_lines, prefix_len) ->
+    # (content_signature, rendered_lines, render_meta).  Automatically
+    # invalidated when a fresh TestRun is created (every run).
+    output_box_cache: dict[tuple, tuple] = field(default_factory=dict)
 
 
 @dataclass

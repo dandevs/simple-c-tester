@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 
 from rich.text import Text
 from textual import events
@@ -239,6 +240,7 @@ class TestRunnerApp(App[None]):
         self._pending_makefile_regen = False
         self._last_makefile_columns = 0
         self._dirty = False
+        self._last_tree_render = 0.0  # monotonic timestamp of last full render
         self.collapsed_suites: set[str] = set()
         self.search_query: str = ""
         self._last_visible_keys: set[str] = set()
@@ -507,6 +509,12 @@ class TestRunnerApp(App[None]):
 
     # ----- Paint loop ---------------------------------------------------
 
+    # Cosmetic-only renders (spinner animation, elapsed-time counter) are
+    # throttled to every 300ms.  Real state-change events set _dirty and
+    # render immediately.  This cuts render frequency ~70% during long
+    # compiles where nothing but the spinner changes.
+    COSMETIC_RENDER_INTERVAL = 0.3
+
     def _paint_tick(self) -> None:
         """Housekeeping + dirty-flag paint loop."""
         refresh_editor_breakpoints_cache()
@@ -523,9 +531,16 @@ class TestRunnerApp(App[None]):
         if self.status_widget is not None:
             self.status_widget.update(_build_status_line())
 
-        if self._dirty or has_active_tests():
+        now = time.monotonic()
+        if self._dirty:
             self._render_tree()
             self._dirty = False
+            self._last_tree_render = now
+        elif has_active_tests() and (
+            now - self._last_tree_render
+        ) >= self.COSMETIC_RENDER_INTERVAL:
+            self._render_tree()
+            self._last_tree_render = now
 
         # Visibility-priority: preempt non-visible running tests so visible
         # pending tests get slots.  Only fires when the visible set changes.

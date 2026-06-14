@@ -1,6 +1,6 @@
 import time
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.text import Text
 from textual.widgets import RichLog
 
@@ -8,7 +8,7 @@ from state import state
 from core.models import Test, Suite
 from .styles import TREE_GUIDE_STYLE, OutputBoxRegion, TestRowRegion, SuiteRowRegion
 from .labels import suite_label, test_label
-from .output import get_test_output, render_output_box
+from .output import get_cached_output_box
 
 
 class _ConsoleApp:
@@ -17,12 +17,23 @@ class _ConsoleApp:
 
 
 class ConsoleWriter:
+    """Adapter so ``render_tree`` can write to a plain rich Console.
+
+    ``render_tree`` batch-writes a single ``Group`` of all lines.  A plain
+    Console renders a Group differently than individual prints (width/overflow
+    handling differs), so we unwrap Groups back to per-line prints here.
+    """
+
     def __init__(self, console: Console):
         self.console = console
         self.app = _ConsoleApp(console)
 
-    def write(self, text):
-        self.console.print(text)
+    def write(self, renderable):
+        if isinstance(renderable, Group):
+            for child in renderable.renderables:
+                self.console.print(child)
+        else:
+            self.console.print(renderable)
 
 
 def render_tree_stdout(output_max_lines: int, width: int):
@@ -90,6 +101,7 @@ def render_tree(
     rendered_boxes: list[OutputBoxRegion] = []
     rendered_test_rows: list[TestRowRegion] = []
     rendered_suite_rows: list[SuiteRowRegion] = []
+    collected_lines: list[Text] = []
 
     ctx = _Ctx(
         log=log,
@@ -101,11 +113,12 @@ def render_tree(
         boxes=rendered_boxes,
         test_rows=rendered_test_rows,
         suite_rows=rendered_suite_rows,
+        lines=collected_lines,
     )
 
     root = state.root_suite
     label = suite_label(root, ctx.now, collapsed=False)
-    log.write(label)
+    collected_lines.append(label)
     cursor = 1
 
     children = _visible_children(root, query)
@@ -113,8 +126,13 @@ def render_tree(
         is_last = i == len(children) - 1
         cursor = _render_node(child, "", "", is_last, ctx, cursor)
         if isinstance(child, Suite) and not is_last:
-            ctx.log.write(Text())
+            collected_lines.append(Text())
             cursor += 1
+
+    # Batch write: a single Group write is dramatically cheaper than
+    # hundreds of individual RichLog.write() calls (each of which triggers
+    # widget refresh + line-metadata bookkeeping in Textual).
+    log.write(Group(*collected_lines))
 
     return rendered_boxes, rendered_test_rows, rendered_suite_rows
 
@@ -124,7 +142,7 @@ class _Ctx:
 
     __slots__ = (
         "log", "now", "output_max_lines", "total_width",
-        "collapsed", "query", "boxes", "test_rows", "suite_rows",
+        "collapsed", "query", "boxes", "test_rows", "suite_rows", "lines",
     )
 
     def __init__(self, **kw):
@@ -161,7 +179,7 @@ def _render_test(
     guide = Text(prefix + connector, style=TREE_GUIDE_STYLE)
     label = test_label(test, ctx.now, ctx.query)
     row = guide + label
-    ctx.log.write(row)
+    ctx.lines.append(row)
     ctx.test_rows.append(
         TestRowRegion(
             test_key=test.source_path,
@@ -172,13 +190,13 @@ def _render_test(
     )
     cursor += 1
 
-    output = get_test_output(test)
-    if output:
+    cached = get_cached_output_box(
+        test, child_prefix, ctx.output_max_lines, ctx.total_width, ctx.log,
+    )
+    if cached is not None:
+        box_lines, render_meta = cached
         start_line = cursor
-        render_meta = render_output_box(
-            output, test, child_prefix, ctx.log,
-            ctx.output_max_lines, ctx.total_width,
-        )
+        ctx.lines.extend(box_lines)
         cursor += render_meta.rendered_lines
         ctx.boxes.append(
             OutputBoxRegion(
@@ -208,7 +226,7 @@ def _render_suite(
     guide = Text(prefix + connector, style=TREE_GUIDE_STYLE)
     label = suite_label(suite, ctx.now, collapsed=is_collapsed)
     row = guide + label
-    ctx.log.write(row)
+    ctx.lines.append(row)
 
     # Track the suite name portion for click detection (exclude guide).
     name_start = len(prefix + connector)

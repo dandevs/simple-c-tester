@@ -9,6 +9,11 @@ from .styles import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Raw output extraction (uncached — used by output screen which renders
+# differently and re-runs infrequently).
+# ---------------------------------------------------------------------------
+
 def get_test_output(test: Test) -> list[Text] | None:
     sections: list[Text] = []
 
@@ -60,6 +65,10 @@ def _strip_trailing(sections: list[Text]) -> list[Text] | None:
     return sections if sections else None
 
 
+# ---------------------------------------------------------------------------
+# Output-box line building (pure — returns lines, does not write to log).
+# ---------------------------------------------------------------------------
+
 def _text_visual_width(text: Text) -> int:
     return max((len(line) for line in text.split(allow_blank=True)), default=0)
 
@@ -98,14 +107,18 @@ def _wrap_output_lines(
     return wrapped if wrapped else [Text()]
 
 
-def render_output_box(
+def _build_box_lines(
     output_lines: list[Text],
     test: Test,
     child_prefix: str,
-    log,
     max_lines: int,
     max_total_width: int,
-) -> OutputBoxRenderMeta:
+    log,
+) -> tuple[list[Text], OutputBoxRenderMeta]:
+    """Build the full output-box render as a list of Text lines.
+
+    Returns (lines, meta) — caller is responsible for writing to the log.
+    """
     max_lines = max(1, max_lines)
 
     border_overhead = 6
@@ -124,9 +137,11 @@ def render_output_box(
     )
     dashes = "─" * box_inner_width
 
+    lines: list[Text] = []
+
     top = Text(child_prefix, style=TREE_GUIDE_STYLE)
     top.append("└── ╭" + dashes + "╮", style=border_style)
-    log.write(top)
+    lines.append(top)
 
     for line in visible_lines:
         padded = line.copy()
@@ -140,15 +155,94 @@ def render_output_box(
         content_line.append("│ ", style=border_style)
         content_line.append(padded)
         content_line.append(" │", style=border_style)
-        log.write(content_line)
+        lines.append(content_line)
 
     bottom = Text(child_prefix, style=TREE_GUIDE_STYLE)
     bottom.append("    ╰" + dashes + "╯", style=border_style)
-    log.write(bottom)
+    lines.append(bottom)
 
     top_length = len(child_prefix) + len("└── " + dashes + "╮")
-    return OutputBoxRenderMeta(
+    meta = OutputBoxRenderMeta(
         rendered_lines=len(visible_lines) + 2,
         left_col=len(child_prefix),
         right_col=max(0, top_length - 1),
     )
+    return lines, meta
+
+
+# ---------------------------------------------------------------------------
+# Cached public API — eliminates redundant byte decoding + ANSI parsing +
+# line wrapping on every frame for finished tests whose output never changes.
+# ---------------------------------------------------------------------------
+
+def _output_signature(test: Test) -> tuple:
+    """Cheap content fingerprint for cache invalidation."""
+    run = test.current_run
+    if run is None:
+        return ()
+    return (
+        test.state,
+        len(run.compile_err_raw), run.compile_err_raw[:64],
+        len(run.stderr_raw), run.stderr_raw[:64],
+        len(run.stdout_raw), run.stdout_raw[:64],
+    )
+
+
+def get_cached_output_box(
+    test: Test,
+    child_prefix: str,
+    max_lines: int,
+    max_total_width: int,
+    log,
+) -> tuple[list[Text], OutputBoxRenderMeta] | None:
+    """Return (rendered_lines, meta) for ``test``'s output box, using a cache
+    stored on ``test.current_run`` to skip redundant work.
+
+    Returns ``None`` when the test has no output to display.
+    """
+    output_lines = get_test_output(test)
+    if not output_lines:
+        return None
+
+    run = test.current_run
+    cache = run.output_box_cache if run is not None else None
+    sig = _output_signature(test)
+    cache_key = (len(child_prefix), max_lines, max_total_width)
+
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            cached_sig, cached_lines, cached_meta = cached
+            if cached_sig == sig:
+                return cached_lines, cached_meta
+
+    lines, meta = _build_box_lines(
+        output_lines, test, child_prefix, max_lines, max_total_width, log
+    )
+
+    if cache is not None:
+        cache[cache_key] = (sig, lines, meta)
+
+    return lines, meta
+
+
+# ---------------------------------------------------------------------------
+# Legacy write-directly API — kept for any callers that write incrementally.
+# tree.py now uses get_cached_output_box + batch write instead.
+# ---------------------------------------------------------------------------
+
+def render_output_box(
+    output_lines: list[Text],
+    test: Test,
+    child_prefix: str,
+    log,
+    max_lines: int,
+    max_total_width: int,
+) -> OutputBoxRenderMeta:
+    """Build box lines and write them to ``log`` immediately."""
+    lines, meta = _build_box_lines(
+        output_lines, test, child_prefix, max_lines, max_total_width, log
+    )
+    for line in lines:
+        log.write(line)
+    return meta
