@@ -37,6 +37,7 @@ from runner import (
 from runner.story_filters import normalized_story_filter_profile
 from runner.story_annotations import invalidate_story_annotation_cache
 from .clipboard import copy_to_clipboard
+from .labels import test_elapsed_seconds
 from .test_debugger_screen_utils import (
     display_path,
     detect_language,
@@ -68,25 +69,25 @@ class DebugControlsModal(ModalScreen[None]):
         max-width: 92vw;
         height: auto;
         max-height: 85vh;
-        border: round #6ea8fe;
-        background: #1f232b;
+        border: round ansi_blue;
+        background: transparent;
         padding: 1 2;
     }
     #controls-title {
         text-style: bold;
-        color: #ffd166;
+        color: ansi_yellow;
         margin: 0 0 1 0;
     }
     #controls-body {
-        color: #d8dee9;
+        color: default;
     }
     #controls-hint {
-        color: #7f8a9d;
+        color: dim;
         margin: 1 0 0 0;
     }
     #profile-title {
         text-style: bold;
-        color: #ffd166;
+        color: ansi_yellow;
         margin: 1 0 0 0;
     }
     #profile-row {
@@ -145,9 +146,9 @@ class DebugControlsModal(ModalScreen[None]):
         key_width = max(len(key) for key, _ in controls)
         body = Text()
         for index, (key, description) in enumerate(controls):
-            body.append(key.ljust(key_width), style="bold #89dceb")
+            body.append(key.ljust(key_width), style="bold ansi_cyan")
             body.append("    ")
-            body.append(description, style="#d8dee9")
+            body.append(description, style="default")
             if index < len(controls) - 1:
                 body.append("\n")
 
@@ -190,6 +191,7 @@ class TestDebuggerScreen(Screen[None]):
         min-height: 1;
         padding: 0 1;
         text-style: bold;
+        border-bottom: solid ansi_bright_black;
     }
     #debug-body {
         height: 1fr;
@@ -211,6 +213,7 @@ class TestDebuggerScreen(Screen[None]):
         min-height: 1;
         padding: 0 1;
         border: none;
+        border-top: solid ansi_bright_black;
     }
     #vars-tree {
         height: 10;
@@ -224,18 +227,19 @@ class TestDebuggerScreen(Screen[None]):
         height: 1;
         min-height: 1;
         padding: 0 1;
-        color: #8f96a3;
+        color: ansi_bright_black;
+        border-top: solid ansi_bright_black;
     }
     """
 
-    STORY_BAR_BASE = "#2e3440"
-    STORY_BAR_WINDOW = "#4c566a"
-    STORY_BAR_ACTIVE = "#6ea8fe"
-    STORY_BAR_SELECTED = "#ffd166"
-    STORY_META_HIGHLIGHT = "#89dceb"
-    STORY_META_SELECTED = "#ffd166"
-    STORY_HELP = "#7f8a9d"
-    STORY_LINE_MARKER = "#ff6b6b"
+    STORY_BAR_BASE = "dim"
+    STORY_BAR_WINDOW = "dim"
+    STORY_BAR_ACTIVE = "ansi_blue"
+    STORY_BAR_SELECTED = "bright_yellow"
+    STORY_META_HIGHLIGHT = "bright_cyan"
+    STORY_META_SELECTED = "bright_yellow"
+    STORY_HELP = "dim"
+    STORY_LINE_MARKER = "bright_red"
     STORY_CODE_BG = "#272822"
     STORY_CURRENT_LINE = "#34352d"
     STORY_CURRENT_LINE_SELECTED = "#49483e"
@@ -986,10 +990,20 @@ class TestDebuggerScreen(Screen[None]):
             compile_err,
         )
 
-    def _base_footer_text(self) -> str:
+    def _base_footer_text(self) -> Text:
         if not self._line_frames():
-            return "No story yet. Press R to run. ? - Help"
-        return "Story loaded. ? - Help"
+            text = Text()
+            text.append("No story yet. Press ")
+            text.append("R", style="bold")
+            text.append(" to run. ", style="dim")
+            text.append("?", style="bold")
+            text.append(" - Help", style="dim")
+            return text
+        text = Text()
+        text.append("Story loaded. ")
+        text.append("?", style="bold")
+        text.append(" - Help", style="dim")
+        return text
 
     def _set_footer_text(
         self,
@@ -1000,7 +1014,7 @@ class TestDebuggerScreen(Screen[None]):
         if self.footer_widget is None:
             return
         if message is None:
-            self.footer_widget.update(Text(self._base_footer_text(), style="bright_black"))
+            self.footer_widget.update(self._base_footer_text())
             return
 
         style = "yellow" if warning else "bright_black"
@@ -1333,6 +1347,38 @@ class TestDebuggerScreen(Screen[None]):
         )
         self.vars_tree_widget.scroll_to(y=target_scroll, animate=False, immediate=True)
 
+    def _build_header_text(self) -> Text:
+        """Build the two-line story/debug header with status badge."""
+        now = time.monotonic()
+        elapsed_ms = int(test_elapsed_seconds(self.test, now) * 1000)
+
+        if self.test.state == TestState.PASSED:
+            icon, label, badge_style = "\u2713", "PASSED", "bright_green"
+        elif self.test.state == TestState.FAILED:
+            icon, label, badge_style = "\u2717", "FAILED", "bright_red"
+        elif self.test.state == TestState.RUNNING:
+            icon, label, badge_style = "\u25cf", "RUNNING", "bright_yellow"
+        else:
+            icon, label, badge_style = "\u25cb", self.test.state.value, "dim"
+
+        header = Text()
+        header.append(self.test.name, style="bold")
+        header.append(" ", style="dim")
+        header.append(f"{icon} {label}", style=badge_style)
+        if elapsed_ms > 0:
+            header.append(f" \u00b7 {elapsed_ms}ms", style="dim")
+
+        debug_status = "active" if is_debug_active(self.test) else "idle"
+        precision = self.test.debug_precision_mode
+        timeline_status = "on" if self.test.timeline_capture_enabled or global_state.timeline_capture_enabled else "off"
+        profile = self.test.story_filter_profile
+
+        header.append(
+            f"  Debug: {debug_status} ({precision}) \u2502 Recording: {timeline_status} \u2502 Filter: {profile}",
+            style="dim",
+        )
+        return header
+
     def _refresh_view(self, force: bool = False) -> None:
         signature = self._signature()
         if not force and signature == self.last_signature:
@@ -1357,16 +1403,8 @@ class TestDebuggerScreen(Screen[None]):
                 save_debug_line(selected.file_path, selected.line)
 
         if self.header_widget is not None:
-            status = self.test.state.value
-            debug_status = "active" if is_debug_active(self.test) else "idle"
-            timeline_status = "on" if self.test.timeline_capture_enabled or global_state.timeline_capture_enabled else "off"
-            precision = self.test.debug_precision_mode
-            profile = self.test.story_filter_profile
-            self.header_widget.update(
-                Text(
-                    f"Test Story: {self.test.name} [{status}]  Debug: {debug_status} ({precision})  Recording: {timeline_status}  Filter: {profile}"
-                )
-            )
+            header = self._build_header_text()
+            self.header_widget.update(header)
 
         self._render_code_panel()
         self._render_variables_panel(selected)

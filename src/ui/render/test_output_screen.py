@@ -50,6 +50,7 @@ class TestOutputScreen(Screen[None]):
         padding: 0 1;
         background: transparent;
         color: ansi_bright_black;
+        border-top: solid ansi_bright_black;
     }
     """
 
@@ -166,14 +167,22 @@ class TestOutputScreen(Screen[None]):
     def _tick(self) -> None:
         self._render_output()
 
-    def _base_footer_text(self) -> str:
-        return f"Output: {self.test.name}  |  Drag: Select + Copy  |  Ctrl+C/Esc: Go Back"
+    def _base_footer_text(self) -> Text:
+        text = Text()
+        text.append(f"{self.test.name}", style="bold")
+        text.append(" \u2502 ", style="dim")
+        text.append("Drag", style="bold")
+        text.append(" Select + Copy", style="dim")
+        text.append(" \u2502 ", style="dim")
+        text.append("Ctrl+C/Esc", style="bold")
+        text.append(" Go Back", style="dim")
+        return text
 
     def _set_footer_text(self, message: str | None = None, warning: bool = False) -> None:
         if self.footer_widget is None:
             return
         if message is None:
-            self.footer_widget.update(Text(self._base_footer_text(), style="bright_black"))
+            self.footer_widget.update(self._base_footer_text())
             return
 
         style = "yellow" if warning else "bright_black"
@@ -191,9 +200,20 @@ class TestOutputScreen(Screen[None]):
     def _build_output_lines(self) -> list[Text]:
         lines: list[Text] = []
 
-        title = Text("Output: ", style="bold")
+        if self.test.state == TestState.FAILED:
+            badge_text = "\u2717 FAILED"
+            badge_style = "bright_red"
+        elif self.test.state == TestState.PASSED:
+            badge_text = "\u2713 PASSED"
+            badge_style = "bright_green"
+        else:
+            badge_text = f"\u25cf {self.test.state.value}"
+            badge_style = "bright_yellow"
+
+        title = Text()
+        title.append(" ")
         title.append(self.test.name, style="bold")
-        title.append(f" [{self.test.state.value}]", style=TREE_META_STYLE)
+        title.append(f"  {badge_text}", style=badge_style)
         lines.append(title)
         lines.append(Text(self.test.source_path, style=TREE_META_STYLE))
         lines.append(Text())

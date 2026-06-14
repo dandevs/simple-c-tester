@@ -8,13 +8,13 @@ import state as global_state
 from runner.story_annotations import get_story_annotations
 from .source_utils import display_path, detect_language, load_source_lines
 
-STORY_META_HIGHLIGHT = "#89dceb"
-STORY_META_SELECTED = "#ffd166"
-STORY_HELP = "#7f8a9d"
+STORY_META_HIGHLIGHT = "bright_cyan"
+STORY_META_SELECTED = "bright_yellow"
+STORY_HELP = "dim"
 STORY_CODE_BG = "#272822"
 STORY_CURRENT_LINE = "#34352d"
 STORY_CURRENT_LINE_SELECTED = "#49483e"
-STORY_BAR_BASE = "#2e3440"
+STORY_BAR_BASE = "dim"
 
 
 def build_frame_snippet(
@@ -56,7 +56,7 @@ def build_frame_snippet(
     if not selected:
         for local_line in range(1, line_count + 1):
             syntax.stylize_range(
-                "#9aa0a6",
+                "dim",
                 (local_line, 0),
                 (local_line, padded_width),
             )
@@ -85,32 +85,30 @@ def build_frame_title(event, selected):
 
     title = Text()
     if selected:
-        title.append(">> ", style=f"bold {STORY_META_SELECTED}")
-        title.append(path_text, style=f"bold {STORY_META_SELECTED}")
+        title.append("\u25b6 ", style=f"bold {STORY_META_SELECTED}")
+        title.append(path_text, style=f"bold {STORY_META_HIGHLIGHT}")
     else:
-        title.append("   ", style="#7f868d")
-        title.append(path_text, style="#95a3aa")
-    title.append(":")
+        title.append("  ", style="dim")
+        title.append(path_text, style="dim")
+    title.append(":", style="dim")
     if selected:
         title.append(str(line_number), style=STORY_META_HIGHLIGHT)
     else:
-        title.append(str(line_number), style="#95a3aa")
+        title.append(str(line_number), style="dim")
     if event.function:
         if selected:
             title.append(f"  fn={event.function}", style=STORY_HELP)
         else:
-            title.append(f"  fn={event.function}", style="#7f868d")
+            title.append(f"  fn={event.function}", style="dim")
 
     if event.trigger_label:
-        badge_style = f"bold {STORY_META_SELECTED}" if selected else "#9cb9c7"
-        title.append("  [", style=STORY_HELP if selected else "#7f868d")
+        badge_style = f"bold {STORY_META_SELECTED}" if selected else "dim"
+        title.append("  [", style=STORY_HELP)
         title.append(event.trigger_label, style=badge_style)
-        title.append("]",
-            style=STORY_HELP if selected else "#7f868d",
-        )
+        title.append("]", style=STORY_HELP)
 
     if event.trigger_message and bool(global_state.tsv_show_reason_about):
-        detail_style = STORY_HELP if selected else "#7f868d"
+        detail_style = STORY_HELP if selected else "dim"
         title.append(f"  {event.trigger_message}", style=detail_style)
 
     return title
@@ -155,7 +153,7 @@ def render_code_panel(
             fail_text = Text(event.message, style="bold red")
             renderables.append(fail_text)
             if index < end_index - 1:
-                renderables.append(Text("-" * width, style="#3a3f4b"))
+                renderables.append(Text("\u2500" * width, style="dim"))
             continue
 
         source_path = os.path.abspath(event.file_path)
@@ -188,8 +186,7 @@ def render_code_panel(
         renderables.append(title)
         renderables.append(snippet_text)
         if index < end_index - 1:
-            sep_style = STORY_BAR_BASE if selected else "#3a3f4b"
-            renderables.append(Text("-" * width, style=sep_style))
+            renderables.append(Text("\u2500" * width, style="dim"))
 
     if not renderables:
         code_widget.update(Text("No renderable story frames.", style=STORY_HELP))
@@ -219,11 +216,11 @@ def _build_timeline_progress_bar(total, selected_index, start_index, end_index, 
     bar = Text()
     for col in range(width):
         if col == selected_col:
-            bar.append("◆", style=f"bold {STORY_META_SELECTED}")
+            bar.append("\u25c6", style=f"bold {STORY_META_SELECTED}")
         elif window_start_col <= col <= window_end_col:
-            bar.append("━", style="#6ea8fe")
+            bar.append("\u2501", style="ansi_blue")
         else:
-            bar.append("─", style=STORY_BAR_BASE)
+            bar.append("\u2500", style="dim")
 
     return bar
 
@@ -291,12 +288,13 @@ def render_full_file_panel(
     )
 
     title = Text()
+    title.append("\u25b6 ", style=f"bold {STORY_META_SELECTED}")
     title.append("Full File ", style=f"bold {STORY_META_SELECTED}")
-    title.append(display_path(source_path), style=f"bold {STORY_META_SELECTED}")
-    title.append(":", style=STORY_HELP)
+    title.append(display_path(source_path), style=f"bold {STORY_META_HIGHLIGHT}")
+    title.append(":", style="dim")
     title.append(str(line_number), style=STORY_META_HIGHLIGHT)
     if event.function:
-        title.append(f"  fn={event.function}", style=STORY_HELP)
+        title.append(f"  fn={event.function}", style="dim")
 
     code_widget.update(Group(title, snippet))
 
@@ -383,15 +381,15 @@ def build_variables_tree(vars_list, vars_tree_widget, vars_widget):
 
     def _label(node: _Node) -> Text:
         label = Text()
-        label.append(node.name, style=STORY_META_HIGHLIGHT)
+        label.append(node.name, style="bright_cyan")
         if node.value:
             val = node.value
             if len(val) > 80:
                 val = val[:77] + "..."
-            label.append(" = ", style=STORY_HELP)
-            label.append(val, style="#f8f8f2")
+            label.append(" = ", style="dim")
+            label.append(val, style="default")
         if node.type_hint:
-            label.append(f" [{node.type_hint}]", style=STORY_HELP)
+            label.append(f" [{node.type_hint}]", style="dim")
         return label
 
     def _append(tree_node, item: _Node) -> None:

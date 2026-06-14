@@ -112,6 +112,9 @@ def render_tree(
     for i, child in enumerate(children):
         is_last = i == len(children) - 1
         cursor = _render_node(child, "", "", is_last, ctx, cursor)
+        if isinstance(child, Suite) and not is_last:
+            ctx.log.write(Text())
+            cursor += 1
 
     return rendered_boxes, rendered_test_rows, rendered_suite_rows
 

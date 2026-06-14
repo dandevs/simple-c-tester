@@ -7,11 +7,15 @@ from .styles import (
     SUITE_LABEL_STYLE,
     SUITE_FOLD_STYLE,
     TEST_PENDING_STYLE,
-    TEST_PASSED_STYLE,
-    TEST_FAILED_STYLE,
     TEST_DEFAULT_STYLE,
     TREE_META_STYLE,
     SEARCH_HIGHLIGHT_STYLE,
+    ICON_PASS,
+    ICON_FAIL,
+    ICON_PENDING,
+    SUITE_HEADER_SEPARATOR,
+    BADGE_PASS_STYLE,
+    BADGE_FAIL_STYLE,
 )
 
 
@@ -36,11 +40,29 @@ def suite_elapsed_seconds(suite: Suite, now: float) -> float:
     return total
 
 
+def suite_counts(suite: Suite) -> tuple[int, int]:
+    """Return (passed, failed) counts recursively."""
+    passed = sum(1 for t in suite.tests if t.state == TestState.PASSED)
+    failed = sum(1 for t in suite.tests if t.state == TestState.FAILED)
+    for child in suite.children:
+        cp, cf = suite_counts(child)
+        passed += cp
+        failed += cf
+    return passed, failed
+
+
 def suite_label(suite: Suite, now: float, collapsed: bool = False) -> Text:
     elapsed_ms = int(suite_elapsed_seconds(suite, now) * 1000)
     indicator = Text("\u25b8 " if collapsed else "\u25be ", style=SUITE_FOLD_STYLE)
     text = Text(suite.name, style=SUITE_LABEL_STYLE)
-    text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
+    text.append(" \u2500\u2500 ", style=SUITE_HEADER_SEPARATOR)
+
+    passed, failed = suite_counts(suite)
+    if passed:
+        text.append(f"{ICON_PASS} {passed}  ", style=BADGE_PASS_STYLE)
+    if failed:
+        text.append(f"{ICON_FAIL} {failed}  ", style=BADGE_FAIL_STYLE)
+    text.append(f"{elapsed_ms}ms", style=TREE_META_STYLE)
     return indicator + text
 
 
@@ -71,27 +93,33 @@ def test_label(test: Test, now: float, search_query: str = "") -> Text:
 def _test_label_base(test: Test, now: float) -> Text:
     elapsed_seconds = test_elapsed_seconds(test, now)
     elapsed_ms = int(elapsed_seconds * 1000)
-    spinner_frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    spinner_frames = ("\u280b", "\u2819", "\u2839", "\u2838", "\u283c",
+                      "\u2834", "\u2826", "\u2827", "\u2807", "\u280f")
     spinner = spinner_frames[int(now * 12) % len(spinner_frames)]
 
     if test.state == TestState.PENDING:
-        text = Text(f"{spinner} {test.name}", style=TEST_PENDING_STYLE)
+        text = Text(f"{ICON_PENDING} ", style="dim")
+        text.append(test.name, style="dim default")
         text.append(" [pending]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.RUNNING and test.time_start <= 0:
-        text = Text(f"{spinner} {test.name}", style=TEST_PENDING_STYLE)
+        text = Text(f"{spinner} ", style=TEST_PENDING_STYLE)
+        text.append(test.name, style=TEST_PENDING_STYLE)
         text.append(" [compiling]", style=TREE_META_STYLE)
         return text
     elif test.state in (TestState.RUNNING, TestState.CANCELLED):
-        text = Text(f"{spinner} {test.name}", style=TEST_PENDING_STYLE)
+        text = Text(f"{spinner} ", style=TEST_PENDING_STYLE)
+        text.append(test.name, style=TEST_PENDING_STYLE)
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.PASSED:
-        text = Text(test.name, style=TEST_PASSED_STYLE)
+        text = Text(f"{ICON_PASS} ", style="bright_green")
+        text.append(test.name, style=TEST_DEFAULT_STYLE)
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.FAILED:
-        text = Text(test.name, style=TEST_FAILED_STYLE)
+        text = Text(f"{ICON_FAIL} ", style="bright_red")
+        text.append(test.name, style="bold bright_red")
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
 

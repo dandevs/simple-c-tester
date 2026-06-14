@@ -2,8 +2,8 @@ from rich.text import Text
 
 from core.models import Test, TestState
 from .styles import (
-    TEST_FAILED_STYLE,
-    OUTPUT_BOX_PASS_BORDER_STYLE,
+    OUTPUT_FAIL_BORDER_STYLE,
+    OUTPUT_PASS_BORDER_STYLE,
     TREE_GUIDE_STYLE,
     OutputBoxRenderMeta,
 )
@@ -118,9 +118,9 @@ def render_output_box(
     visible_lines = wrapped_lines[-max_lines:]
 
     border_style = (
-        TEST_FAILED_STYLE
+        OUTPUT_FAIL_BORDER_STYLE
         if test.state == TestState.FAILED
-        else OUTPUT_BOX_PASS_BORDER_STYLE
+        else OUTPUT_PASS_BORDER_STYLE
     )
     dashes = "─" * box_inner_width
 

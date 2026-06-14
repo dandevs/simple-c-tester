@@ -27,6 +27,7 @@ from ui.render.styles import (
     STATUS_PASS_STYLE,
     STATUS_PENDING_STYLE,
     STATUS_RUN_STYLE,
+    SEPARATOR_STYLE,
 )
 from runner import (
     generate_makefile,
@@ -108,8 +109,13 @@ def _build_status_line() -> Text:
     pending = sum(1 for t in tests if t.state == TestState.PENDING)
 
     text = Text()
-    text.append(" \u2588 C Tester \u2588 ", style="bold reverse")
+    text.append(" C Tester ", style="bold reverse")
     text.append(f"  {total} tests", style=STATUS_BASE_STYLE)
+
+    has_counts = passed or failed or running or pending
+    if has_counts:
+        text.append("  \u2502", style=SEPARATOR_STYLE)
+
     if passed:
         text.append(f"  \u2713 {passed}", style=STATUS_PASS_STYLE)
     if failed:
@@ -118,21 +124,40 @@ def _build_status_line() -> Text:
         text.append(f"  \u21bb {running}", style=STATUS_RUN_STYLE)
     if pending:
         text.append(f"  \u22ef {pending}", style=STATUS_PENDING_STYLE)
+
+    width = getattr(global_state, "subprocess_columns", 0) or 80
+    pad = max(0, width - len(text.plain))
+    if pad > 0:
+        text.append(" " * pad, style="reverse")
+
     return text
 
 
-def _footer_text(watch_mode: bool) -> str:
-    parts = [
-        "  / Search",
-        "F Fold",
-        "U Unfold",
-        "Enter/Click Story",
-        "Click Box Output",
-    ]
+def _footer_text(watch_mode: bool) -> Text:
+    sep = Text(" \u2502 ", style=SEPARATOR_STYLE)
+
+    text = Text()
+    text.append("/", style="bold")
+    text.append(" Search", style="dim")
+    text.append(sep)
+    text.append("F", style="bold")
+    text.append(" Fold", style="dim")
+    text.append(sep)
+    text.append("U", style="bold")
+    text.append(" Unfold", style="dim")
+    text.append(sep)
+    text.append("Enter", style="bold")
+    text.append(" Story", style="dim")
+    text.append(sep)
+    text.append("Click", style="bold")
+    text.append(" Output", style="dim")
     if watch_mode:
-        parts.append("Auto-rerun on save")
-    parts.append("Ctrl+C Exit")
-    return "  ".join(parts)
+        text.append(sep)
+        text.append("Auto-rerun", style="dim")
+    text.append(sep)
+    text.append("Ctrl+C", style="bold")
+    text.append(" Exit", style="dim")
+    return text
 
 
 class TestRunnerApp(App[None]):
@@ -144,17 +169,20 @@ class TestRunnerApp(App[None]):
         min-height: 1;
         padding: 0 1;
         background: transparent;
+        border-bottom: solid ansi_bright_black;
     }
     #search-input {
         height: 1;
         min-height: 1;
         border: none;
+        border-bottom: solid ansi_bright_black;
         padding: 0 1;
         background: transparent;
         color: ansi_default;
     }
     #search-input:focus {
         border: none;
+        border-bottom: solid ansi_bright_black;
         background: transparent;
     }
     #tree-view {
@@ -180,6 +208,7 @@ class TestRunnerApp(App[None]):
         padding: 0 1;
         background: transparent;
         color: ansi_bright_black;
+        border-top: solid ansi_bright_black;
     }
     """
 
