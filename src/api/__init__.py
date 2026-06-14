@@ -262,6 +262,56 @@ class TestRunner:
         await cancel_test_and_restore_normal_build(test)
         _sync_state_back(self.state)
 
+    async def prioritize(self, visible_keys: set[str]) -> None:
+        """Preempt non-visible running tests so visible pending tests run first.
+
+        If there are visible pending tests and not enough free worker slots,
+        cancel the **minimum** number of non-visible running tests to free
+        capacity.  Cancelled tests are re-queued automatically (via
+        ``rerun_after_user_cancel``) and resume in the background once the
+        visible tests finish.
+
+        Visible pending tests get their ``time_state_changed`` bumped so the
+        FIFO scheduler (which pops most-recent first) picks them before the
+        re-queued non-visible ones.
+        """
+        import time as _time
+
+        tests = self.tests
+        visible_pending = [
+            t for t in tests
+            if t.source_path in visible_keys and t.state == TestState.PENDING
+        ]
+        if not visible_pending:
+            return
+
+        free_slots = self.state.app_state.available_runners
+        if free_slots >= len(visible_pending):
+            return  # enough capacity — normal scheduling handles it
+
+        needed = len(visible_pending) - free_slots
+        non_visible_running = [
+            t for t in tests
+            if t.source_path not in visible_keys and t.state == TestState.RUNNING
+        ]
+        if not non_visible_running:
+            return  # nothing to preempt
+
+        # Cancel the minimum needed — prefer most-recently-started (least work
+        # invested) to minimise wasted computation.
+        non_visible_running.sort(key=lambda t: t.time_start, reverse=True)
+        to_cancel = non_visible_running[:needed]
+
+        # Bump visible pending timestamps so the scheduler picks them first
+        # after the cancellations free slots.  (+1s keeps them ahead of the
+        # cancelled tests whose timestamp is set to "now" in on_complete.)
+        bump = _time.monotonic() + 1.0
+        for t in visible_pending:
+            t.time_state_changed = bump
+
+        for test in to_cancel:
+            await self.cancel(test)
+
     # ----- lifecycle ----------------------------------------------------
 
     def terminate(self) -> None:

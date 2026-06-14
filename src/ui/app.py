@@ -218,6 +218,8 @@ class TestRunnerApp(App[None]):
         self._dirty = False
         self.collapsed_suites: set[str] = set()
         self.search_query: str = ""
+        self._last_visible_keys: set[str] = set()
+        self._prioritize_in_progress = False
         if theme_name == "ansi":
             theme = _ansi_theme()
             self.register_theme(theme)
@@ -432,6 +434,42 @@ class TestRunnerApp(App[None]):
         self.observer.join()
         self.observer = None
 
+    # ----- Visibility-priority scheduling --------------------------------
+
+    def _compute_visible_keys(self) -> set[str]:
+        """Return the set of test source-paths currently visible in the viewport."""
+        if self.log_widget is None:
+            return set()
+        top = self.log_widget.scroll_y
+        height = self.log_widget.size.height or 0
+        bottom = top + height
+        return {
+            row.test_key
+            for row in self.rendered_test_rows
+            if top <= row.line < bottom
+        }
+
+    def _maybe_prioritize(self) -> None:
+        """If the visible test set changed, ask the runner to prioritize them."""
+        if self._prioritize_in_progress:
+            return
+        visible = self._compute_visible_keys()
+        if visible == self._last_visible_keys:
+            return
+        self._last_visible_keys = visible
+        if not visible:
+            return
+        self._prioritize_in_progress = True
+        asyncio.ensure_future(self._run_prioritize(visible))
+
+    async def _run_prioritize(self, visible: set[str]) -> None:
+        try:
+            await self.runner.prioritize(visible)
+        except Exception:
+            pass  # best-effort; never crash the UI over scheduling
+        finally:
+            self._prioritize_in_progress = False
+
     # ----- Paint loop ---------------------------------------------------
 
     def _paint_tick(self) -> None:
@@ -453,6 +491,10 @@ class TestRunnerApp(App[None]):
         if self._dirty or has_active_tests():
             self._render_tree()
             self._dirty = False
+
+        # Visibility-priority: preempt non-visible running tests so visible
+        # pending tests get slots.  Only fires when the visible set changes.
+        self._maybe_prioritize()
 
         if not self.watch_mode and all_tests_finished():
             self.exit()
