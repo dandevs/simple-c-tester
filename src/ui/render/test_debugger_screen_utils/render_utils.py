@@ -8,8 +8,8 @@ import state as global_state
 from runner.story_annotations import get_story_annotations
 from .source_utils import display_path, detect_language, load_source_lines
 
-STORY_META_HIGHLIGHT = "bright_cyan"
-STORY_META_SELECTED = "bright_yellow"
+STORY_META_HIGHLIGHT = "cyan"
+STORY_META_SELECTED = "yellow"
 STORY_HELP = "dim"
 STORY_CODE_BG = "#272822"
 STORY_CURRENT_LINE = "#34352d"
@@ -381,7 +381,7 @@ def build_variables_tree(vars_list, vars_tree_widget, vars_widget):
 
     def _label(node: _Node) -> Text:
         label = Text()
-        label.append(node.name, style="bright_cyan")
+        label.append(node.name, style="cyan")
         if node.value:
             val = node.value
             if len(val) > 80:

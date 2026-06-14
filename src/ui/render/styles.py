@@ -6,38 +6,64 @@ ICON_FAIL = "\u2717"
 ICON_RUNNING = "\u25cf"
 ICON_PENDING = "\u25cb"
 
-# Unified palette
+# ---------------------------------------------------------------------------
+# Muted / structural
+# Use bright_black (a dark-gray *color*) — never "dim" (an ANSI attribute),
+# because the dim attribute bleeds into subsequent Text segments.
+# ---------------------------------------------------------------------------
+MUTED_STYLE = "bright_black"
+SEPARATOR_STYLE = "bright_black"
+TREE_GUIDE_STYLE = "bright_black"          # ├── │   tree guides
+TREE_META_STYLE = "bright_black"            # [12ms] elapsed times
+SUITE_HEADER_SEPARATOR = "bright_black"     # ── in suite headers
+
+# ---------------------------------------------------------------------------
+# Test label styles — icon and name share the same color
+# ---------------------------------------------------------------------------
+TEST_PASSED_STYLE = "bold green"
+TEST_FAILED_STYLE = "bold red"
+TEST_RUNNING_STYLE = "bold yellow"
+TEST_PENDING_STYLE = "cyan"
+TEST_DEFAULT_STYLE = "default"
+
+# ---------------------------------------------------------------------------
+# Suite headers
+# ---------------------------------------------------------------------------
+SUITE_LABEL_STYLE = "bold white"
+SUITE_FOLD_STYLE = "bold cyan"
+
+# Badge styles (inline pass/fail counts in suite headers)
+BADGE_PASS_STYLE = "green"
+BADGE_FAIL_STYLE = "red"
+BADGE_RUN_STYLE = "yellow"
+BADGE_PENDING_STYLE = "cyan"
+
+# ---------------------------------------------------------------------------
+# Status header (top-line live counts)
+# ---------------------------------------------------------------------------
+STATUS_PASS_STYLE = "bold green"
+STATUS_FAIL_STYLE = "bold red"
+STATUS_RUN_STYLE = "bold yellow"
+STATUS_PENDING_STYLE = "cyan"
+STATUS_BASE_STYLE = "bold default"
+
+# ---------------------------------------------------------------------------
+# Output box borders
+# ---------------------------------------------------------------------------
+OUTPUT_FAIL_BORDER_STYLE = "red"
+OUTPUT_PASS_BORDER_STYLE = "bright_black"
+OUTPUT_BOX_PASS_BORDER_STYLE = "bright_black"
+
+# ---------------------------------------------------------------------------
+# Search highlight
+# ---------------------------------------------------------------------------
+SEARCH_HIGHLIGHT_STYLE = "black on yellow"
+
+# ---------------------------------------------------------------------------
+# Accents
+# ---------------------------------------------------------------------------
 ACCENT_STYLE = "bold ansi_blue"
 ACCENT_CYAN_STYLE = "ansi_cyan"
-MUTED_STYLE = "dim"
-SEPARATOR_STYLE = "dim"
-SUITE_HEADER_SEPARATOR = "dim"
-
-# Status badge styles (for inline counts)
-BADGE_PASS_STYLE = "bright_green"
-BADGE_FAIL_STYLE = "bright_red"
-BADGE_RUN_STYLE = "bright_yellow"
-BADGE_PENDING_STYLE = "dim bright_cyan"
-
-# Output box borders
-OUTPUT_FAIL_BORDER_STYLE = "bright_red"
-OUTPUT_PASS_BORDER_STYLE = "dim"
-
-SUITE_LABEL_STYLE = "bold ansi_white"
-SUITE_FOLD_STYLE = "bold bright_cyan"
-TEST_PENDING_STYLE = "bold bright_yellow"
-TEST_PASSED_STYLE = "bold bright_green"
-TEST_FAILED_STYLE = "bold bright_red"
-TEST_DEFAULT_STYLE = "default"
-TREE_META_STYLE = "ansi_white"
-TREE_GUIDE_STYLE = "dim"
-OUTPUT_BOX_PASS_BORDER_STYLE = "dim"
-SEARCH_HIGHLIGHT_STYLE = "black on bright_yellow"
-STATUS_PASS_STYLE = "bold bright_green"
-STATUS_FAIL_STYLE = "bold bright_red"
-STATUS_RUN_STYLE = "bold bright_yellow"
-STATUS_PENDING_STYLE = "dim bright_cyan"
-STATUS_BASE_STYLE = "bold default"
 
 
 @dataclass

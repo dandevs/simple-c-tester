@@ -28,6 +28,7 @@ from ui.render.styles import (
     STATUS_PENDING_STYLE,
     STATUS_RUN_STYLE,
     SEPARATOR_STYLE,
+    MUTED_STYLE,
 )
 from runner import (
     generate_makefile,
@@ -135,25 +136,25 @@ def _footer_text(watch_mode: bool) -> Text:
 
     text = Text()
     text.append("/", style="bold")
-    text.append(" Search", style="dim")
+    text.append(" Search", style=MUTED_STYLE)
     text.append(sep)
     text.append("F", style="bold")
-    text.append(" Fold", style="dim")
+    text.append(" Fold", style=MUTED_STYLE)
     text.append(sep)
     text.append("U", style="bold")
-    text.append(" Unfold", style="dim")
+    text.append(" Unfold", style=MUTED_STYLE)
     text.append(sep)
     text.append("Enter", style="bold")
-    text.append(" Story", style="dim")
+    text.append(" Story", style=MUTED_STYLE)
     text.append(sep)
     text.append("Click", style="bold")
-    text.append(" Output", style="dim")
+    text.append(" Output", style=MUTED_STYLE)
     if watch_mode:
         text.append(sep)
-        text.append("Auto-rerun", style="dim")
+        text.append("Auto-rerun", style=MUTED_STYLE)
     text.append(sep)
     text.append("Ctrl+C", style="bold")
-    text.append(" Exit", style="dim")
+    text.append(" Exit", style=MUTED_STYLE)
     return text
 
 

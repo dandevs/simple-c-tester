@@ -201,13 +201,13 @@ class TestOutputScreen(Screen[None]):
 
         if self.test.state == TestState.FAILED:
             badge_text = "\u2717 FAILED"
-            badge_style = "bright_red"
+            badge_style = "red"
         elif self.test.state == TestState.PASSED:
             badge_text = "\u2713 PASSED"
-            badge_style = "bright_green"
+            badge_style = "green"
         else:
             badge_text = f"\u25cf {self.test.state.value}"
-            badge_style = "bright_yellow"
+            badge_style = "yellow"
 
         title = Text()
         title.append(" ")

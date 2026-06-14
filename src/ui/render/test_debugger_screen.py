@@ -232,11 +232,11 @@ class TestDebuggerScreen(Screen[None]):
     STORY_BAR_BASE = "dim"
     STORY_BAR_WINDOW = "dim"
     STORY_BAR_ACTIVE = "ansi_blue"
-    STORY_BAR_SELECTED = "bright_yellow"
-    STORY_META_HIGHLIGHT = "bright_cyan"
-    STORY_META_SELECTED = "bright_yellow"
+    STORY_BAR_SELECTED = "yellow"
+    STORY_META_HIGHLIGHT = "cyan"
+    STORY_META_SELECTED = "yellow"
     STORY_HELP = "dim"
-    STORY_LINE_MARKER = "bright_red"
+    STORY_LINE_MARKER = "red"
     STORY_CODE_BG = "#272822"
     STORY_CURRENT_LINE = "#34352d"
     STORY_CURRENT_LINE_SELECTED = "#49483e"
@@ -1350,11 +1350,11 @@ class TestDebuggerScreen(Screen[None]):
         elapsed_ms = int(test_elapsed_seconds(self.test, now) * 1000)
 
         if self.test.state == TestState.PASSED:
-            icon, label, badge_style = "\u2713", "PASSED", "bright_green"
+            icon, label, badge_style = "\u2713", "PASSED", "green"
         elif self.test.state == TestState.FAILED:
-            icon, label, badge_style = "\u2717", "FAILED", "bright_red"
+            icon, label, badge_style = "\u2717", "FAILED", "red"
         elif self.test.state == TestState.RUNNING:
-            icon, label, badge_style = "\u25cf", "RUNNING", "bright_yellow"
+            icon, label, badge_style = "\u25cf", "RUNNING", "yellow"
         else:
             icon, label, badge_style = "\u25cb", self.test.state.value, "dim"
 

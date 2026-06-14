@@ -6,6 +6,9 @@ from core.models import Test, Suite, TestState
 from .styles import (
     SUITE_LABEL_STYLE,
     SUITE_FOLD_STYLE,
+    TEST_PASSED_STYLE,
+    TEST_FAILED_STYLE,
+    TEST_RUNNING_STYLE,
     TEST_PENDING_STYLE,
     TEST_DEFAULT_STYLE,
     TREE_META_STYLE,
@@ -98,28 +101,28 @@ def _test_label_base(test: Test, now: float) -> Text:
     spinner = spinner_frames[int(now * 12) % len(spinner_frames)]
 
     if test.state == TestState.PENDING:
-        text = Text(f"{ICON_PENDING} ", style="ansi_cyan")
-        text.append(test.name, style="ansi_cyan")
+        text = Text(f"{ICON_PENDING} ", style=TEST_PENDING_STYLE)
+        text.append(test.name, style=TEST_PENDING_STYLE)
         text.append(" [pending]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.RUNNING and test.time_start <= 0:
-        text = Text(f"{spinner} ", style=TEST_PENDING_STYLE)
-        text.append(test.name, style=TEST_PENDING_STYLE)
+        text = Text(f"{spinner} ", style=TEST_RUNNING_STYLE)
+        text.append(test.name, style=TEST_RUNNING_STYLE)
         text.append(" [compiling]", style=TREE_META_STYLE)
         return text
     elif test.state in (TestState.RUNNING, TestState.CANCELLED):
-        text = Text(f"{spinner} ", style=TEST_PENDING_STYLE)
-        text.append(test.name, style=TEST_PENDING_STYLE)
+        text = Text(f"{spinner} ", style=TEST_RUNNING_STYLE)
+        text.append(test.name, style=TEST_RUNNING_STYLE)
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.PASSED:
-        text = Text(f"{ICON_PASS} ", style="bold bright_green")
-        text.append(test.name, style="bold bright_green")
+        text = Text(f"{ICON_PASS} ", style=TEST_PASSED_STYLE)
+        text.append(test.name, style=TEST_PASSED_STYLE)
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.FAILED:
-        text = Text(f"{ICON_FAIL} ", style="bold bright_red")
-        text.append(test.name, style="bold bright_red")
+        text = Text(f"{ICON_FAIL} ", style=TEST_FAILED_STYLE)
+        text.append(test.name, style=TEST_FAILED_STYLE)
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
 
