@@ -5,6 +5,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
+from textual.theme import BUILTIN_THEMES, Theme
 from textual.widgets import RichLog, Static
 
 import state as global_state
@@ -19,6 +20,43 @@ from runner import (
     refresh_editor_breakpoints_cache,
 )
 from watch import DebounceHandler
+
+
+def _ansi_theme() -> Theme:
+    """Return the ``textual-ansi`` theme.
+
+    Newer textual (>=8.2.7) removed ``textual-ansi`` from ``BUILTIN_THEMES``,
+    so reconstruct it from the known definition when absent.  This keeps theme
+    behaviour identical across textual versions.
+    """
+    if "textual-ansi" in BUILTIN_THEMES:
+        return BUILTIN_THEMES["textual-ansi"]
+    return Theme(
+        name="textual-ansi",
+        primary="ansi_blue",
+        secondary="ansi_cyan",
+        warning="ansi_yellow",
+        error="ansi_red",
+        success="ansi_green",
+        accent="ansi_bright_blue",
+        foreground="ansi_default",
+        background="ansi_default",
+        surface="ansi_default",
+        panel="ansi_default",
+        boost="ansi_default",
+        dark=False,
+        luminosity_spread=0.15,
+        text_alpha=0.95,
+        variables={
+            "block-cursor-text-style": "b",
+            "block-cursor-blurred-text-style": "i",
+            "input-selection-background": "ansi_blue",
+            "input-cursor-text-style": "reverse",
+            "scrollbar": "ansi_blue",
+            "border-blurred": "ansi_blue",
+            "border": "ansi_bright_blue",
+        },
+    )
 
 
 class TestRunnerApp(App[None]):
@@ -77,6 +115,9 @@ class TestRunnerApp(App[None]):
         self._last_makefile_columns = 0
         self._dirty = False  # set by event subscribers, consumed by _paint_tick
         if theme_name == "ansi":
+            # textual >=8.2.7 requires themes to be registered before being
+            # assigned and removed textual-ansi from the builtin set.
+            self.register_theme(_ansi_theme())
             self.theme = "textual-ansi"
 
     def compose(self) -> ComposeResult:
