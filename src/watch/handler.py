@@ -190,9 +190,9 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
 
     has_rebuild_inputs = bool(affected) or rerun_all or bool(removed_tests) or added_tests > 0
     if has_rebuild_inputs:
-        generate_makefile()
-        build_project_sources()
-        refresh_dependency_graph()
+        await asyncio.to_thread(generate_makefile)
+        await asyncio.to_thread(build_project_sources)
+        await asyncio.to_thread(refresh_dependency_graph)
 
     if breakpoints_changed or relevant_code_changes:
         state_changed()

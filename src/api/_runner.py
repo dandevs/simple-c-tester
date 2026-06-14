@@ -1078,7 +1078,7 @@ def _debug_callbacks(test: Test):
     return _on_target_output, _on_console_output
 
 
-def _ensure_debug_build_mode(enabled: bool) -> None:
+async def _ensure_debug_build_mode(enabled: bool) -> None:
     desired = bool(enabled)
     current = bool(global_state.debug_build_enabled)
     global_state.debug_build_enabled = desired
@@ -1086,13 +1086,13 @@ def _ensure_debug_build_mode(enabled: bool) -> None:
     if desired == current and not desired:
         return
 
-    generate_makefile()
-    build_project_sources()
-    refresh_dependency_graph()
+    await asyncio.to_thread(generate_makefile)
+    await asyncio.to_thread(build_project_sources)
+    await asyncio.to_thread(refresh_dependency_graph)
 
 
-def restore_normal_build_mode() -> None:
-    _ensure_debug_build_mode(False)
+async def restore_normal_build_mode() -> None:
+    await _ensure_debug_build_mode(False)
 
 
 async def _terminate_active_processes() -> None:
@@ -1142,7 +1142,7 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
     if active_processes.get(process_key) is make_proc:
         active_processes.pop(process_key, None)
 
-    refresh_dependency_graph()
+    await asyncio.to_thread(refresh_dependency_graph)
 
     if make_proc.returncode != 0:
         if test.state == TestState.CANCELLED:
@@ -1451,7 +1451,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         proc_env["COLUMNS"] = str(max(20, subprocess_columns))
 
         if test.timeline_capture_enabled or global_state.timeline_capture_enabled:
-            _ensure_debug_build_mode(True)
+            await _ensure_debug_build_mode(True)
 
         test.current_run = TestRun()
         binary_path = test_binary_path(test.source_path)
@@ -1521,7 +1521,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
 
     await _cancel_active_run_for_manual_debug(test)
 
-    _ensure_debug_build_mode(True)
+    await _ensure_debug_build_mode(True)
 
     test.current_run = TestRun()
     binary_path = test_binary_path(test.source_path)
@@ -1721,7 +1721,7 @@ async def cancel_test_and_restore_normal_build(test: Test) -> None:
             run.debug_exited = True
             run.debug_exit_code = None
 
-    restore_normal_build_mode()
+    await restore_normal_build_mode()
 
     if not has_active_run_task:
         state_changed()

@@ -241,6 +241,7 @@ class TestRunnerApp(App[None]):
         self._last_makefile_columns = 0
         self._dirty = False
         self._last_tree_render = 0.0  # monotonic timestamp of last full render
+        self._makefile_regen_in_progress = False
         self.collapsed_suites: set[str] = set()
         self.search_query: str = ""
         self._last_visible_keys: set[str] = set()
@@ -519,9 +520,14 @@ class TestRunnerApp(App[None]):
         """Housekeeping + dirty-flag paint loop."""
         refresh_editor_breakpoints_cache()
 
-        if self._pending_makefile_regen and not has_active_tests():
-            generate_makefile()
+        if (
+            self._pending_makefile_regen
+            and not has_active_tests()
+            and not self._makefile_regen_in_progress
+        ):
             self._pending_makefile_regen = False
+            self._makefile_regen_in_progress = True
+            asyncio.ensure_future(self._regen_makefile())
 
         if self.watch_mode:
             self._update_dep_warning()
@@ -548,6 +554,21 @@ class TestRunnerApp(App[None]):
 
         if not self.watch_mode and all_tests_finished():
             self.exit()
+
+    async def _regen_makefile(self) -> None:
+        """Regenerate the Makefile in a background thread.
+
+        ``generate_makefile()`` calls ``resolve_include_dirs()`` which
+        invokes ``gcc -E`` via ``subprocess.run`` (synchronous).  Running
+        it on the event loop blocks all input/widget updates for ~80ms+
+        per pass.  Offloading to a thread keeps the UI responsive.
+        """
+        try:
+            await asyncio.to_thread(generate_makefile)
+        except Exception:
+            pass  # best-effort; never crash the UI over makefile regen
+        finally:
+            self._makefile_regen_in_progress = False
 
     def _render_tree(self) -> None:
         if self.log_widget is None:
