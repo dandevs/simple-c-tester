@@ -79,10 +79,9 @@ class DebugControlsModal(ModalScreen[None]):
         margin: 0 0 1 0;
     }
     #controls-body {
-        color: default;
     }
     #controls-hint {
-        color: dim;
+        text-style: dim;
         margin: 1 0 0 0;
     }
     #profile-title {
