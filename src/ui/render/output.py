@@ -1,6 +1,6 @@
 from rich.text import Text
 
-from models import Test, TestState
+from core.models import Test, TestState
 from .styles import (
     TEST_FAILED_STYLE,
     OUTPUT_BOX_PASS_BORDER_STYLE,

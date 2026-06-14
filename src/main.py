@@ -1,27 +1,30 @@
+"""Thin CLI entry point.
+
+Parses arguments, builds an immutable :class:`RunnerConfig`, constructs a
+:class:`TestRunner` (the public API), discovers tests, prepares the build, and
+launches the Textual TUI.  The engine is driven entirely through the API;
+``main.py`` no longer mutates the legacy global ``state`` module directly.
+
+Run from a project root containing a ``tests/`` directory (e.g. ``c/``)::
+
+    python3 ../src/main.py
+"""
+
 import argparse
 import asyncio
-import os
 import shutil
 import sys
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.dirname(__file__))
 
-import state as global_state
-from state import state
-from render import TestOutputScreen, render_tree_stdout
-from runner import (
-    state_changed,
-    generate_makefile,
-    build_project_sources,
-    hydrate_dependencies_from_db,
-    refresh_dependency_graph,
-    prime_editor_breakpoints_cache,
-    _terminate_active_processes,
-    save_dependency_db,
-)
-from app import TestRunnerApp
-from runner.story_filters import normalized_story_filter_profile
+from api import TestRunner, RunnerConfig
+from core.config import RunnerConfig as _RunnerConfig  # noqa: F401 (re-export clarity)
+from core.story import normalized_story_filter_profile
+from ui.app import TestRunnerApp
+from ui.render import render_tree_stdout
 
 
 def parse_args():
@@ -102,45 +105,60 @@ def parse_args():
     return parser.parse_args()
 
 
+def _build_config(args) -> RunnerConfig:
+    return RunnerConfig(
+        parallel=args.parallel,
+        watch=args.watch,
+        output_lines=args.output_lines,
+        theme=args.theme,
+        timeline=args.timeline,
+        debug_build=bool(args.debug_build or args.timeline),
+        story_filter_profile=normalized_story_filter_profile(args.story_filter_profile),
+        tsv_lines_above=max(0, int(args.tsv_lines_above)),
+        tsv_lines_below=max(0, int(args.tsv_lines_below)),
+        tsv_skip_seq_lines=max(1, int(args.tsv_skip_seq_lines)),
+        tsv_vars_depth=max(1, int(args.tsv_vars_depth)),
+        tsv_variables_height=max(3, int(args.tsv_variables_height)),
+        tsv_show_reason_about=bool(args.tsv_show_reason_about),
+        cflags=" ".join(args.cflags),
+    )
+
+
 async def _main():
     args = parse_args()
-    global_state.timeline_capture_enabled = bool(args.timeline)
-    global_state.debug_build_enabled = bool(args.debug_build or args.timeline)
-    global_state.tsv_lines_above = max(0, int(args.tsv_lines_above))
-    global_state.tsv_lines_below = max(0, int(args.tsv_lines_below))
-    global_state.tsv_skip_seq_lines = max(1, int(args.tsv_skip_seq_lines))
-    global_state.tsv_vars_depth = max(1, int(args.tsv_vars_depth))
-    global_state.tsv_variables_height = max(3, int(args.tsv_variables_height))
-    global_state.tsv_show_reason_about = bool(args.tsv_show_reason_about)
-    global_state.cflags = " ".join(args.cflags)
-    global_state.story_filter_profile_preference = normalized_story_filter_profile(
-        args.story_filter_profile
-    )
+    config = _build_config(args)
 
     tests_dir = Path("tests")
     if not tests_dir.is_dir():
         print(f"Error: test directory not found: {tests_dir}", file=sys.stderr)
         sys.exit(1)
-    state.populate_suites(str(tests_dir))
-    hydrate_dependencies_from_db()
-    generate_makefile()
-    build_project_sources()
-    refresh_dependency_graph()
-    prime_editor_breakpoints_cache()
-    state.available_runners = args.parallel
 
-    app = TestRunnerApp(args.watch, args.output_lines, args.theme, args.timeline)
-    global_state.app_active = True
-    save_dependency_db()
+    # The engine is driven entirely through the public API.
+    runner = TestRunner(config)
+    runner.discover(str(tests_dir))
+    runner.prepare_build()
+    runner.save_db()
+
+    app = TestRunnerApp(
+        runner,
+        watch=config.watch,
+        output_max_lines=config.output_lines,
+        theme_name=config.theme,
+        timeline_enabled=config.timeline,
+    )
     try:
         await app.run_async()
     finally:
-        global_state.app_active = False
-        save_dependency_db()
+        runner.stop_emitter()
+        runner.save_db()
         app.stop_observer()
+        from api._runner import _terminate_active_processes
+
         await _terminate_active_processes()
-        if not args.watch:
-            render_tree_stdout(args.output_lines, shutil.get_terminal_size().columns)
+        if not config.watch:
+            render_tree_stdout(
+                config.output_lines, shutil.get_terminal_size().columns
+            )
 
 
 def entry():

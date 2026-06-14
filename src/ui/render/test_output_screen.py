@@ -15,7 +15,7 @@ from textual.screen import Screen
 from textual.widgets import RichLog, Static, Tree as TextualTree
 
 import state as global_state
-from models import Test, TestState
+from core.models import Test, TestState
 from .output import get_test_output
 from .styles import TREE_META_STYLE
 from runner import (

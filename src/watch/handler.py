@@ -8,7 +8,7 @@ from watchdog.events import FileSystemEventHandler
 
 import state as global_state
 from state import state, dep_index, active_processes
-from models import Test, TestState, Suite
+from core.models import Test, TestState, Suite
 from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph
 from runner.execute import (
     state_changed,

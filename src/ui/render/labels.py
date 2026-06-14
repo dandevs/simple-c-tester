@@ -2,7 +2,7 @@ import time
 
 from rich.text import Text
 
-from models import Test, Suite, TestState
+from core.models import Test, Suite, TestState
 from .styles import (
     SUITE_LABEL_STYLE,
     TEST_PENDING_STYLE,

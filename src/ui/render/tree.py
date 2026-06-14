@@ -5,7 +5,7 @@ from rich.text import Text
 from textual.widgets import RichLog
 
 from state import state
-from models import Test, Suite
+from core.models import Test, Suite
 from .styles import TREE_GUIDE_STYLE, OutputBoxRegion, TestRowRegion
 from .labels import suite_label, test_label
 from .output import get_test_output, render_output_box

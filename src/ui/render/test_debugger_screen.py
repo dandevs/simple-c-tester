@@ -12,7 +12,7 @@ from textual.widgets import Button, Static, Tree as TextualTree
 
 import state as global_state
 from state import state
-from models import Test, TestState
+from core.models import Test, TestState
 from runner import (
     start_debug_session,
     stop_debug_session,

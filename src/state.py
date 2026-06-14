@@ -1,6 +1,6 @@
 import asyncio
 
-from models import Test, Suite, AppState
+from core.models import Test, Suite, AppState
 
 state = AppState()
 dep_index: dict[str, list[Test]] = {}
