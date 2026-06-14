@@ -23,7 +23,7 @@ BADGE_PENDING_STYLE = "dim bright_cyan"
 OUTPUT_FAIL_BORDER_STYLE = "bright_red"
 OUTPUT_PASS_BORDER_STYLE = "dim"
 
-SUITE_LABEL_STYLE = "bold default"
+SUITE_LABEL_STYLE = "bold ansi_white"
 SUITE_FOLD_STYLE = "bold bright_cyan"
 TEST_PENDING_STYLE = "bold bright_yellow"
 TEST_PASSED_STYLE = "bold bright_green"

@@ -109,26 +109,23 @@ def _build_status_line() -> Text:
     pending = sum(1 for t in tests if t.state == TestState.PENDING)
 
     text = Text()
-    text.append(" C Tester ", style="bold reverse")
-    text.append(f"  {total} tests", style=STATUS_BASE_STYLE)
+    text.append("C Tester", style="bold")
+    text.append(f"  {total} tests", style="bold default")
 
     has_counts = passed or failed or running or pending
     if has_counts:
-        text.append("  \u2502", style=SEPARATOR_STYLE)
+        text.append("  ", style=SEPARATOR_STYLE)
+        text.append("\u2502", style=SEPARATOR_STYLE)
+        text.append("  ", style=SEPARATOR_STYLE)
 
     if passed:
-        text.append(f"  \u2713 {passed}", style=STATUS_PASS_STYLE)
+        text.append(f"\u2713 {passed}", style=STATUS_PASS_STYLE)
     if failed:
         text.append(f"  \u2717 {failed}", style=STATUS_FAIL_STYLE)
     if running:
         text.append(f"  \u21bb {running}", style=STATUS_RUN_STYLE)
     if pending:
         text.append(f"  \u22ef {pending}", style=STATUS_PENDING_STYLE)
-
-    width = getattr(global_state, "subprocess_columns", 0) or 80
-    pad = max(0, width - len(text.plain))
-    if pad > 0:
-        text.append(" " * pad, style="reverse")
 
     return text
 

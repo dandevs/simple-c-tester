@@ -98,8 +98,8 @@ def _test_label_base(test: Test, now: float) -> Text:
     spinner = spinner_frames[int(now * 12) % len(spinner_frames)]
 
     if test.state == TestState.PENDING:
-        text = Text(f"{ICON_PENDING} ", style="dim")
-        text.append(test.name, style="dim default")
+        text = Text(f"{ICON_PENDING} ", style="ansi_cyan")
+        text.append(test.name, style="ansi_cyan")
         text.append(" [pending]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.RUNNING and test.time_start <= 0:
