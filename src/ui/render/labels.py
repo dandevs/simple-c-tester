@@ -5,11 +5,13 @@ from rich.text import Text
 from core.models import Test, Suite, TestState
 from .styles import (
     SUITE_LABEL_STYLE,
+    SUITE_FOLD_STYLE,
     TEST_PENDING_STYLE,
     TEST_PASSED_STYLE,
     TEST_FAILED_STYLE,
     TEST_DEFAULT_STYLE,
     TREE_META_STYLE,
+    SEARCH_HIGHLIGHT_STYLE,
 )
 
 
@@ -34,14 +36,39 @@ def suite_elapsed_seconds(suite: Suite, now: float) -> float:
     return total
 
 
-def suite_label(suite: Suite, now: float) -> Text:
+def suite_label(suite: Suite, now: float, collapsed: bool = False) -> Text:
     elapsed_ms = int(suite_elapsed_seconds(suite, now) * 1000)
+    indicator = Text("\u25b8 " if collapsed else "\u25be ", style=SUITE_FOLD_STYLE)
     text = Text(suite.name, style=SUITE_LABEL_STYLE)
     text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
-    return text
+    return indicator + text
 
 
-def test_label(test: Test, now: float) -> Text:
+def highlight_search(text: Text, query: str) -> Text:
+    """Return a copy of ``text`` with all case-insensitive matches of
+    ``query`` highlighted.  If ``query`` is empty, returns ``text`` unchanged.
+    """
+    if not query:
+        return text
+    result = text.copy()
+    plain = result.plain.lower()
+    lower_query = query.lower()
+    pos = 0
+    while True:
+        idx = plain.find(lower_query, pos)
+        if idx == -1:
+            break
+        result.stylize(SEARCH_HIGHLIGHT_STYLE, idx, idx + len(query))
+        pos = idx + len(query)
+    return result
+
+
+def test_label(test: Test, now: float, search_query: str = "") -> Text:
+    label = _test_label_base(test, now)
+    return highlight_search(label, search_query) if search_query else label
+
+
+def _test_label_base(test: Test, now: float) -> Text:
     elapsed_seconds = test_elapsed_seconds(test, now)
     elapsed_ms = int(elapsed_seconds * 1000)
     spinner_frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")

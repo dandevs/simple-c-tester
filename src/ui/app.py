@@ -1,18 +1,33 @@
 import asyncio
 import os
 
+from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
 from textual.theme import BUILTIN_THEMES, Theme
-from textual.widgets import RichLog, Static
+from textual.widgets import Input, RichLog, Static
 
 import state as global_state
 from state import state
-from core.models import Test
+from core.models import Test, Suite, TestState
 from api import TestRunner
-from ui.render import TestOutputScreen, TestDebuggerScreen, render_tree, OutputBoxRegion, TestRowRegion
+from ui.render import (
+    TestOutputScreen,
+    TestDebuggerScreen,
+    render_tree,
+    OutputBoxRegion,
+    TestRowRegion,
+    SuiteRowRegion,
+)
+from ui.render.styles import (
+    STATUS_BASE_STYLE,
+    STATUS_FAIL_STYLE,
+    STATUS_PASS_STYLE,
+    STATUS_PENDING_STYLE,
+    STATUS_RUN_STYLE,
+)
 from runner import (
     generate_makefile,
     all_tests_finished,
@@ -64,10 +79,84 @@ def _ansi_theme() -> Theme:
     )
 
 
+# ---------------------------------------------------------------------------
+# Pure helpers (suite-key construction mirrors tree.py)
+# ---------------------------------------------------------------------------
+
+
+def _suite_key(parent_key: str, suite_name: str) -> str:
+    return f"{parent_key}/{suite_name}" if parent_key else suite_name
+
+
+def _collect_all_suite_keys(suite: Suite, parent_key: str = "") -> set[str]:
+    """Return keys for every child suite (recursively) under ``suite``."""
+    keys: set[str] = set()
+    for child in suite.children:
+        key = _suite_key(parent_key, child.name)
+        keys.add(key)
+        keys.update(_collect_all_suite_keys(child, key))
+    return keys
+
+
+def _build_status_line() -> Text:
+    """Build the one-line status summary from current test states."""
+    tests = state.all_tests
+    total = len(tests)
+    passed = sum(1 for t in tests if t.state == TestState.PASSED)
+    failed = sum(1 for t in tests if t.state == TestState.FAILED)
+    running = sum(1 for t in tests if t.state == TestState.RUNNING)
+    pending = sum(1 for t in tests if t.state == TestState.PENDING)
+
+    text = Text()
+    text.append(" \u2588 C Tester \u2588 ", style="bold reverse")
+    text.append(f"  {total} tests", style=STATUS_BASE_STYLE)
+    if passed:
+        text.append(f"  \u2713 {passed}", style=STATUS_PASS_STYLE)
+    if failed:
+        text.append(f"  \u2717 {failed}", style=STATUS_FAIL_STYLE)
+    if running:
+        text.append(f"  \u21bb {running}", style=STATUS_RUN_STYLE)
+    if pending:
+        text.append(f"  \u22ef {pending}", style=STATUS_PENDING_STYLE)
+    return text
+
+
+def _footer_text(watch_mode: bool) -> str:
+    parts = [
+        "  / Search",
+        "F Fold",
+        "U Unfold",
+        "Enter/Click Story",
+        "Click Box Output",
+    ]
+    if watch_mode:
+        parts.append("Auto-rerun on save")
+    parts.append("Ctrl+C Exit")
+    return "  ".join(parts)
+
+
 class TestRunnerApp(App[None]):
     ENABLE_COMMAND_PALETTE = False
 
     CSS = """
+    #status-header {
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        background: transparent;
+    }
+    #search-input {
+        height: 1;
+        min-height: 1;
+        border: none;
+        padding: 0 1;
+        background: transparent;
+        color: ansi_default;
+    }
+    #search-input:focus {
+        border: none;
+        background: transparent;
+    }
     #tree-view {
         height: 1fr;
         border: none;
@@ -78,13 +167,6 @@ class TestRunnerApp(App[None]):
         scrollbar-background-hover: transparent;
         scrollbar-background-active: transparent;
     }
-    #controls-footer {
-        height: 1;
-        min-height: 1;
-        padding: 0 1;
-        background: transparent;
-        color: ansi_bright_black;
-    }
     #dep-warning {
         height: 1;
         min-height: 1;
@@ -92,10 +174,21 @@ class TestRunnerApp(App[None]):
         background: transparent;
         color: ansi_yellow;
     }
+    #controls-footer {
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        background: transparent;
+        color: ansi_bright_black;
+    }
     """
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "Exit", priority=True),
+        Binding("/", "focus_search", "Search", priority=True),
+        Binding("escape", "clear_search", "Clear", priority=True),
+        Binding("f", "fold_all", "Fold All"),
+        Binding("u", "unfold_all", "Unfold All"),
     ]
 
     def __init__(
@@ -112,19 +205,29 @@ class TestRunnerApp(App[None]):
         self.timeline_enabled = timeline_enabled
         self.observer = None
         self.log_widget: RichLog | None = None
+        self.search_widget: Input | None = None
+        self.status_widget: Static | None = None
+        self.footer_widget: Static | None = None
         self.output_max_lines = max(1, output_max_lines)
         self.rendered_output_boxes: list[OutputBoxRegion] = []
         self.rendered_test_rows: list[TestRowRegion] = []
+        self.rendered_suite_rows: list[SuiteRowRegion] = []
         self._watch_flush_task: asyncio.Task | None = None
         self._pending_makefile_regen = False
         self._last_makefile_columns = 0
-        self._dirty = False  # set by event subscribers, consumed by _paint_tick
+        self._dirty = False
+        self.collapsed_suites: set[str] = set()
+        self.search_query: str = ""
         if theme_name == "ansi":
             theme = _ansi_theme()
             self.register_theme(theme)
             self.theme = theme.name
 
     def compose(self) -> ComposeResult:
+        yield Static(_build_status_line(), id="status-header", markup=False)
+        yield Input(placeholder="/ to search tests \u2014 type to filter", id="search-input")
+        if self.watch_mode:
+            yield Static("", id="dep-warning")
         yield RichLog(
             id="tree-view",
             wrap=False,
@@ -132,12 +235,14 @@ class TestRunnerApp(App[None]):
             highlight=False,
             auto_scroll=False,
         )
-        if self.watch_mode:
-            yield Static("", id="dep-warning")
-            yield Static("Tests  |  Ctrl+C: Exit", id="controls-footer")
+        yield Static(_footer_text(self.watch_mode), id="controls-footer", markup=False)
 
     async def on_mount(self) -> None:
+        self.status_widget = self.query_one("#status-header", Static)
+        self.search_widget = self.query_one("#search-input", Input)
         self.log_widget = self.query_one("#tree-view", RichLog)
+        self.footer_widget = self.query_one("#controls-footer", Static)
+
         self._set_subprocess_columns_from_ui()
         self._render_tree()
 
@@ -154,9 +259,7 @@ class TestRunnerApp(App[None]):
 
         self._update_dep_warning()
 
-        # Event-driven rendering: subscribe to the runner's event bus and mark
-        # the view dirty on any relevant change.  The paint tick below only
-        # re-renders when dirty — no more state-signature polling.
+        # Event-driven rendering: subscribe to the runner's event bus.
         self.runner.events.subscribe("test_state_changed", self._on_engine_event)
         self.runner.events.subscribe("test_finished", self._on_engine_event)
         self.runner.events.subscribe("suite_changed", self._on_engine_event)
@@ -164,18 +267,54 @@ class TestRunnerApp(App[None]):
         self.runner.events.subscribe("timeline_updated", self._on_engine_event)
         self.runner.events.subscribe("dep_graph_status", self._on_engine_event)
 
-        # Start the runner's background emitter (polls test states, emits
-        # events) and dispatch the initial run via the public API.
+        # Start the runner's background emitter and dispatch initial run.
         self.runner.start_emitter()
         self.runner.schedule_run()
 
-        # Paint + maintenance loop.  This is NOT state polling — it only
-        # flushes the dirty flag set by events, plus periodic housekeeping
-        # (breakpoint cache, watch flush, makefile regen, completion check).
+        # Paint + maintenance loop.
         self.set_interval(0.1, self._paint_tick)
 
+    # ----- Input / search -----------------------------------------------
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "search-input":
+            self.search_query = event.value
+            self._dirty = True
+
+    def action_focus_search(self) -> None:
+        if self.search_widget is not None:
+            self.search_widget.focus()
+
+    def action_clear_search(self) -> None:
+        if self.search_widget is None:
+            return
+        if self.search_widget.value:
+            self.search_widget.value = ""
+            self.search_query = ""
+            self._dirty = True
+        else:
+            self.search_widget.blur()
+
+    # ----- Fold / unfold ------------------------------------------------
+
+    def action_fold_all(self) -> None:
+        self.collapsed_suites = _collect_all_suite_keys(state.root_suite)
+        self._dirty = True
+
+    def action_unfold_all(self) -> None:
+        self.collapsed_suites.clear()
+        self._dirty = True
+
+    def _toggle_suite_fold(self, suite_key: str) -> None:
+        if suite_key in self.collapsed_suites:
+            self.collapsed_suites.discard(suite_key)
+        else:
+            self.collapsed_suites.add(suite_key)
+        self._dirty = True
+
+    # ----- Engine event handling ----------------------------------------
+
     def _on_engine_event(self, _event) -> None:
-        """Mark the tree dirty so the next paint re-renders."""
         self._dirty = True
 
     def on_resize(self, event: events.Resize) -> None:
@@ -188,6 +327,8 @@ class TestRunnerApp(App[None]):
             return
         self.runner.stop_emitter()
         self.exit()
+
+    # ----- Mouse → region mapping ---------------------------------------
 
     def _find_output_box_at(self, x: int, y: int) -> OutputBoxRegion | None:
         for box in self.rendered_output_boxes:
@@ -204,29 +345,22 @@ class TestRunnerApp(App[None]):
                 return row
         return None
 
-    def _get_mouse_box_key(self, event: events.MouseEvent) -> str | None:
+    def _find_suite_row_at(self, x: int, y: int) -> SuiteRowRegion | None:
+        for row in self.rendered_suite_rows:
+            if row.line == y and row.left_col <= x <= row.right_col:
+                return row
+        return None
+
+    def _virtual_coords(self, event: events.MouseEvent) -> tuple[int, int] | None:
+        """Map a mouse event to (virtual_x, virtual_y) within the RichLog."""
         if self.log_widget is None:
             return None
         offset = event.get_content_offset(self.log_widget)
         if offset is None:
             return None
-
-        virtual_x = int(offset.x + self.log_widget.scroll_x)
-        virtual_y = int(offset.y + self.log_widget.scroll_y)
-        box = self._find_output_box_at(virtual_x, virtual_y)
-        return box.test_key if box is not None else None
-
-    def _get_mouse_row_key(self, event: events.MouseEvent) -> str | None:
-        if self.log_widget is None:
-            return None
-        offset = event.get_content_offset(self.log_widget)
-        if offset is None:
-            return None
-
-        virtual_x = int(offset.x + self.log_widget.scroll_x)
-        virtual_y = int(offset.y + self.log_widget.scroll_y)
-        row = self._find_test_row_at(virtual_x, virtual_y)
-        return row.test_key if row is not None else None
+        vx = int(offset.x + self.log_widget.scroll_x)
+        vy = int(offset.y + self.log_widget.scroll_y)
+        return vx, vy
 
     def _get_test_by_key(self, test_key: str) -> Test | None:
         for test in state.all_tests:
@@ -238,6 +372,20 @@ class TestRunnerApp(App[None]):
         if len(self.screen_stack) > 1:
             return
 
+        coords = self._virtual_coords(event)
+        if coords is None:
+            return
+        vx, vy = coords
+
+        # Suite row → toggle fold.
+        suite_row = self._find_suite_row_at(vx, vy)
+        if suite_row is not None:
+            self._toggle_suite_fold(suite_row.suite_key)
+            event.prevent_default()
+            event.stop()
+            return
+
+        # Test row → open story view.
         row_key = self._get_mouse_row_key(event)
         if row_key is not None:
             row_test = self._get_test_by_key(row_key)
@@ -247,6 +395,7 @@ class TestRunnerApp(App[None]):
                 event.stop()
                 return
 
+        # Output box → open output view.
         box_key = self._get_mouse_box_key(event)
         if box_key is None:
             return
@@ -258,6 +407,24 @@ class TestRunnerApp(App[None]):
         event.prevent_default()
         event.stop()
 
+    def _get_mouse_box_key(self, event: events.MouseEvent) -> str | None:
+        coords = self._virtual_coords(event)
+        if coords is None:
+            return None
+        vx, vy = coords
+        box = self._find_output_box_at(vx, vy)
+        return box.test_key if box is not None else None
+
+    def _get_mouse_row_key(self, event: events.MouseEvent) -> str | None:
+        coords = self._virtual_coords(event)
+        if coords is None:
+            return None
+        vx, vy = coords
+        row = self._find_test_row_at(vx, vy)
+        return row.test_key if row is not None else None
+
+    # ----- Lifecycle helpers --------------------------------------------
+
     def stop_observer(self) -> None:
         if self.observer is None:
             return
@@ -265,14 +432,10 @@ class TestRunnerApp(App[None]):
         self.observer.join()
         self.observer = None
 
-    def _paint_tick(self) -> None:
-        """Housekeeping + dirty-flag paint loop.
+    # ----- Paint loop ---------------------------------------------------
 
-        Replaces the old polling tick: rendering is now triggered by events
-        (``_on_engine_event`` sets ``_dirty``); this method only flushes that
-        flag plus runs periodic maintenance (breakpoint cache, watch flush,
-        makefile regen, completion check).
-        """
+    def _paint_tick(self) -> None:
+        """Housekeeping + dirty-flag paint loop."""
         refresh_editor_breakpoints_cache()
 
         if self._pending_makefile_regen and not has_active_tests():
@@ -283,8 +446,10 @@ class TestRunnerApp(App[None]):
             self._update_dep_warning()
             self._flush_deferred_watch_changes()
 
-        # Event-driven re-render: paint only when an event marked us dirty,
-        # or while tests are actively running (so elapsed-time counters update).
+        # Status header always refreshes (cheap) so counters stay live.
+        if self.status_widget is not None:
+            self.status_widget.update(_build_status_line())
+
         if self._dirty or has_active_tests():
             self._render_tree()
             self._dirty = False
@@ -302,8 +467,14 @@ class TestRunnerApp(App[None]):
         near_bottom = (log.max_scroll_y - log.scroll_y) <= 1
 
         log.clear()
-        self.rendered_output_boxes, self.rendered_test_rows = render_tree(
-            log, self.output_max_lines, max(20, log.size.width or self.size.width or 80)
+        self.rendered_output_boxes, self.rendered_test_rows, self.rendered_suite_rows = (
+            render_tree(
+                log,
+                self.output_max_lines,
+                max(20, log.size.width or self.size.width or 80),
+                collapsed_suites=self.collapsed_suites,
+                search_query=self.search_query,
+            )
         )
 
         if near_bottom:
@@ -326,7 +497,8 @@ class TestRunnerApp(App[None]):
             return
 
         warning.update(
-            "Dependency graph incomplete (fresh build or compile errors). Run one clean pass for precise selective reruns."
+            "Dependency graph incomplete (fresh build or compile errors)."
+            " Run one clean pass for precise selective reruns."
         )
 
     def _flush_deferred_watch_changes(self) -> None:
