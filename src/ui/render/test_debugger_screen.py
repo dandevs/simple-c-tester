@@ -191,7 +191,6 @@ class TestDebuggerScreen(Screen[None]):
         min-height: 1;
         padding: 0 1;
         text-style: bold;
-        border-bottom: solid ansi_bright_black;
     }
     #debug-body {
         height: 1fr;
@@ -213,7 +212,6 @@ class TestDebuggerScreen(Screen[None]):
         min-height: 1;
         padding: 0 1;
         border: none;
-        border-top: solid ansi_bright_black;
     }
     #vars-tree {
         height: 10;
@@ -228,7 +226,6 @@ class TestDebuggerScreen(Screen[None]):
         min-height: 1;
         padding: 0 1;
         color: ansi_bright_black;
-        border-top: solid ansi_bright_black;
     }
     """
 

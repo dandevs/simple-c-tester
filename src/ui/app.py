@@ -169,20 +169,17 @@ class TestRunnerApp(App[None]):
         min-height: 1;
         padding: 0 1;
         background: transparent;
-        border-bottom: solid ansi_bright_black;
     }
     #search-input {
         height: 1;
         min-height: 1;
         border: none;
-        border-bottom: solid ansi_bright_black;
         padding: 0 1;
         background: transparent;
         color: ansi_default;
     }
     #search-input:focus {
         border: none;
-        border-bottom: solid ansi_bright_black;
         background: transparent;
     }
     #tree-view {
@@ -208,7 +205,6 @@ class TestRunnerApp(App[None]):
         padding: 0 1;
         background: transparent;
         color: ansi_bright_black;
-        border-top: solid ansi_bright_black;
     }
     """
 

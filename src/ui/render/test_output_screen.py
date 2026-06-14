@@ -50,7 +50,6 @@ class TestOutputScreen(Screen[None]):
         padding: 0 1;
         background: transparent;
         color: ansi_bright_black;
-        border-top: solid ansi_bright_black;
     }
     """
 
