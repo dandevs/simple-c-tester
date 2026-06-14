@@ -1,6 +1,22 @@
+"""Domain models for the C test runner.
+
+This module is the single home for the data model.  It is part of the
+``core`` layer and has NO dependency on the legacy global ``state`` module,
+``api``, or ``ui``.  All configuration that the models need is passed in
+explicitly (dependency injection), never read from globals.
+"""
+
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
 from .enum import TestState
+
+# Defaults used when no explicit configuration is supplied.  These mirror the
+# historical global defaults from the legacy ``state`` module so behaviour is
+# unchanged when callers omit the parameters.
+DEFAULT_DEBUG_PRECISION_MODE = "precise"
+DEFAULT_STORY_FILTER_PROFILE = "balanced"
 
 
 @dataclass
@@ -58,10 +74,10 @@ class DwarfCache:
     is unchanged. Runtime caches (source_line, annotation) are reset every run.
     """
 
-    dwarf_loader_cache: dict[str, any] = field(default_factory=dict)
-    function_index_cache: dict[str, any] = field(default_factory=dict)
-    global_index_cache: dict[str, any] = field(default_factory=dict)
-    type_index_cache: dict[str, any] = field(default_factory=dict)
+    dwarf_loader_cache: dict[str, Any] = field(default_factory=dict)
+    function_index_cache: dict[str, Any] = field(default_factory=dict)
+    global_index_cache: dict[str, Any] = field(default_factory=dict)
+    type_index_cache: dict[str, Any] = field(default_factory=dict)
     source_line_cache: dict[str, list[str]] = field(default_factory=dict)
     annotation_cache: dict[tuple, dict] = field(default_factory=dict)
     last_binary_path: str = ""
@@ -95,8 +111,8 @@ class Test:
     cancelled_by_user: bool = False
     rerun_after_user_cancel: bool = False
     force_rebuild_once: bool = False
-    debug_precision_mode: str = "precise"
-    story_filter_profile: str = "balanced"
+    debug_precision_mode: str = DEFAULT_DEBUG_PRECISION_MODE
+    story_filter_profile: str = DEFAULT_STORY_FILTER_PROFILE
     # persisted full-file annotations (db.json)
     story_annotations: dict[str, list[list]] = field(default_factory=dict)
     # All per-run mutable state lives here.  Replaced on every run.
@@ -127,43 +143,88 @@ class Suite:
 
 @dataclass
 class AppState:
+    """The discovered test tree plus the runner pool size.
+
+    ``populate_suites`` no longer reads global defaults; the desired default
+    debug-precision mode and story-filter profile must be passed in by the
+    caller (typically from a :class:`~core.config.RunnerConfig`).
+    """
+
     root_suite: Suite = field(default_factory=lambda: Suite(name="root"))
     all_suites: list[Suite] = field(default_factory=list)
     all_tests: list[Test] = field(default_factory=list)
     available_runners = 0
 
-    def populate_suites(self, path: str) -> None:
+    def populate_suites(
+        self,
+        path: str,
+        *,
+        debug_precision_mode: str = DEFAULT_DEBUG_PRECISION_MODE,
+        story_filter_profile: str = DEFAULT_STORY_FILTER_PROFILE,
+    ) -> None:
+        """Discover ``*.c`` test files under ``path``.
+
+        ``debug_precision_mode`` and ``story_filter_profile`` are the defaults
+        applied to every newly discovered test; callers should source them from
+        a :class:`~core.config.RunnerConfig`.
+        """
         root = Path(path)
         for entry in sorted(root.iterdir()):
             if entry.is_dir():
-                self.root_suite.children.append(self._build_suite(entry, path))
+                self.root_suite.children.append(
+                    self._build_suite(
+                        entry,
+                        debug_precision_mode=debug_precision_mode,
+                        story_filter_profile=story_filter_profile,
+                    )
+                )
             elif entry.suffix == ".c":
-                import state as global_state
-
-                test = Test(
-                    name=entry.stem,
-                    source_path=str(entry),
-                    debug_precision_mode=global_state.debug_precision_mode_preference,
-                    story_filter_profile=global_state.story_filter_profile_preference,
+                test = self._make_test(
+                    entry,
+                    debug_precision_mode=debug_precision_mode,
+                    story_filter_profile=story_filter_profile,
                 )
                 self.root_suite.tests.append(test)
                 self.all_tests.append(test)
 
-    def _build_suite(self, dir_path: Path, base_path: str) -> Suite:
+    def _build_suite(
+        self,
+        dir_path: Path,
+        *,
+        debug_precision_mode: str,
+        story_filter_profile: str,
+    ) -> Suite:
         suite = Suite(name=dir_path.name)
         self.all_suites.append(suite)
         for entry in sorted(dir_path.iterdir()):
             if entry.is_dir():
-                suite.children.append(self._build_suite(entry, base_path))
+                suite.children.append(
+                    self._build_suite(
+                        entry,
+                        debug_precision_mode=debug_precision_mode,
+                        story_filter_profile=story_filter_profile,
+                    )
+                )
             elif entry.suffix == ".c":
-                import state as global_state
-
-                test = Test(
-                    name=entry.stem,
-                    source_path=str(entry),
-                    debug_precision_mode=global_state.debug_precision_mode_preference,
-                    story_filter_profile=global_state.story_filter_profile_preference,
+                test = self._make_test(
+                    entry,
+                    debug_precision_mode=debug_precision_mode,
+                    story_filter_profile=story_filter_profile,
                 )
                 suite.tests.append(test)
                 self.all_tests.append(test)
         return suite
+
+    @staticmethod
+    def _make_test(
+        entry: Path,
+        *,
+        debug_precision_mode: str,
+        story_filter_profile: str,
+    ) -> Test:
+        return Test(
+            name=entry.stem,
+            source_path=str(entry),
+            debug_precision_mode=debug_precision_mode,
+            story_filter_profile=story_filter_profile,
+        )
