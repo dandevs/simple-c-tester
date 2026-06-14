@@ -12,7 +12,7 @@ from textual.widgets import Button, Static, Tree as TextualTree
 
 import state as global_state
 from state import state
-from core.models import Test, TestState
+from core.models import Test, TestState, TestRun
 from runner import (
     start_debug_session,
     stop_debug_session,
@@ -450,7 +450,6 @@ class TestDebuggerScreen(Screen[None]):
 
     def _reset_story_state(self) -> None:
         self._maybe_refresh_dwarf_cache()
-        from models import TestRun
         self.test.current_run = TestRun()
         invalidate_story_annotation_cache(self.test, self.test.dwarf_cache)
         self._line_frames_cache_key = None

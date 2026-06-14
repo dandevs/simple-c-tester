@@ -11,7 +11,7 @@ from urllib import parse as urllib_parse
 
 import state as global_state
 from state import state, active_processes, subprocess_columns
-from core.models import Test, TestState, TimelineEvent
+from core.models import Test, TestState, TimelineEvent, TestRun
 from runner.makefile import (
     refresh_dependency_graph,
     generate_makefile,
@@ -1453,7 +1453,6 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         if test.timeline_capture_enabled or global_state.timeline_capture_enabled:
             _ensure_debug_build_mode(True)
 
-        from models import TestRun
         test.current_run = TestRun()
         binary_path = test_binary_path(test.source_path)
         try:
@@ -1524,7 +1523,6 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
 
     _ensure_debug_build_mode(True)
 
-    from models import TestRun
     test.current_run = TestRun()
     binary_path = test_binary_path(test.source_path)
     try:
