@@ -294,6 +294,9 @@ class TestDebuggerScreen(Screen[None]):
         self._vars_tree_signature: tuple | None = None
         self._vars_tree_scroll_by_frame: dict[tuple[int, str, int], float] = {}
         self._vars_tree_current_key: tuple[int, str, int] | None = None
+        # Collapsed variable paths (dotted-key tuples) survive tree rebuilds
+        # because they are content-keyed, not frame-keyed.
+        self._collapsed_var_paths: set[tuple[str, ...]] = set()
         self.variables_visible = True
         self.variables_diff_mode = False
         self._footer_timer = None
@@ -376,6 +379,19 @@ class TestDebuggerScreen(Screen[None]):
         cancel_pending_story_annotations_persist(self.test)
         save_story_annotations(os.path.abspath(self.test.source_path), {})
         clear_debug_line()
+
+    # ----- Variables tree collapse/expand persistence ------------------
+    # The tree is rebuilt on most ticks; these handlers keep user collapse
+    # state in a content-keyed set so it survives rebuilds and frame scrubbing.
+    def on_tree_node_collapsed(self, event) -> None:
+        path = getattr(getattr(event, "node", None), "data", None)
+        if isinstance(path, tuple):
+            self._collapsed_var_paths.add(path)
+
+    def on_tree_node_expanded(self, event) -> None:
+        path = getattr(getattr(event, "node", None), "data", None)
+        if isinstance(path, tuple):
+            self._collapsed_var_paths.discard(path)
 
     async def action_close(self) -> None:
         self.app.pop_screen()
@@ -502,6 +518,7 @@ class TestDebuggerScreen(Screen[None]):
         self._vars_tree_signature = None
         self._vars_tree_scroll_by_frame.clear()
         self._vars_tree_current_key = None
+        self._collapsed_var_paths.clear()
         self.last_signature = None
         self.selected_frame_index = -1
         self._follow_latest_frame = True
@@ -1521,8 +1538,9 @@ class TestDebuggerScreen(Screen[None]):
 
         # Feature G: variable diff mode — show only changed variables.
         diff_has_previous = True
+        diff_map: dict[str, tuple[str, str | None]] = {}
         if self.variables_diff_mode and vars_list:
-            vars_list, diff_has_previous = self._compute_variable_diff(
+            vars_list, diff_map, diff_has_previous = self._compute_variable_diff(
                 vars_list, selected_event
             )
 
@@ -1565,7 +1583,11 @@ class TestDebuggerScreen(Screen[None]):
         self._vars_tree_scroll_by_frame[event_key] = 0.0
 
         self._vars_tree_signature = build_variables_tree(
-            vars_list, self.vars_tree_widget, self.vars_widget
+            vars_list,
+            self.vars_tree_widget,
+            self.vars_widget,
+            collapsed_paths=self._collapsed_var_paths,
+            diff_map=diff_map,
         )
         # build_variables_tree overwrites the panel label; re-assert diff label.
         if self.variables_diff_mode:
@@ -1586,16 +1608,18 @@ class TestDebuggerScreen(Screen[None]):
         self,
         current_vars: list[tuple[str, str, str]],
         selected_event,
-    ) -> tuple[list[tuple[str, str, str]], bool]:
+    ) -> tuple[list[tuple[str, str, str]], dict[str, tuple[str, str | None]], bool]:
         """Diff current frame variables against the previous frame.
 
-        Returns (diffed_vars_list, has_previous_frame). When there is no
-        previous frame, the original ``current_vars`` is returned unchanged so
-        the panel falls back to showing everything.
+        Returns ``(diffed_vars, diff_map, has_previous_frame)``. ``diff_map``
+        maps a variable name to ``(status, old_value)`` where status is
+        ``"added"`` / ``"removed"`` / ``"changed"``. When there is no previous
+        frame, the original ``current_vars`` is returned unchanged with an
+        empty diff map so the panel falls back to showing everything.
         """
         frames = self._line_frames()
         if not frames:
-            return list(current_vars), False
+            return list(current_vars), {}, False
         # Locate the selected frame by identity (robust against dataclass
         # value-equality collisions).
         sel_idx = -1
@@ -1607,7 +1631,7 @@ class TestDebuggerScreen(Screen[None]):
             sel_idx = self.selected_frame_index
         prev_idx = sel_idx - 1
         if prev_idx < 0 or prev_idx >= len(frames):
-            return list(current_vars), False
+            return list(current_vars), {}, False
 
         prev_event = frames[prev_idx]
         prev_key = (prev_event.index, prev_event.file_path, prev_event.line)
@@ -1616,30 +1640,38 @@ class TestDebuggerScreen(Screen[None]):
         else:
             prev_raw = prev_event.variables or []
 
-        prev_map: dict[str, str] = {}
+        # Previous frame: name -> (value, type_hint)
+        prev_map: dict[str, tuple[str, str]] = {}
         for vt in prev_raw:
-            if len(vt) >= 2:
-                prev_map[vt[0]] = vt[1]
+            if len(vt) >= 3:
+                prev_map[vt[0]] = (vt[1], vt[2])
+            elif len(vt) == 2:
+                prev_map[vt[0]] = (vt[1], "")
         # `current_vars` is already normalized to 3-tuples.
-        curr_map: dict[str, str] = {name: value for name, value, _ in current_vars}
+        curr_map: dict[str, tuple[str, str]] = {
+            name: (value, type_hint) for name, value, type_hint in current_vars
+        }
 
         diffed: list[tuple[str, str, str]] = []
-        # Changed / new variables (iterate in current order for stability).
+        diff_map: dict[str, tuple[str, str | None]] = {}
+
+        # Changed / newly in-scope variables (iterate in current order for stability).
         for name, value, type_hint in current_vars:
             if name not in prev_map:
-                # Newly in-scope variable.
-                diffed.append(("+" + name, value, type_hint))
-            elif prev_map[name] != value:
-                # Value changed between frames.
-                diffed.append((name, f"{prev_map[name]} \u2192 {value}", type_hint))
-            # Unchanged variables are intentionally skipped.
+                diffed.append((name, value, type_hint))
+                diff_map[name] = ("added", None)
+            elif prev_map[name][0] != value:
+                diffed.append((name, value, type_hint))
+                diff_map[name] = ("changed", prev_map[name][0])
 
-        # Removed variables (present in previous frame, absent now).
-        for name in prev_map:
+        # Removed variables (present in previous frame, absent now) so they
+        # stay visible in the tree, struck-through red.
+        for name, (value, type_hint) in prev_map.items():
             if name not in curr_map:
-                diffed.append(("-" + name, prev_map[name], ""))
+                diffed.append((name, value, type_hint))
+                diff_map[name] = ("removed", None)
 
-        return diffed, True
+        return diffed, diff_map, True
 
     def _build_header_text(self) -> Text:
         """Build the two-line story/debug header with status badge."""

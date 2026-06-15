@@ -90,6 +90,24 @@ def _looks_pointer_value(value: str) -> bool:
     return stripped.startswith("0x")
 
 
+def _classify_for_expansion(value: str, type_hint: str = "") -> str | None:
+    """Decide how (or whether) to deep-expand a captured variable.
+
+    Returns one of:
+      - "pointer":  gdb emitted a pointer value (0x...) -> deref to reach fields
+      - "aggregate": gdb emitted a struct/array literal ({...}) -> expand in place
+      - "unknown":  value was unresolved ("?") -> let var_create resolve it
+      - None:       plain scalar already shown inline, nothing to expand
+    """
+    if value == "?":
+        return "unknown"
+    if _looks_pointer_value(value):
+        return "pointer"
+    if value.strip().startswith("{"):
+        return "aggregate"
+    return None
+
+
 def _format_dwarf_type(type_info) -> str:
     if type_info is None:
         return ""
@@ -821,11 +839,17 @@ async def _capture_scope_variables(
     ) -> list[tuple[str, str, str]]:
         base = [(name, value, type_hint)]
 
-        should_expand = value == "?" or _looks_pointer_value(value)
-        if not should_expand or max_depth <= 0:
+        if max_depth <= 0:
             return base
 
-        expression = name if value == "?" else f"*({name})"
+        kind = _classify_for_expansion(value, type_hint)
+        if kind is None:
+            return base
+
+        # Pointers must be dereferenced to expose their fields; aggregates
+        # (structs/arrays shown as {...}) and unresolved values are created
+        # directly under their own name.
+        expression = f"*({name})" if kind == "pointer" else name
         created = await controller.var_create(expression, frame="*")
         if created is None:
             return base

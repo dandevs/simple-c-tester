@@ -16,6 +16,52 @@ STORY_CURRENT_LINE = "#34352d"
 STORY_CURRENT_LINE_SELECTED = "#49483e"
 STORY_BAR_BASE = "dim"
 
+# Variable value coloring (by inferred kind).
+VAR_COLOR_NUMBER = "green"
+VAR_COLOR_POINTER = "magenta"
+VAR_COLOR_STRING = "yellow"
+VAR_COLOR_NIL = "bold red"
+VAR_COLOR_BOOL = "bright_cyan"
+VAR_COLOR_DEFAULT = "default"
+VAR_COLOR_NAME = "cyan"
+VAR_DIFF_ADDED_NAME = "bold green"
+VAR_DIFF_REMOVED_NAME = "red strike"
+
+
+def _is_numeric(value: str) -> bool:
+    """True when a rendered value looks like a C numeric literal."""
+    s = value.strip().rstrip("fFuUlL")
+    if not s:
+        return False
+    body = s[1:] if s[0] in "+-" else s
+    lowered = body.lower()
+    if lowered.startswith("0x"):
+        digits = body[2:]
+        return len(digits) > 0 and all(c in "0123456789abcdefABCDEF" for c in digits)
+    try:
+        float(body)
+        return True
+    except ValueError:
+        return False
+
+
+def _value_style(value: str, type_hint: str) -> str:
+    """Pick a Rich style for a variable value from its rendered text + type."""
+    v = value.strip()
+    if v in {"0x0", "(nil)", "nullptr", "NULL", "null"}:
+        return VAR_COLOR_NIL
+    if v.startswith(('"', "'")):
+        return VAR_COLOR_STRING
+    if v.startswith(("0x", "-0x")):
+        return VAR_COLOR_POINTER
+    if v in {"true", "false"}:
+        return VAR_COLOR_BOOL
+    if _is_numeric(v):
+        return VAR_COLOR_NUMBER
+    if type_hint.strip().endswith("*"):
+        return VAR_COLOR_POINTER
+    return VAR_COLOR_DEFAULT
+
 
 def build_frame_snippet(
     source_path,
@@ -371,7 +417,25 @@ def _compute_frame_cards_window(selected_frame_index, total, height):
     return (start, end)
 
 
-def build_variables_tree(vars_list, vars_tree_widget, vars_widget):
+def build_variables_tree(
+    vars_list,
+    vars_tree_widget,
+    vars_widget,
+    collapsed_paths=None,
+    diff_map=None,
+):
+    """Render captured variables into a Textual tree.
+
+    Args:
+        collapsed_paths: optional set of dotted-path tuples the user has
+            collapsed; survives rebuilds (paths are content-keyed, not
+            frame-keyed).
+        diff_map: optional ``{name: (status, old_value)}`` where status is
+            ``"added"``/``"removed"``/``"changed"``. Drives diff coloring.
+    """
+    collapsed = collapsed_paths or set()
+    diffs = diff_map or {}
+
     if not vars_list:
         vars_widget.update(
             Text("Variables (none captured for this frame)", style=STORY_HELP)
@@ -431,34 +495,62 @@ def build_variables_tree(vars_list, vars_tree_widget, vars_widget):
     tree.root.remove_children()
     tree.root.expand()
 
-    def _label(node: _Node) -> Text:
+    def _truncate(text: str, limit: int = 80) -> str:
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    def _label(node: _Node, dotted_key: str) -> Text:
+        diff_entry = diffs.get(dotted_key)
+        diff_status = diff_entry[0] if diff_entry else None
+        diff_old = diff_entry[1] if diff_entry else None
+
         label = Text()
-        label.append(node.name, style="cyan")
+        if diff_status == "added":
+            label.append("+", style="bold green")
+            label.append(node.name, style=VAR_DIFF_ADDED_NAME)
+        elif diff_status == "removed":
+            label.append("-", style="bold red")
+            label.append(node.name, style=VAR_DIFF_REMOVED_NAME)
+        else:
+            label.append(node.name, style=VAR_COLOR_NAME)
+
         if node.value:
-            val = node.value
-            if len(val) > 80:
-                val = val[:77] + "..."
-            label.append(" = ", style="dim")
-            label.append(val, style="default")
+            if diff_status == "changed" and diff_old is not None:
+                label.append(" = ", style="dim")
+                label.append(_truncate(diff_old, 40), style="red strike")
+                label.append(" \u2192 ", style="dim")
+                label.append(
+                    _truncate(node.value),
+                    style=_value_style(node.value, node.type_hint),
+                )
+            else:
+                label.append(" = ", style="dim")
+                label.append(
+                    _truncate(node.value),
+                    style=_value_style(node.value, node.type_hint),
+                )
+
         if node.type_hint:
             label.append(f" [{node.type_hint}]", style="dim")
         return label
 
-    def _append(tree_node, item: _Node) -> None:
+    def _append(tree_node, item: _Node, parent_path: tuple = ()) -> None:
+        path = (*parent_path, item.name)
+        dotted_key = ".".join(path)
         allow_expand = bool(item.children)
-        label = _label(item)
+        is_collapsed = path in collapsed
+        label = _label(item, dotted_key)
         child_tree = tree_node.add(
             label,
-            expand=True,
+            data=path,
+            expand=not is_collapsed,
             allow_expand=allow_expand,
         )
         for name in sorted(item.children.keys()):
-            _append(child_tree, item.children[name])
+            _append(child_tree, item.children[name], path)
 
     for name in sorted(root.keys()):
         _append(tree.root, root[name])
 
-    tree.root.expand_all()
     tree.refresh()
 
     return tuple(vars_list)
