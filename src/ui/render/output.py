@@ -66,6 +66,15 @@ def get_test_output(test: Test) -> list[Text] | None:
     stdout = run.stdout if run is not None else ""
 
     if test.state == TestState.FAILED:
+        # Signal/crash banner
+        run_ref = test.current_run
+        sig = run_ref.signal_name if run_ref is not None else ""
+        if sig:
+            crash = Text()
+            crash.append(f"\u2620 CRASHED: {sig}", style="bold red")
+            sections.append(crash)
+            sections.append(Text())
+
         if compile_err_raw or compile_err.strip():
             compile_text = _to_text(compile_err_raw, compile_err)
             if compile_text and compile_text.plain.strip():

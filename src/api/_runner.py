@@ -5,6 +5,7 @@ import time
 import asyncio
 import re
 import json
+import signal as signal_mod
 from pathlib import Path
 from typing import Callable
 from urllib import parse as urllib_parse
@@ -547,6 +548,27 @@ def refresh_editor_breakpoints_cache(force: bool = False) -> tuple[list[tuple[st
     _editor_breakpoints_cache = parsed_breakpoints
     _editor_breakpoints_mtime_ns = file_mtime_ns
     return list(_editor_breakpoints_cache), parse_error
+
+
+def save_editor_breakpoints(breakpoints: list[tuple[str, int]]) -> None:
+    """Persist breakpoints to test_build/breakpoints.json."""
+    global _editor_breakpoints_cache, _editor_breakpoints_mtime_ns
+    path = editor_breakpoints_file_path()
+    deduped = sorted(set(breakpoints))
+    payload = [
+        {"filepath": f, "line_number": n}
+        for f, n in deduped
+    ]
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    _editor_breakpoints_cache = list(deduped)
+    try:
+        _editor_breakpoints_mtime_ns = os.stat(path).st_mtime_ns
+    except OSError:
+        pass
 
 
 def prime_editor_breakpoints_cache() -> None:
@@ -1268,7 +1290,21 @@ async def _run_plain_binary(test: Test, binary_path: str, proc_env: dict[str, st
         _append_timeline_event(test, "run_exit", "exited 0")
     else:
         test.state = TestState.FAILED
-        _append_timeline_event(test, "run_exit", f"exited {run_proc.returncode}")
+        if run_proc.returncode is not None and run_proc.returncode < 0:
+            sig_num = -run_proc.returncode
+            try:
+                sig_name = signal_mod.Signals(sig_num).name  # "SIGSEGV", "SIGABRT", etc.
+            except (ValueError, KeyError):
+                sig_name = f"SIG{sig_num}"
+            if run is not None:
+                run.signal_name = sig_name
+            _append_timeline_event(
+                test, "run_exit", f"killed by {sig_name} (signal {sig_num})"
+            )
+        else:
+            _append_timeline_event(
+                test, "run_exit", f"exited {run_proc.returncode}"
+            )
     test.time_state_changed = time.monotonic()
 
 

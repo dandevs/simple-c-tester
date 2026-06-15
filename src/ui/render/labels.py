@@ -121,9 +121,16 @@ def _test_label_base(test: Test, now: float) -> Text:
         text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
     elif test.state == TestState.FAILED:
-        text = Text(f"{ICON_FAIL} ", style=TEST_FAILED_STYLE)
-        text.append(test.name, style=TEST_FAILED_STYLE)
-        text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
+        run = test.current_run
+        sig = run.signal_name if run is not None else ""
+        if sig:
+            text = Text(f"{ICON_FAIL} ", style=TEST_FAILED_STYLE)
+            text.append(test.name, style=TEST_FAILED_STYLE)
+            text.append(f" [{sig}]", style="bold red")  # e.g. [SIGSEGV]
+        else:
+            text = Text(f"{ICON_FAIL} ", style=TEST_FAILED_STYLE)
+            text.append(test.name, style=TEST_FAILED_STYLE)
+            text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
         return text
 
     text = Text(test.name, style=TEST_DEFAULT_STYLE)

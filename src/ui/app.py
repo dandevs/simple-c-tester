@@ -104,6 +104,7 @@ def _collect_all_suite_keys(suite: Suite, parent_key: str = "") -> set[str]:
 def _build_status_line(
     run_complete: bool = False,
     total_elapsed: float = 0.0,
+    running_names: list[str] | None = None,
 ) -> Text:
     """Build the one-line status summary from current test states."""
     tests = state.all_tests
@@ -112,6 +113,7 @@ def _build_status_line(
     failed = sum(1 for t in tests if t.state == TestState.FAILED)
     running = sum(1 for t in tests if t.state == TestState.RUNNING)
     pending = sum(1 for t in tests if t.state == TestState.PENDING)
+    cancelled = sum(1 for t in tests if t.state == TestState.CANCELLED)
 
     text = Text()
     text.append("C Tester", style="bold")
@@ -141,6 +143,34 @@ def _build_status_line(
         else:
             text.append("DONE \u2713 all passed", style=STATUS_PASS_STYLE)
         text.append(f"  {total_elapsed:.1f}s", style=MUTED_STYLE)
+    else:
+        # Live progress feedback while a run is in flight.
+        # Show completion ratio, currently-running test names, and a
+        # ticking elapsed timer.  Only emit once the run has started
+        # (some test has left PENDING) so the initial mount stays clean.
+        completed = passed + failed + cancelled
+        run_active = bool(running or passed or failed)
+        if run_active and total:
+            text.append("  ", style=SEPARATOR_STYLE)
+            text.append("\u2502", style=SEPARATOR_STYLE)
+            text.append("  ", style=SEPARATOR_STYLE)
+            text.append(f"{completed}/{total}", style=MUTED_STYLE)
+
+            names = list(running_names or [])
+            if names:
+                text.append("  ", style=SEPARATOR_STYLE)
+                text.append("\u2502", style=SEPARATOR_STYLE)
+                text.append("  ", style=SEPARATOR_STYLE)
+                text.append("running:", style=MUTED_STYLE)
+                text.append(" ", style=MUTED_STYLE)
+                shown = names[:2]
+                text.append(", ".join(shown), style=STATUS_RUN_STYLE)
+                extra = len(names) - len(shown)
+                if extra > 0:
+                    text.append(f" +{extra} more", style=MUTED_STYLE)
+
+            if total_elapsed > 0:
+                text.append(f"  {total_elapsed:.1f}s", style=MUTED_STYLE)
 
     return text
 
@@ -706,10 +736,14 @@ class TestRunnerApp(App[None]):
                 elapsed = self._run_end_time - self._run_start_time
             elif self._run_start_time > 0:
                 elapsed = time.monotonic() - self._run_start_time
+            running_names = [
+                t.name for t in state.all_tests if t.state == TestState.RUNNING
+            ]
             self.status_widget.update(
                 _build_status_line(
                     run_complete=self._run_complete,
                     total_elapsed=elapsed,
+                    running_names=running_names,
                 )
             )
 

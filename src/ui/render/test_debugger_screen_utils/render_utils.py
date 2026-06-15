@@ -26,6 +26,7 @@ def build_frame_snippet(
     selected,
     code_width,
     line_annotations=None,
+    breakpoint_lines=None,
 ):
     """Build a syntax-highlighted snippet with pre-computed inline annotations."""
     padded_width = max(1, code_width)
@@ -59,6 +60,18 @@ def build_frame_snippet(
                 "dim",
                 (local_line, 0),
                 (local_line, padded_width),
+            )
+
+    # Feature F: tint breakpoint lines (subtle dark-red) before the current-line
+    # highlight so the active line keeps its own background.
+    bp_lines = breakpoint_lines or set()
+    for bp_line in bp_lines:
+        if snippet_start <= bp_line <= snippet_end:
+            local_bp = (bp_line - snippet_start) + 1
+            syntax.stylize_range(
+                "on #3a1e1e",
+                (local_bp, 0),
+                (local_bp, padded_width),
             )
 
     local_line = (line_number - snippet_start) + 1
@@ -231,10 +244,15 @@ def render_full_file_panel(
     selected_frame_index,
     source_cache,
     annotations=None,
+    active_breakpoints=None,
 ):
-    """Render the full-file code panel using pre-computed annotations."""
+    """Render the full-file code panel using pre-computed annotations.
+
+    Returns ``(source_path, snippet_start, snippet_end)`` when a source snippet
+    is rendered (used for click-to-toggle breakpoint mapping), otherwise None.
+    """
     if code_widget is None:
-        return
+        return None
 
     total = len(frames)
     if total == 0:
@@ -245,7 +263,7 @@ def render_full_file_panel(
             "Press R to run and capture a story.", style=f"bold {STORY_META_SELECTED}"
         )
         code_widget.update(hint)
-        return
+        return None
 
     selected = selected_frame_index
     if selected < 0 or selected >= total:
@@ -254,13 +272,13 @@ def render_full_file_panel(
 
     if event.kind == "test_failed":
         code_widget.update(Text(event.message, style="bold red"))
-        return
+        return None
 
     source_path = os.path.abspath(event.file_path)
     source_lines = load_source_lines(source_path, source_cache)
     if not source_lines:
         code_widget.update(Text("Source unavailable for selected frame.", style=STORY_HELP))
-        return
+        return None
 
     line_number = max(1, min(len(source_lines), int(event.line)))
     width = max(8, code_widget.size.width - 2)
@@ -276,6 +294,9 @@ def render_full_file_panel(
     number_width = len(str(max(1, snippet_end)))
     code_width = max(1, width - (number_width + 3))
     file_annotations = annotations.get(source_path, {}) if annotations else {}
+    # Feature F: breakpoint lines for the currently shown source file.
+    bp_set = active_breakpoints or set()
+    bp_lines = {line for (path, line) in bp_set if os.path.abspath(path) == source_path}
     snippet = build_frame_snippet(
         source_path,
         source_lines,
@@ -285,18 +306,23 @@ def render_full_file_panel(
         True,
         code_width,
         line_annotations=file_annotations,
+        breakpoint_lines=bp_lines,
     )
 
     title = Text()
     title.append("\u25b6 ", style=f"bold {STORY_META_SELECTED}")
     title.append("Full File ", style=f"bold {STORY_META_SELECTED}")
     title.append(display_path(source_path), style=f"bold {STORY_META_HIGHLIGHT}")
-    title.append(":", style="dim")
+    title.append(":", style="bright_black")
     title.append(str(line_number), style=STORY_META_HIGHLIGHT)
     if event.function:
-        title.append(f"  fn={event.function}", style="dim")
+        title.append(f"  fn={event.function}", style="bright_black")
+    if bp_lines:
+        title.append(f"  \u25cf{len(bp_lines)} bp", style="bold red")
+    title.append("  (click a line to toggle breakpoint)", style="bright_black")
 
     code_widget.update(Group(title, snippet))
+    return (source_path, snippet_start, snippet_end)
 
 
 def _compute_frame_cards_window(selected_frame_index, total, height):

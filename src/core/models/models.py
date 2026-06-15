@@ -59,6 +59,7 @@ class TestRun:
     debug_exit_code: int | None = None
     aggregate_annotations: bool = True
     timeline_selected_event_index: int = -1
+    signal_name: str = ""  # e.g. "SIGSEGV" when the test process was killed by a signal
     # {func_name: {abs_file_path: {line_no: {var_name: value}}}}
     annotation_cache: dict[str, dict[str, dict[int, dict[str, str]]]] = field(
         default_factory=dict

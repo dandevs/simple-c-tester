@@ -137,6 +137,7 @@ class DebugControlsModal(ModalScreen[None]):
             ("<- / ->", "scrub one frame"),
             ("Ctrl+<- / Ctrl+->", "scrub ten frames"),
             ("V", "toggle variables panel"),
+            ("Shift+V", "toggle variable diff"),
             ("Ctrl+Enter", "toggle full-file view"),
             ("T", "toggle timeline capture"),
             ("Esc or Ctrl+C", "back to test list"),
@@ -258,6 +259,7 @@ class TestDebuggerScreen(Screen[None]):
         Binding("ctrl+left", "timeline_prev_10", "-10 Steps"),
         Binding("ctrl+right", "timeline_next_10", "+10 Steps"),
         Binding("v", "toggle_variables", "Variables"),
+        Binding("shift+v", "toggle_variables_diff", "Var Diff"),
         Binding("p", "toggle_precision", "Precision"),
         Binding("ctrl+enter", "toggle_full_file_view", "Full File"),
         Binding("a", "jump_to_assertion", "Assertion"),
@@ -292,11 +294,16 @@ class TestDebuggerScreen(Screen[None]):
         self._vars_tree_scroll_by_frame: dict[tuple[int, str, int], float] = {}
         self._vars_tree_current_key: tuple[int, str, int] | None = None
         self.variables_visible = True
+        self.variables_diff_mode = False
         self._footer_timer = None
         self._action_task: asyncio.Task | None = None
         self._action_label: str | None = None
         self._last_log_count = -1
         self.full_file_view = False
+        # Feature F: click-to-set breakpoints in full-file view
+        self._breakpoints: set[tuple[str, int]] = set()
+        self._fullfile_source_path: str = ""
+        self._fullfile_line_map: dict[int, int] = {}
         self._follow_latest_frame = True
         self._mouse_dragging = False
         # Code panel text selection (click-drag to select + copy)
@@ -340,6 +347,12 @@ class TestDebuggerScreen(Screen[None]):
 
             combined = (run.stderr or "") + "\n" + (run.compile_err or "")
             self._assertion_failures = parse_assertion_failures(combined)
+
+        # Feature F: load current editor breakpoints for click-to-toggle.
+        from api._runner import refresh_editor_breakpoints_cache
+
+        bps, _ = refresh_editor_breakpoints_cache()
+        self._breakpoints = {(os.path.abspath(f), n) for f, n in bps}
 
         self._set_footer_text()
         self._refresh_view(force=True)
@@ -667,6 +680,15 @@ class TestDebuggerScreen(Screen[None]):
             self._set_footer_text("Variables panel hidden.")
         self._refresh_view(force=True)
 
+    def action_toggle_variables_diff(self) -> None:
+        self.variables_diff_mode = not self.variables_diff_mode
+        # Invalidate the per-panel tree signature so the label always refreshes,
+        # even if the diffed content happens to equal the previous full listing.
+        self._vars_tree_signature = None
+        mode = "diff" if self.variables_diff_mode else "full"
+        self._set_footer_text(f"Variables: {mode} mode.")
+        self._refresh_view(force=True)
+
     def action_toggle_full_file_view(self) -> None:
         self.full_file_view = not self.full_file_view
         self._assertion_view = False
@@ -707,8 +729,14 @@ class TestDebuggerScreen(Screen[None]):
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         self._handle_timeline_click(event)
-        if not self._mouse_dragging:
-            self._handle_code_selection_start(event)
+        if self._mouse_dragging:
+            return
+        # Feature F: in full-file view, clicks toggle breakpoints instead of
+        # starting a text selection.
+        if self.full_file_view:
+            self._handle_fullfile_breakpoint_click(event)
+            return
+        self._handle_code_selection_start(event)
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         if self._mouse_dragging:
@@ -787,6 +815,42 @@ class TestDebuggerScreen(Screen[None]):
 
         self.selected_frame_index = ensure_selected_frame_index(new_index, total)
         self._update_selected_event_index_from_frame(frames[self.selected_frame_index])
+        self._refresh_view(force=True)
+
+    # ----- Feature F: click-to-toggle breakpoints (full-file view) ------
+
+    def _handle_fullfile_breakpoint_click(self, event: events.MouseDown) -> None:
+        """Toggle a breakpoint at the clicked source line in full-file view."""
+        if self.code_widget is None or not self._fullfile_line_map:
+            return
+        offset = event.get_content_offset(self.code_widget)
+        if offset is None:
+            return
+        panel_line = int(offset.y + self.code_widget.scroll_y)
+        source_line = self._fullfile_line_map.get(panel_line)
+        if source_line is None or source_line <= 0:
+            return
+        if not self._fullfile_source_path:
+            return
+        abs_path = os.path.abspath(self._fullfile_source_path)
+        self._toggle_breakpoint(abs_path, source_line)
+        event.prevent_default()
+        event.stop()
+
+    def _toggle_breakpoint(self, abs_path: str, line: int) -> None:
+        from api._runner import save_editor_breakpoints
+
+        key = (abs_path, line)
+        if key in self._breakpoints:
+            self._breakpoints.discard(key)
+            action = "removed"
+        else:
+            self._breakpoints.add(key)
+            action = "set"
+        save_editor_breakpoints(list(self._breakpoints))
+        self._set_footer_text(
+            f"Breakpoint {action}: {os.path.basename(abs_path)}:{line}"
+        )
         self._refresh_view(force=True)
 
     # ----- Code panel text selection (click-drag to copy) ---------------
@@ -1007,6 +1071,7 @@ class TestDebuggerScreen(Screen[None]):
             len(self._variables_cache),
             int(global_state.tsv_variables_height),
             self.variables_visible,
+            self.variables_diff_mode,
             int(self.size.width),
             int(self.size.height),
             self.full_file_view,
@@ -1293,14 +1358,29 @@ class TestDebuggerScreen(Screen[None]):
         if self.full_file_view:
             from runner.story_annotations import get_story_annotations
             annotations = get_story_annotations(self.test, cache=self.test.dwarf_cache)
-            render_full_file_panel(
+            meta = render_full_file_panel(
                 self.code_widget,
                 frames,
                 self.selected_frame_index,
                 self._source_cache,
                 annotations=annotations,
+                active_breakpoints=self._breakpoints,
             )
+            # Feature F: record the source path + panel-line→source-line mapping
+            # so click handlers can toggle breakpoints accurately.
+            if meta is not None:
+                source_path, snippet_start, snippet_end = meta
+                self._fullfile_source_path = source_path
+                self._fullfile_line_map = {
+                    (i + 1): snippet_start + i
+                    for i in range(snippet_end - snippet_start + 1)
+                }
+            else:
+                self._fullfile_source_path = ""
+                self._fullfile_line_map = {}
         else:
+            self._fullfile_source_path = ""
+            self._fullfile_line_map = {}
             render_code_panel(
                 self.code_widget,
                 frames,
@@ -1397,6 +1477,13 @@ class TestDebuggerScreen(Screen[None]):
                 name, value = var_tuple
                 vars_list.append((name, value, ""))
 
+        # Feature G: variable diff mode — show only changed variables.
+        diff_has_previous = True
+        if self.variables_diff_mode and vars_list:
+            vars_list, diff_has_previous = self._compute_variable_diff(
+                vars_list, selected_event
+            )
+
         target_scroll = self._vars_tree_scroll_by_frame.get(event_key, 0.0)
         if self._vars_tree_signature == tuple(vars_list):
             self.vars_tree_widget.scroll_to(y=target_scroll, animate=False, immediate=True)
@@ -1404,7 +1491,14 @@ class TestDebuggerScreen(Screen[None]):
             return
 
         if not vars_list:
-            self.vars_widget.update(Text("Variables (none captured for this frame)", style=self.STORY_HELP))
+            if self.variables_diff_mode:
+                if diff_has_previous:
+                    empty_msg = "Variables (no changes from previous frame)"
+                else:
+                    empty_msg = "Variables (diff: no previous frame)"
+            else:
+                empty_msg = "Variables (none captured for this frame)"
+            self.vars_widget.update(Text(empty_msg, style=self.STORY_HELP))
             tree = self.vars_tree_widget
             tree.root.set_label("Variables")
             tree.root.remove_children()
@@ -1415,12 +1509,15 @@ class TestDebuggerScreen(Screen[None]):
             self._vars_tree_signature = None
             return
 
-        self.vars_widget.update(
-            Text.assemble(
-                ("Variables", f"bold {STORY_META_SELECTED}"),
-                (f" ({len(vars_list)} vars)", STORY_HELP),
+        if self.variables_diff_mode:
+            self.vars_widget.update(self._variables_diff_label(diff_has_previous, len(vars_list)))
+        else:
+            self.vars_widget.update(
+                Text.assemble(
+                    ("Variables", f"bold {STORY_META_SELECTED}"),
+                    (f" ({len(vars_list)} vars)", STORY_HELP),
+                )
             )
-        )
 
         self._vars_tree_current_key = event_key
         self._vars_tree_scroll_by_frame[event_key] = 0.0
@@ -1428,7 +1525,79 @@ class TestDebuggerScreen(Screen[None]):
         self._vars_tree_signature = build_variables_tree(
             vars_list, self.vars_tree_widget, self.vars_widget
         )
+        # build_variables_tree overwrites the panel label; re-assert diff label.
+        if self.variables_diff_mode:
+            self.vars_widget.update(self._variables_diff_label(diff_has_previous, len(vars_list)))
         self.vars_tree_widget.scroll_to(y=target_scroll, animate=False, immediate=True)
+
+    def _variables_diff_label(self, diff_has_previous: bool, changed_count: int) -> Text:
+        """Build the variables panel label for diff mode."""
+        label = Text()
+        label.append("Variables (diff)", style=f"bold {STORY_META_SELECTED}")
+        if diff_has_previous:
+            label.append(f" ({changed_count} changed)", style="bright_black")
+        else:
+            label.append(" (no previous frame)", style="bright_black")
+        return label
+
+    def _compute_variable_diff(
+        self,
+        current_vars: list[tuple[str, str, str]],
+        selected_event,
+    ) -> tuple[list[tuple[str, str, str]], bool]:
+        """Diff current frame variables against the previous frame.
+
+        Returns (diffed_vars_list, has_previous_frame). When there is no
+        previous frame, the original ``current_vars`` is returned unchanged so
+        the panel falls back to showing everything.
+        """
+        frames = self._line_frames()
+        if not frames:
+            return list(current_vars), False
+        # Locate the selected frame by identity (robust against dataclass
+        # value-equality collisions).
+        sel_idx = -1
+        for i, fr in enumerate(frames):
+            if fr is selected_event:
+                sel_idx = i
+                break
+        if sel_idx < 0:
+            sel_idx = self.selected_frame_index
+        prev_idx = sel_idx - 1
+        if prev_idx < 0 or prev_idx >= len(frames):
+            return list(current_vars), False
+
+        prev_event = frames[prev_idx]
+        prev_key = (prev_event.index, prev_event.file_path, prev_event.line)
+        if is_debug_active(self.test):
+            prev_raw = self._variables_cache.get(prev_key, prev_event.variables or [])
+        else:
+            prev_raw = prev_event.variables or []
+
+        prev_map: dict[str, str] = {}
+        for vt in prev_raw:
+            if len(vt) >= 2:
+                prev_map[vt[0]] = vt[1]
+        # `current_vars` is already normalized to 3-tuples.
+        curr_map: dict[str, str] = {name: value for name, value, _ in current_vars}
+
+        diffed: list[tuple[str, str, str]] = []
+        # Changed / new variables (iterate in current order for stability).
+        for name, value, type_hint in current_vars:
+            if name not in prev_map:
+                # Newly in-scope variable.
+                diffed.append(("+" + name, value, type_hint))
+            elif prev_map[name] != value:
+                # Value changed between frames.
+                diffed.append((name, f"{prev_map[name]} \u2192 {value}", type_hint))
+            # Unchanged variables are intentionally skipped.
+
+        # Removed variables (present in previous frame, absent now).
+        for name in prev_map:
+            if name not in curr_map:
+                diffed.append(("-" + name, prev_map[name], ""))
+
+        return diffed, True
 
     def _build_header_text(self) -> Text:
         """Build the two-line story/debug header with status badge."""
