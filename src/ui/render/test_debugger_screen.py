@@ -27,13 +27,13 @@ from runner import (
     is_debug_active,
     cancel_test_and_restore_normal_build,
     state_changed,
-    persist_user_preferences,
     save_story_annotations,
     save_debug_line,
     clear_debug_line,
     _schedule_story_annotations_persist,
     cancel_pending_story_annotations_persist,
 )
+from core.userconfig import save_user_config
 from runner.story_filters import normalized_story_filter_profile
 from runner.story_annotations import invalidate_story_annotation_cache
 from .clipboard import copy_to_clipboard
@@ -617,7 +617,7 @@ class TestDebuggerScreen(Screen[None]):
         global_state.story_filter_profile_preference = normalized
         for test in state.all_tests:
             test.story_filter_profile = normalized
-        persist_user_preferences()
+        save_user_config({"story_filter_profile": normalized})
         self._set_footer_text(f"Story filter profile set to {normalized}.")
         self._refresh_view(force=True)
 
@@ -630,7 +630,7 @@ class TestDebuggerScreen(Screen[None]):
             "precise" if self.test.debug_precision_mode != "precise" else "loose"
         )
         global_state.debug_precision_mode_preference = self.test.debug_precision_mode
-        persist_user_preferences()
+        save_user_config({"debug_precision_mode": self.test.debug_precision_mode})
         mode = self.test.debug_precision_mode
 
         if self._variables_task is not None and not self._variables_task.done():

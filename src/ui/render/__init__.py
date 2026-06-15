@@ -19,6 +19,7 @@ from .clipboard import copy_to_clipboard
 from .tree import render_tree, render_tree_stdout
 from .test_output_screen import TestOutputScreen
 from .test_debugger_screen import TestDebuggerScreen
+from .options_screen import OptionsScreen
 
 __all__ = [
     "OutputBoxRenderMeta",
@@ -37,4 +38,5 @@ __all__ = [
     "copy_to_clipboard",
     "TestOutputScreen",
     "TestDebuggerScreen",
+    "OptionsScreen",
 ]

@@ -160,6 +160,11 @@ class TestRunner:
         # The parallel runner-pool size lives on AppState (the engine reads
         # ``state.available_runners`` in state_changed()).
         self.state.app_state.available_runners = self.config.parallel
+        # Default story/debug preferences flow from the resolved config (which
+        # already accounts for user-config + CLI overrides). These previously
+        # hydrated from test_build/db.json but now live in the user config file.
+        self.state.default_debug_precision_mode = self.config.debug_precision_mode
+        self.state.default_story_filter_profile = self.config.story_filter_profile
         self._debug_sessions: dict[str, DebugSession] = {}
 
     # ----- discovery ----------------------------------------------------

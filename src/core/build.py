@@ -300,17 +300,10 @@ def load_dependency_db(rs: RunnerState) -> dict[str, dict]:
     if not isinstance(tests_data, dict):
         tests_data = {}
 
-    prefs_payload = data.get("preferences")
-    if isinstance(prefs_payload, dict):
-        rs.default_debug_precision_mode = _normalized_precision_mode(
-            prefs_payload.get("debug_precision_mode")
-        )
-        rs.default_story_filter_profile = normalized_story_filter_profile(
-            prefs_payload.get("story_filter_profile")
-        )
-    else:
-        rs.default_debug_precision_mode = "precise"
-        rs.default_story_filter_profile = "balanced"
+    # Note: user preferences (debug_precision_mode, story_filter_profile, and
+    # all Options-menu settings) are loaded from ~/.config/ctester/config.json
+    # via core.userconfig, not from this file.  Any stale "preferences" key in
+    # an old db.json is ignored.
 
     try:
         _last_db_mtime_ns = os.stat(DB_PATH).st_mtime_ns
@@ -369,14 +362,6 @@ def save_dependency_db(
         tests_payload[test_key] = entry
 
     payload = {"tests": tests_payload, "active": rs.app_active}
-    payload["preferences"] = {
-        "debug_precision_mode": _normalized_precision_mode(
-            rs.default_debug_precision_mode
-        ),
-        "story_filter_profile": normalized_story_filter_profile(
-            rs.default_story_filter_profile
-        ),
-    }
     if rs.debug_line is not None:
         payload["debugLine"] = rs.debug_line
     new_content = json.dumps(payload, indent=2, sort_keys=True) + "\n"

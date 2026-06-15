@@ -17,11 +17,13 @@ from api import TestRunner
 from ui.render import (
     TestOutputScreen,
     TestDebuggerScreen,
+    OptionsScreen,
     render_tree,
     OutputBoxRegion,
     TestRowRegion,
     SuiteRowRegion,
 )
+from core.userconfig import save_user_config
 from ui.render.styles import (
     STATUS_BASE_STYLE,
     STATUS_FAIL_STYLE,
@@ -189,6 +191,9 @@ def _footer_text(watch_mode: bool) -> Text:
     text.append(" Story", style=MUTED_STYLE)
     text.append(sep)
     text.append("o", style="bold")
+    text.append(" Options", style=MUTED_STYLE)
+    text.append(sep)
+    text.append("O", style="bold")
     text.append(" Output", style=MUTED_STYLE)
     text.append(sep)
     text.append("r", style="bold")
@@ -262,7 +267,8 @@ class TestRunnerApp(App[None]):
         Binding("k", "nav_up", "Prev"),
         Binding("j", "nav_down", "Next"),
         Binding("enter", "open_story_selected", "Story"),
-        Binding("o", "open_output_selected", "Output"),
+        Binding("o", "open_options", "Options"),
+        Binding("O", "open_output_selected", "Output"),
         Binding("r", "rerun_selected", "Rerun"),
         Binding("R", "rerun_all", "Rerun All"),
         Binding("n", "next_failure", "Next Fail"),
@@ -280,6 +286,8 @@ class TestRunnerApp(App[None]):
         output_max_lines: int,
         theme_name: str,
         timeline_enabled: bool = False,
+        user_config: dict | None = None,
+        cli_overrides: set[str] | None = None,
     ):
         super().__init__()
         self.runner = runner
@@ -311,6 +319,14 @@ class TestRunnerApp(App[None]):
         self._run_complete: bool = False
         self._run_start_time: float = 0.0
         self._run_end_time: float = 0.0
+        # Persisted user config (mutable in-memory mirror of the on-disk file).
+        # The Options screen edits this; apply_option persists on each change.
+        self.user_config: dict = dict(user_config or {})
+        self.cli_overrides: set[str] = set(cli_overrides or ())
+        self._apply_theme(theme_name)
+
+    def _apply_theme(self, theme_name: str) -> None:
+        """Register + select the ANSI theme when requested; otherwise default."""
         if theme_name == "ansi":
             theme = _ansi_theme()
             self.register_theme(theme)
@@ -340,6 +356,16 @@ class TestRunnerApp(App[None]):
         self._render_tree()
         self._init_selection()
         self._dirty = True  # force re-render with selection highlight
+
+        # The search Input is the first focusable widget and would otherwise
+        # auto-focus on mount, swallowing letter keybindings (o, r, n, p, ...).
+        # Blur it after the layout pass so those bindings work from the tree
+        # view; users press "/" to focus search explicitly.
+        def _release_initial_focus() -> None:
+            if self.search_widget is not None and self.search_widget.has_focus:
+                self.search_widget.blur()
+
+        self.call_after_refresh(_release_initial_focus)
 
         if self.watch_mode:
             from watchdog.observers import Observer
@@ -473,6 +499,60 @@ class TestRunnerApp(App[None]):
         test = self._get_test_by_key(self.selected_test_key)
         if test is not None:
             self.push_screen(TestOutputScreen(test))
+
+    def action_open_options(self) -> None:
+        if not self._on_main_screen():
+            return
+        self.push_screen(
+            OptionsScreen(
+                values=dict(self.user_config),
+                cli_overrides=set(self.cli_overrides),
+                on_change=self.apply_option,
+            )
+        )
+
+    # ----- Options screen live-application -----------------------------
+    # Invoked by OptionsScreen on every change.  Applies the new value to the
+    # live engine/UI state immediately and persists it to the user config file.
+    def apply_option(self, key: str, value) -> None:
+        import state as gs
+
+        gs_map = {
+            "tsv_lines_above": "tsv_lines_above",
+            "tsv_lines_below": "tsv_lines_below",
+            "tsv_skip_seq_lines": "tsv_skip_seq_lines",
+            "tsv_vars_depth": "tsv_vars_depth",
+            "tsv_variables_height": "tsv_variables_height",
+            "tsv_show_reason_about": "tsv_show_reason_about",
+            "timeline": "timeline_capture_enabled",
+        }
+        if key in gs_map:
+            setattr(gs, gs_map[key], value)
+        elif key == "parallel":
+            running = sum(
+                1 for t in state.all_tests if t.state == TestState.RUNNING
+            )
+            state.available_runners = max(0, int(value) - running)
+        elif key == "output_lines":
+            self.output_max_lines = max(1, int(value))
+            self._dirty = True
+        elif key == "theme":
+            self._apply_theme("ansi" if value == "ansi" else "default")
+        elif key == "story_filter_profile":
+            gs.story_filter_profile_preference = value
+            for t in state.all_tests:
+                t.story_filter_profile = value
+        elif key == "debug_precision_mode":
+            gs.debug_precision_mode_preference = value
+            for t in state.all_tests:
+                t.debug_precision_mode = value
+
+        # Persist (best-effort; read-only HOME never crashes the TUI).
+        self.user_config[key] = value
+        try:
+            save_user_config({key: value})
+        except Exception:
+            pass
 
     def action_next_failure(self) -> None:
         if not self._on_main_screen():

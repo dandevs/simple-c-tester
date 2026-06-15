@@ -109,25 +109,29 @@ from ui.render import render_tree_stdout
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test runner")
+    # Menu-editable flags default to None so we can tell "not passed" from an
+    # explicit value.  Resolution order at startup is:
+    #   cli_arg (if not None) > user-config value > builtin default.
     parser.add_argument(
-        "--parallel", type=int, default=4, help="Number of parallel workers"
+        "--parallel", type=int, default=None, help="Number of parallel workers"
     )
     parser.add_argument("--watch", action="store_true", help="Watch for file changes")
     parser.add_argument(
         "--output-lines",
         type=int,
-        default=10,
+        default=None,
         help="Maximum number of output lines to show per info box",
     )
     parser.add_argument(
         "--theme",
         choices=["ansi", "default"],
-        default="ansi",
+        default=None,
         help="UI theme (default: ansi)",
     )
     parser.add_argument(
         "--timeline",
         action="store_true",
+        default=None,
         help="Enable per-line timeline capture with gdb",
     )
     parser.add_argument(
@@ -143,42 +147,43 @@ def parse_args():
     parser.add_argument(
         "--story-filter-profile",
         choices=["minimal", "balanced", "all"],
-        default="balanced",
+        default=None,
         help="Test Story card filter profile (default: balanced)",
     )
     parser.add_argument(
         "--tsv-lines-above",
         type=int,
-        default=4,
+        default=None,
         help="Test Story viewer lines shown above current line (default: 4)",
     )
     parser.add_argument(
         "--tsv-lines-below",
         type=int,
-        default=4,
+        default=None,
         help="Test Story viewer lines shown below current line (default: 4)",
     )
     parser.add_argument(
         "--tsv-skip-seq-lines",
         type=int,
-        default=10,
+        default=None,
         help="Skip sequential same-file line frames in Test Story (default: 10)",
     )
     parser.add_argument(
         "--tsv-vars-depth",
         type=int,
-        default=2,
+        default=None,
         help="Variable expansion depth for Test Story viewer (default: 2)",
     )
     parser.add_argument(
         "--tsv-variables-height",
         type=int,
-        default=10,
+        default=None,
         help="Variables panel height in Test Story viewer (default: 10)",
     )
     parser.add_argument(
         "--tsv-show-reason-about",
         action="store_true",
+        default=None,
         help="Show [Reason] About details in Test Story cards",
     )
     parser.add_argument(
@@ -190,29 +195,79 @@ def parse_args():
     return parser.parse_args()
 
 
-def _build_config(args) -> RunnerConfig:
+# Argparse dest names that correspond to Options-menu fields.  Used to compute
+# which settings the user overrode on the command line this session.
+_MENU_ARG_KEYS = (
+    "parallel",
+    "output_lines",
+    "theme",
+    "timeline",
+    "story_filter_profile",
+    "tsv_lines_above",
+    "tsv_lines_below",
+    "tsv_skip_seq_lines",
+    "tsv_vars_depth",
+    "tsv_variables_height",
+    "tsv_show_reason_about",
+)
+
+
+def _cli_overrides(args) -> set[str]:
+    """Return the set of menu-field keys explicitly passed on the CLI."""
+    return {k for k in _MENU_ARG_KEYS if getattr(args, k, None) is not None}
+
+
+def _build_config(args, user_config: dict) -> RunnerConfig:
+    """Resolve the effective RunnerConfig.
+
+    For each menu field: ``cli_arg`` wins if explicitly passed, else the
+    persisted ``user_config`` value, else the builtin default.  Non-menu flags
+    (watch, debug-build, sanitize, cflags) keep their plain CLI/default values.
+    """
+
+    def resolve(key: str, attr: str, default, coerce=lambda v: v):
+        cli = getattr(args, attr)
+        if cli is not None:
+            return coerce(cli)
+        if key in user_config:
+            return user_config[key]
+        return default
+
+    timeline = bool(resolve("timeline", "timeline", False))
     return RunnerConfig(
-        parallel=args.parallel,
+        parallel=int(resolve("parallel", "parallel", 4)),
         watch=args.watch,
-        output_lines=args.output_lines,
-        theme=args.theme,
-        timeline=args.timeline,
-        debug_build=bool(args.debug_build or args.timeline),
+        output_lines=max(1, int(resolve("output_lines", "output_lines", 10))),
+        theme=resolve("theme", "theme", "ansi"),
+        timeline=timeline,
+        debug_build=bool(args.debug_build or timeline),
         sanitize=bool(args.sanitize),
-        story_filter_profile=normalized_story_filter_profile(args.story_filter_profile),
-        tsv_lines_above=max(0, int(args.tsv_lines_above)),
-        tsv_lines_below=max(0, int(args.tsv_lines_below)),
-        tsv_skip_seq_lines=max(1, int(args.tsv_skip_seq_lines)),
-        tsv_vars_depth=max(1, int(args.tsv_vars_depth)),
-        tsv_variables_height=max(3, int(args.tsv_variables_height)),
-        tsv_show_reason_about=bool(args.tsv_show_reason_about),
+        story_filter_profile=normalized_story_filter_profile(
+            resolve("story_filter_profile", "story_filter_profile", "balanced")
+        ),
+        tsv_lines_above=max(0, int(resolve("tsv_lines_above", "tsv_lines_above", 4))),
+        tsv_lines_below=max(0, int(resolve("tsv_lines_below", "tsv_lines_below", 4))),
+        tsv_skip_seq_lines=max(
+            1, int(resolve("tsv_skip_seq_lines", "tsv_skip_seq_lines", 10))
+        ),
+        tsv_vars_depth=max(1, int(resolve("tsv_vars_depth", "tsv_vars_depth", 2))),
+        tsv_variables_height=max(
+            3, int(resolve("tsv_variables_height", "tsv_variables_height", 10))
+        ),
+        tsv_show_reason_about=bool(
+            resolve("tsv_show_reason_about", "tsv_show_reason_about", False)
+        ),
         cflags=" ".join(args.cflags),
     )
 
 
 async def _main():
     args = parse_args()
-    config = _build_config(args)
+    from core.userconfig import load_user_config
+
+    user_config = load_user_config()
+    config = _build_config(args, user_config)
+    cli_overrides = _cli_overrides(args)
 
     tests_dir = Path("tests")
     if not tests_dir.is_dir():
@@ -231,6 +286,8 @@ async def _main():
         output_max_lines=config.output_lines,
         theme_name=config.theme,
         timeline_enabled=config.timeline,
+        user_config=user_config,
+        cli_overrides=cli_overrides,
     )
     try:
         await app.run_async()
