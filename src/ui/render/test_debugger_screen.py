@@ -260,6 +260,7 @@ class TestDebuggerScreen(Screen[None]):
         Binding("v", "toggle_variables", "Variables"),
         Binding("p", "toggle_precision", "Precision"),
         Binding("ctrl+enter", "toggle_full_file_view", "Full File"),
+        Binding("a", "jump_to_assertion", "Assertion"),
         Binding("ctrl+j", "toggle_full_file_view", "", show=False),
         Binding("ctrl+m", "toggle_full_file_view", "", show=False),
         Binding("enter", "toggle_full_file_view", "", show=False),
@@ -303,6 +304,9 @@ class TestDebuggerScreen(Screen[None]):
         self._code_selection_anchor: tuple[int, int] | None = None
         self._code_selection_cursor: tuple[int, int] | None = None
         self._code_selection_active = False
+        # Assertion failures from the previous run (cached before rerun)
+        self._assertion_failures: list = []
+        self._assertion_view = False
 
     def compose(self) -> ComposeResult:
         yield Static("", id="debug-header")
@@ -327,6 +331,16 @@ class TestDebuggerScreen(Screen[None]):
         if self.vars_tree_widget is not None:
             self.vars_tree_widget.show_root = False
         self.test.timeline_capture_enabled = True
+
+        # Cache assertion failures from the previous run before rerunning
+        # (the rerun creates a fresh TestRun, losing the old stderr).
+        run = self.test.current_run
+        if run is not None:
+            from core.assertions import parse_assertion_failures
+
+            combined = (run.stderr or "") + "\n" + (run.compile_err or "")
+            self._assertion_failures = parse_assertion_failures(combined)
+
         self._set_footer_text()
         self._refresh_view(force=True)
         if self.test.state != TestState.RUNNING and not is_debug_active(self.test):
@@ -655,10 +669,24 @@ class TestDebuggerScreen(Screen[None]):
 
     def action_toggle_full_file_view(self) -> None:
         self.full_file_view = not self.full_file_view
+        self._assertion_view = False
         if self.full_file_view:
             self._set_footer_text("Full-file view enabled.")
         else:
             self._set_footer_text("Timeline cards view enabled.")
+        self._refresh_view(force=True)
+
+    def action_jump_to_assertion(self) -> None:
+        """Jump the code panel to the first assertion failure's source line."""
+        if not self._assertion_failures:
+            self._set_footer_text("No assertion failures captured.", warning=True)
+            return
+        self._assertion_view = True
+        self.full_file_view = False
+        af = self._assertion_failures[0]
+        self._set_footer_text(
+            f"Assertion: {af.macro}({af.args}) at {af.file}:{af.line}"
+        )
         self._refresh_view(force=True)
 
     def _timeline_jump(self, offset: int) -> None:
@@ -982,21 +1010,26 @@ class TestDebuggerScreen(Screen[None]):
             int(self.size.width),
             int(self.size.height),
             self.full_file_view,
+            self._assertion_view,
             self.test.story_filter_profile,
             compile_err,
         )
 
     def _base_footer_text(self) -> Text:
+        text = Text()
         if not self._line_frames():
-            text = Text()
             text.append("No story yet. Press ")
             text.append("R", style="bold")
-            text.append(" to run. ", style="dim")
-            text.append("?", style="bold")
-            text.append(" - Help", style="dim")
-            return text
-        text = Text()
-        text.append("Story loaded. ")
+            text.append(" to run.", style="dim")
+        else:
+            text.append("Story loaded.")
+
+        if self._assertion_failures:
+            text.append("  ")
+            text.append("a", style="bold")
+            text.append(" Assertion", style="dim")
+
+        text.append("  ")
         text.append("?", style="bold")
         text.append(" - Help", style="dim")
         return text
@@ -1249,6 +1282,12 @@ class TestDebuggerScreen(Screen[None]):
             if self.code_widget is not None:
                 self.code_widget.update(Text.from_ansi(compile_err))
             return
+
+        # Assertion view: show source at the failing assertion line
+        if self._assertion_view and self._assertion_failures:
+            self._render_assertion_source()
+            return
+
         frames = self._line_frames()
 
         if self.full_file_view:
@@ -1274,6 +1313,54 @@ class TestDebuggerScreen(Screen[None]):
         # freshly rendered content.
         if self._code_selection_active:
             self._render_code_with_selection()
+
+    def _render_assertion_source(self) -> None:
+        """Render the source file at the assertion failure line with a
+        coloured diff header."""
+        if self.code_widget is None or not self._assertion_failures:
+            return
+        af = self._assertion_failures[0]
+        source_path = os.path.abspath(af.file)
+        source_lines = load_source_lines(source_path, self._source_cache)
+        if not source_lines:
+            self.code_widget.update(
+                Text("Source unavailable for assertion location.", style=self.STORY_HELP)
+            )
+            return
+
+        line_number = max(1, min(len(source_lines), af.line))
+        width = max(8, self.code_widget.size.width - 2)
+        available_height = max(3, self.code_widget.size.height)
+        code_height = max(1, available_height - 4)  # leave room for header
+
+        half = code_height // 2
+        snippet_start = max(1, line_number - half)
+        snippet_end = min(len(source_lines), snippet_start + code_height - 1)
+
+        number_width = len(str(max(1, snippet_end)))
+        code_width = max(1, width - (number_width + 3))
+
+        snippet = build_frame_snippet(
+            source_path,
+            source_lines,
+            line_number,
+            snippet_start,
+            snippet_end,
+            True,
+            code_width,
+        )
+
+        header = Text()
+        header.append("\u2717 ", style="bold red")
+        header.append(f"{af.macro}({af.args})", style="bold red")
+        diff = Text()
+        diff.append("  expected: ", style="bright_black")
+        diff.append(af.expected, style="green")
+        diff.append("  actual: ", style="bright_black")
+        diff.append(af.actual, style="red")
+        loc = Text(f"  at {af.file}:{af.line}", style="bright_black")
+
+        self.code_widget.update(Group(header, diff, loc, Text(), snippet))
 
     def _render_variables_panel(self, selected_event) -> None:
         if self.vars_widget is None or self.vars_tree_widget is None:

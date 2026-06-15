@@ -1,12 +1,45 @@
 from rich.text import Text
 
 from core.models import Test, TestState
+from core.assertions import AssertionFailure, parse_assertion_failures, is_assertion_line
 from .styles import (
     OUTPUT_FAIL_BORDER_STYLE,
     OUTPUT_PASS_BORDER_STYLE,
     TREE_GUIDE_STYLE,
     OutputBoxRenderMeta,
 )
+
+
+# ---------------------------------------------------------------------------
+# Assertion-failure rendering (replaces raw [CTEST:v] lines with a diff block)
+# ---------------------------------------------------------------------------
+
+def _render_assertion_failure(af: AssertionFailure) -> list[Text]:
+    """Render one assertion failure as a 3-line coloured diff block."""
+    lines: list[Text] = []
+
+    header = Text()
+    header.append("\u2717 ", style="bold red")
+    header.append(f"{af.macro}({af.args})", style="bold red")
+    lines.append(header)
+
+    diff = Text("  ")
+    diff.append("expected: ", style="bright_black")
+    diff.append(af.expected, style="green")
+    diff.append("  ")
+    diff.append("actual: ", style="bright_black")
+    diff.append(af.actual, style="red")
+    lines.append(diff)
+
+    loc = Text(f"  at {af.file}:{af.line}", style="bright_black")
+    lines.append(loc)
+    return lines
+
+
+def _filter_assertion_lines(lines: list[Text]) -> list[Text]:
+    """Remove [CTEST:v] FAIL lines from a list of Text (they're rendered
+    separately by ``_render_assertion_failure``)."""
+    return [line for line in lines if not is_assertion_line(line.plain)]
 
 
 # ---------------------------------------------------------------------------
@@ -42,9 +75,24 @@ def get_test_output(test: Test) -> list[Text] | None:
 
         stderr_text = _to_text(stderr_raw, stderr)
         stdout_text = _to_text(stdout_raw, stdout)
+
+        # Structured assertion-failure rendering (replaces raw wire-format lines)
         if stderr_text and stderr_text.plain.strip():
-            for line in stderr_text.split(allow_blank=True):
-                sections.append(line)
+            failures = parse_assertion_failures(stderr_text.plain)
+            if failures:
+                for af in failures:
+                    sections.extend(_render_assertion_failure(af))
+                # Show remaining non-assertion stderr below the diff block
+                remaining = _filter_assertion_lines(
+                    list(stderr_text.split(allow_blank=True))
+                )
+                if any(line.plain.strip() for line in remaining):
+                    sections.append(Text())
+                    sections.extend(remaining)
+            else:
+                for line in stderr_text.split(allow_blank=True):
+                    sections.append(line)
+
         if stdout_text and stdout_text.plain.strip():
             if sections:
                 sections.append(Text())
