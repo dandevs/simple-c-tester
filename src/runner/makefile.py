@@ -65,6 +65,7 @@ def _config() -> RunnerConfig:
     return RunnerConfig(
         cflags=global_state.cflags,
         debug_build=global_state.debug_build_enabled,
+        sanitize=global_state.sanitize_enabled,
     )
 
 

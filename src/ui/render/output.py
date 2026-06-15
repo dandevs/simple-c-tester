@@ -1,3 +1,5 @@
+import re
+
 from rich.text import Text
 
 from core.models import Test, TestState
@@ -8,6 +10,11 @@ from .styles import (
     TREE_GUIDE_STYLE,
     OutputBoxRenderMeta,
 )
+
+
+# Patterns for sanitizer error banners.
+_ASAN_RE = re.compile(r"==\d+==ERROR: AddressSanitizer: (\S+)")
+_UBSAN_RE = re.compile(r"runtime error: (.+)")
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +91,24 @@ def get_test_output(test: Test) -> list[Text] | None:
 
         stderr_text = _to_text(stderr_raw, stderr)
         stdout_text = _to_text(stdout_raw, stdout)
+
+        # Sanitizer error banner (ASan / UBSan)
+        if stderr_text and stderr_text.plain.strip():
+            asan_match = _ASAN_RE.search(stderr_text.plain)
+            ubsan_match = _UBSAN_RE.search(stderr_text.plain)
+            if asan_match:
+                san = Text()
+                san.append(f"\u26a0 ASan: {asan_match.group(1)}", style="bold yellow")
+                sections.append(san)
+                sections.append(Text())
+            elif ubsan_match:
+                san = Text()
+                san.append(
+                    f"\u26a0 UBSan: {ubsan_match.group(1).strip()[:80]}",
+                    style="bold yellow",
+                )
+                sections.append(san)
+                sections.append(Text())
 
         # Structured assertion-failure rendering (replaces raw wire-format lines)
         if stderr_text and stderr_text.plain.strip():

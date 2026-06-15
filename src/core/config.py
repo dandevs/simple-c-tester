@@ -42,6 +42,10 @@ class RunnerConfig:
     #: Globally enable per-line Test Story capture with gdb for every test.
     timeline: bool = False
 
+    # --- sanitizer --------------------------------------------------------
+    #: Compile and link with -fsanitize=address,undefined.
+    sanitize: bool = False
+
     # --- UI / output -----------------------------------------------------
     #: Maximum output lines shown per inline output box.
     output_lines: int = 10

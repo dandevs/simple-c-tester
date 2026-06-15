@@ -118,7 +118,19 @@ def _test_label_base(test: Test, now: float) -> Text:
     elif test.state == TestState.PASSED:
         text = Text(f"{ICON_PASS} ", style=TEST_PASSED_STYLE)
         text.append(test.name, style=TEST_PASSED_STYLE)
-        text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
+        timing_note = f"[{elapsed_ms}ms]"
+        timing_style = TREE_META_STYLE
+        if len(test.timing_history) >= 3:
+            prior = (
+                test.timing_history[:-1]
+                if len(test.timing_history) > 1
+                else test.timing_history
+            )
+            avg = sum(prior) / max(1, len(prior))
+            if elapsed_ms > avg * 2 and avg > 0:
+                timing_note = f"[{elapsed_ms}ms avg {int(avg)}ms \u26a0]"
+                timing_style = "yellow"
+        text.append(f" {timing_note}", style=timing_style)
         return text
     elif test.state == TestState.FAILED:
         run = test.current_run
@@ -130,7 +142,19 @@ def _test_label_base(test: Test, now: float) -> Text:
         else:
             text = Text(f"{ICON_FAIL} ", style=TEST_FAILED_STYLE)
             text.append(test.name, style=TEST_FAILED_STYLE)
-            text.append(f" [{elapsed_ms}ms]", style=TREE_META_STYLE)
+            timing_note = f"[{elapsed_ms}ms]"
+            timing_style = TREE_META_STYLE
+            if len(test.timing_history) >= 3:
+                prior = (
+                    test.timing_history[:-1]
+                    if len(test.timing_history) > 1
+                    else test.timing_history
+                )
+                avg = sum(prior) / max(1, len(prior))
+                if elapsed_ms > avg * 2 and avg > 0:
+                    timing_note = f"[{elapsed_ms}ms avg {int(avg)}ms \u26a0]"
+                    timing_style = "yellow"
+            text.append(f" {timing_note}", style=timing_style)
         return text
 
     text = Text(test.name, style=TEST_DEFAULT_STYLE)

@@ -27,6 +27,7 @@ def build_frame_snippet(
     code_width,
     line_annotations=None,
     breakpoint_lines=None,
+    covered_lines=None,
 ):
     """Build a syntax-highlighted snippet with pre-computed inline annotations."""
     padded_width = max(1, code_width)
@@ -73,6 +74,20 @@ def build_frame_snippet(
                 (local_bp, 0),
                 (local_bp, padded_width),
             )
+
+    # Feature K: coverage overlay — dim uncovered lines to bright_black (dark
+    # gray) when coverage data is provided.  Covered lines stay at normal
+    # brightness so they stand out.  Applied before the current-line highlight
+    # so the active line keeps its own background.
+    if covered_lines is not None:
+        for snip_line in range(snippet_start, snippet_end + 1):
+            if snip_line not in covered_lines:
+                local = (snip_line - snippet_start) + 1
+                syntax.stylize_range(
+                    "bright_black",
+                    (local, 0),
+                    (local, padded_width),
+                )
 
     local_line = (line_number - snippet_start) + 1
     line_length = padded_width
@@ -245,6 +260,7 @@ def render_full_file_panel(
     source_cache,
     annotations=None,
     active_breakpoints=None,
+    covered_lines=None,
 ):
     """Render the full-file code panel using pre-computed annotations.
 
@@ -280,6 +296,11 @@ def render_full_file_panel(
         code_widget.update(Text("Source unavailable for selected frame.", style=STORY_HELP))
         return None
 
+    # Feature K: per-file covered line set for the coverage overlay.
+    file_covered = set()
+    if covered_lines is not None:
+        file_covered = covered_lines.get(source_path, set())
+
     line_number = max(1, min(len(source_lines), int(event.line)))
     width = max(8, code_widget.size.width - 2)
     available_height = max(3, code_widget.size.height)
@@ -307,6 +328,7 @@ def render_full_file_panel(
         code_width,
         line_annotations=file_annotations,
         breakpoint_lines=bp_lines,
+        covered_lines=file_covered if covered_lines is not None else None,
     )
 
     title = Text()
@@ -319,6 +341,10 @@ def render_full_file_panel(
         title.append(f"  fn={event.function}", style="bright_black")
     if bp_lines:
         title.append(f"  \u25cf{len(bp_lines)} bp", style="bold red")
+    if covered_lines is not None:
+        total_lines = snippet_end - snippet_start + 1
+        hit = len(file_covered & set(range(snippet_start, snippet_end + 1)))
+        title.append(f"  cov {hit}/{total_lines}", style="green")
     title.append("  (click a line to toggle breakpoint)", style="bright_black")
 
     code_widget.update(Group(title, snippet))

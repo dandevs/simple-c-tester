@@ -783,6 +783,27 @@ class TestRunnerApp(App[None]):
         if self.log_widget is None:
             return
 
+        # Empty state: no tests discovered.
+        if not state.all_tests:
+            text = Text()
+            text.append("\n  No tests found.\n\n", style="bold yellow")
+            text.append("  Create a test file:\n", style="default")
+            text.append("    ctester new my_test\n\n", style="cyan")
+            text.append(
+                "  Or manually add a .c file to tests/:\n", style="bright_black"
+            )
+            text.append('    #include "ctest.h"\n', style="bright_black")
+            text.append("    int main(void) {\n", style="bright_black")
+            text.append("      ASSERT_EQ(1 + 1, 2);\n", style="bright_black")
+            text.append("      return 0;\n", style="bright_black")
+            text.append("    }\n", style="bright_black")
+            self.log_widget.clear()
+            self.log_widget.write(text)
+            self.rendered_output_boxes = []
+            self.rendered_test_rows = []
+            self.rendered_suite_rows = []
+            return
+
         log = self.log_widget
         previous_scroll_x = log.scroll_x
         previous_scroll_y = log.scroll_y

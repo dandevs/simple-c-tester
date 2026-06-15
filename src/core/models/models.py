@@ -120,6 +120,8 @@ class Test:
     story_filter_profile: str = DEFAULT_STORY_FILTER_PROFILE
     # persisted full-file annotations (db.json)
     story_annotations: dict[str, list[list]] = field(default_factory=dict)
+    # persisted per-run elapsed times (ms) for flakiness/regression detection.
+    timing_history: list[float] = field(default_factory=list)
     # All per-run mutable state lives here.  Replaced on every run.
     current_run: TestRun | None = None
     dwarf_cache: DwarfCache = field(default_factory=DwarfCache)

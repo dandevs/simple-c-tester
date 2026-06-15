@@ -328,9 +328,17 @@ def load_dependency_db(rs: RunnerState) -> dict[str, dict]:
         for dep in deps:
             if isinstance(dep, str):
                 normalized.append(_normalize_dep_path(dep))
-        hydrated[_normalize_dep_path(test_key)] = {
+        hydrated_entry: dict = {
             "collected_dependencies": sorted(set(normalized))
         }
+        timing = payload.get("timing_history", [])
+        if isinstance(timing, list):
+            hydrated_entry["timing_history"] = [
+                float(t)
+                for t in timing
+                if isinstance(t, (int, float)) and t >= 0
+            ][-10:]
+        hydrated[_normalize_dep_path(test_key)] = hydrated_entry
 
     return hydrated
 
@@ -356,6 +364,8 @@ def save_dependency_db(
         }
         if getattr(test, "story_annotations", None):
             entry["story_annotations"] = test.story_annotations
+        if test.timing_history:
+            entry["timing_history"] = test.timing_history[-10:]
         tests_payload[test_key] = entry
 
     payload = {"tests": tests_payload, "active": rs.app_active}
@@ -429,6 +439,9 @@ def hydrate_dependencies_from_db(rs: RunnerState) -> None:
         deps = cached.get("collected_dependencies", [])
         if deps:
             test.dependencies = sorted(set(deps))
+        timing = cached.get("timing_history", [])
+        if isinstance(timing, list):
+            test.timing_history = [float(t) for t in timing][-10:]
 
     rebuild_dep_index(rs)
     update_dep_graph_readiness(rs)
@@ -487,6 +500,7 @@ def generate_makefile(
 
     message_length = max(20, int(terminal_width if terminal_width is not None else 80))
     debug_flags = "-g -O0 -fno-omit-frame-pointer" if config.debug_build else ""
+    sanitize_flags = "-fsanitize=address,undefined" if config.sanitize else ""
     cflags = config.cflags
 
     project_sources = discover_project_sources(rs)
@@ -511,7 +525,7 @@ def generate_makefile(
             lines.append(f"{obj_path}: {src}")
             lines.append(f"\t@mkdir -p {obj_dir}")
             lines.append(
-                f"\tgcc {include_flags} {debug_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_path} -c $< -o $@ {cflags}"
+                f"\tgcc {include_flags} {debug_flags} {sanitize_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_path} -c $< -o $@ {cflags}"
             )
             lines.append("")
 
@@ -528,12 +542,12 @@ def generate_makefile(
         if project_sources:
             lines.append(f"{target}: {source} {lib_target}")
             lines.append(
-                f"\tgcc {test_include_flags} {debug_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -Wl,-Map,{map_file} -o {target} {source} {lib_target} {cflags}"
+                f"\tgcc {test_include_flags} {debug_flags} {sanitize_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -Wl,-Map,{map_file} -o {target} {source} {lib_target} {cflags}"
             )
         else:
             lines.append(f"{target}: {source}")
             lines.append(
-                f"\tgcc {test_include_flags} {debug_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -o {target} {source} {cflags}"
+                f"\tgcc {test_include_flags} {debug_flags} {sanitize_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -o {target} {source} {cflags}"
             )
         lines.append("")
 

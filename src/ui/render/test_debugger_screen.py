@@ -263,6 +263,7 @@ class TestDebuggerScreen(Screen[None]):
         Binding("p", "toggle_precision", "Precision"),
         Binding("ctrl+enter", "toggle_full_file_view", "Full File"),
         Binding("a", "jump_to_assertion", "Assertion"),
+        Binding("shift+c", "toggle_coverage", "Coverage"),
         Binding("ctrl+j", "toggle_full_file_view", "", show=False),
         Binding("ctrl+m", "toggle_full_file_view", "", show=False),
         Binding("enter", "toggle_full_file_view", "", show=False),
@@ -300,6 +301,8 @@ class TestDebuggerScreen(Screen[None]):
         self._action_label: str | None = None
         self._last_log_count = -1
         self.full_file_view = False
+        # Feature K: coverage overlay in full-file view
+        self.coverage_view = False
         # Feature F: click-to-set breakpoints in full-file view
         self._breakpoints: set[tuple[str, int]] = set()
         self._fullfile_source_path: str = ""
@@ -698,6 +701,15 @@ class TestDebuggerScreen(Screen[None]):
             self._set_footer_text("Timeline cards view enabled.")
         self._refresh_view(force=True)
 
+    def action_toggle_coverage(self) -> None:
+        self.coverage_view = not self.coverage_view
+        if self.coverage_view:
+            self.full_file_view = True  # coverage only makes sense in full-file view
+            self._set_footer_text("Coverage overlay enabled (green=executed, dim=not reached).")
+        else:
+            self._set_footer_text("Coverage overlay disabled.")
+        self._refresh_view(force=True)
+
     def action_jump_to_assertion(self) -> None:
         """Jump the code panel to the first assertion failure's source line."""
         if not self._assertion_failures:
@@ -1075,6 +1087,7 @@ class TestDebuggerScreen(Screen[None]):
             int(self.size.width),
             int(self.size.height),
             self.full_file_view,
+            self.coverage_view,
             self._assertion_view,
             self.test.story_filter_profile,
             compile_err,
@@ -1337,6 +1350,30 @@ class TestDebuggerScreen(Screen[None]):
         self._variables_cache[event_key] = normalized_vars
         self._refresh_view(force=True)
 
+    def _collect_covered_lines(self) -> dict[str, set[int]]:
+        """Collect {abs_source_path: {line_numbers}} from timeline events and
+        annotation cache.  This is a lightweight approximation of execution
+        coverage based on gdb-traced stops."""
+        covered: dict[str, set[int]] = {}
+        run = self.test.current_run
+        if run is None:
+            return covered
+
+        # From timeline events (filtered stops that became cards)
+        for event in run.timeline_events:
+            if event.file_path and event.line > 0:
+                abs_path = os.path.abspath(event.file_path)
+                covered.setdefault(abs_path, set()).add(event.line)
+
+        # From annotation cache (broader — every stop's annotations are merged,
+        # not just "interesting" ones).  Structure:
+        # {func_name: {abs_file_path: {line_no: {var_name: value}}}}
+        for func_map in run.annotation_cache.values():
+            for file_path, lines in func_map.items():
+                covered.setdefault(file_path, set()).update(lines.keys())
+
+        return covered
+
     def _render_code_panel(self) -> None:
         run = self.test.current_run
         compile_err = run.compile_err if run is not None else ""
@@ -1358,6 +1395,9 @@ class TestDebuggerScreen(Screen[None]):
         if self.full_file_view:
             from runner.story_annotations import get_story_annotations
             annotations = get_story_annotations(self.test, cache=self.test.dwarf_cache)
+            covered_lines = {}
+            if self.coverage_view:
+                covered_lines = self._collect_covered_lines()
             meta = render_full_file_panel(
                 self.code_widget,
                 frames,
@@ -1365,6 +1405,7 @@ class TestDebuggerScreen(Screen[None]):
                 self._source_cache,
                 annotations=annotations,
                 active_breakpoints=self._breakpoints,
+                covered_lines=covered_lines if self.coverage_view else None,
             )
             # Feature F: record the source path + panel-line→source-line mapping
             # so click handlers can toggle breakpoints accurately.

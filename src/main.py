@@ -56,6 +56,44 @@ if len(_sys.argv) > 1 and _sys.argv[1] == "init":
     )
     _sys.exit(0)
 
+# Handle "ctester new <name>" before any heavy imports — scaffolds a new
+# test file under tests/ from a small template.
+if len(_sys.argv) > 2 and _sys.argv[1] == "new":
+    from pathlib import Path
+    import re as _re
+
+    _test_name = _sys.argv[2]
+    if not _test_name.endswith(".c"):
+        _test_name += ".c"
+    # sanitize: only allow alphanumeric + underscore + hyphen before ".c"
+    if not _re.match(r"^[\w\-]+\.c$", _test_name):
+        print(
+            f"Error: invalid test name '{_test_name}'. "
+            "Use letters, digits, hyphens, underscores.",
+            file=_sys.stderr,
+        )
+        _sys.exit(1)
+
+    _tests_dir = Path("tests")
+    _tests_dir.mkdir(exist_ok=True)
+    _target_file = _tests_dir / _test_name
+    if _target_file.exists():
+        print(f"Error: {_target_file} already exists.", file=_sys.stderr)
+        _sys.exit(1)
+
+    _template = (
+        '#include "ctest.h"\n'
+        "\n"
+        "int main(void) {\n"
+        "    ASSERT_TRUE(1 == 1);\n"
+        "    return 0;\n"
+        "}\n"
+    )
+    _target_file.write_text(_template)
+    print(f"Created {_target_file}")
+    print("  Run ctester to execute it.")
+    _sys.exit(0)
+
 import argparse
 import asyncio
 import shutil
@@ -96,6 +134,11 @@ def parse_args():
         "--debug-build",
         action="store_true",
         help="Compile tests with debug flags (-g -O0)",
+    )
+    parser.add_argument(
+        "--sanitize",
+        action="store_true",
+        help="Compile with AddressSanitizer + UndefinedBehaviorSanitizer",
     )
     parser.add_argument(
         "--story-filter-profile",
@@ -155,6 +198,7 @@ def _build_config(args) -> RunnerConfig:
         theme=args.theme,
         timeline=args.timeline,
         debug_build=bool(args.debug_build or args.timeline),
+        sanitize=bool(args.sanitize),
         story_filter_profile=normalized_story_filter_profile(args.story_filter_profile),
         tsv_lines_above=max(0, int(args.tsv_lines_above)),
         tsv_lines_below=max(0, int(args.tsv_lines_below)),

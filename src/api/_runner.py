@@ -1307,6 +1307,14 @@ async def _run_plain_binary(test: Test, binary_path: str, proc_env: dict[str, st
             )
     test.time_state_changed = time.monotonic()
 
+    # Record timing for flakiness/regression detection
+    if test.time_start > 0:
+        elapsed_ms = (test.time_state_changed - test.time_start) * 1000.0
+        if elapsed_ms > 0:
+            test.timing_history.append(elapsed_ms)
+            if len(test.timing_history) > 10:
+                test.timing_history = test.timing_history[-10:]
+
 
 async def _cancel_active_run_for_manual_debug(test: Test) -> None:
     test_key = _test_key(test)
