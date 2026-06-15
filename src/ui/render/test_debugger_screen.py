@@ -707,6 +707,7 @@ class TestDebuggerScreen(Screen[None]):
             self.full_file_view = True  # coverage only makes sense in full-file view
             self._set_footer_text("Coverage overlay enabled (green=executed, dim=not reached).")
         else:
+            self.full_file_view = False  # return to card-based story view
             self._set_footer_text("Coverage overlay disabled.")
         self._refresh_view(force=True)
 
