@@ -25,6 +25,7 @@ from runner import (
     debug_interrupt,
     debug_interrupt_nowait,
     is_debug_active,
+    get_debug_session,
     cancel_test_and_restore_normal_build,
     state_changed,
     save_story_annotations,
@@ -34,10 +35,12 @@ from runner import (
     cancel_pending_story_annotations_persist,
 )
 from core.userconfig import save_user_config
+from api._variable_tree import build_variable_tree, build_tree_from_captured
 from runner.story_filters import normalized_story_filter_profile
 from runner.story_annotations import invalidate_story_annotation_cache
 from .clipboard import copy_to_clipboard
 from .labels import test_elapsed_seconds
+from .variable_tree_screen import VariableTreeScreen
 from .test_debugger_screen_utils import (
     display_path,
     detect_language,
@@ -127,7 +130,8 @@ class DebugControlsModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         controls = [
             ("D", "start/stop debug"),
-            ("R", "rerun or restart debug"),
+            ("r", "restart debug/story (manual)"),
+            ("R", "toggle auto-restart (file changes restart debug)"),
             ("N", "step next"),
             ("I", "step in"),
             ("O", "step out"),
@@ -138,8 +142,9 @@ class DebugControlsModal(ModalScreen[None]):
             ("Ctrl+<- / Ctrl+->", "scrub ten frames"),
             ("V", "toggle variables panel"),
             ("Shift+V", "toggle variable diff"),
+            ("T", "variable tree view (on selected var)"),
+            ("t", "toggle timeline capture"),
             ("Ctrl+Enter", "toggle full-file view"),
-            ("T", "toggle timeline capture"),
             ("Esc or Ctrl+C", "back to test list"),
         ]
 
@@ -248,7 +253,8 @@ class TestDebuggerScreen(Screen[None]):
         Binding("question_mark", "show_controls", "Controls"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("t", "toggle_timeline", "Timeline"),
-        Binding("r", "rerun_test", "Rerun"),
+        Binding("r", "rerun_test", "Restart"),
+        Binding("R", "toggle_auto_restart", "Auto-Restart"),
         Binding("n", "step_next", "Next"),
         Binding("i", "step_in", "Step In"),
         Binding("o", "step_out", "Step Out"),
@@ -260,6 +266,7 @@ class TestDebuggerScreen(Screen[None]):
         Binding("ctrl+right", "timeline_next_10", "+10 Steps"),
         Binding("v", "toggle_variables", "Variables"),
         Binding("V", "toggle_variables_diff", "Var Diff"),
+        Binding("T", "open_variable_tree", "Var Tree"),
         Binding("p", "toggle_precision", "Precision"),
         Binding("ctrl+enter", "toggle_full_file_view", "Full File"),
         Binding("a", "jump_to_assertion", "Assertion"),
@@ -320,6 +327,9 @@ class TestDebuggerScreen(Screen[None]):
         # Assertion failures from the previous run (cached before rerun)
         self._assertion_failures: list = []
         self._assertion_view = False
+        # Shift-click on a variables tree node opens the variable tree view.
+        self._mouse_shift: bool = False
+        self._vtree_loading: bool = False
 
     def compose(self) -> ComposeResult:
         yield Static("", id="debug-header")
@@ -392,6 +402,135 @@ class TestDebuggerScreen(Screen[None]):
         path = getattr(getattr(event, "node", None), "data", None)
         if isinstance(path, tuple):
             self._collapsed_var_paths.discard(path)
+
+    def on_tree_node_selected(self, event) -> None:
+        """Shift-click on a variables tree node opens the variable tree view."""
+        if not self._mouse_shift:
+            return
+        # Consume the flag so keyboard-driven NodeSelected doesn't retrigger.
+        self._mouse_shift = False
+        if self._vtree_loading:
+            return
+        if not is_debug_active(self.test):
+            self._set_footer_text(
+                "Variable tree view requires an active debug session "
+                "(press D to start debugging)"
+            )
+            return
+        path = getattr(getattr(event, "node", None), "data", None)
+        if not isinstance(path, tuple) or not path:
+            return
+        # The first path element is the C variable name in the current frame.
+        var_name = path[0]
+        self._open_variable_tree(var_name)
+
+    def _open_variable_tree(self, var_name: str) -> None:
+        """Asynchronously build a VarTreeNode tree via gdb and push the screen."""
+        controller = get_debug_session(self.test)
+        if controller is None:
+            return
+
+        self._vtree_loading = True
+        self._set_footer_text(f"Building tree for '{var_name}'...")
+
+        async def _build_and_show() -> None:
+            try:
+                tree = await build_variable_tree(controller, var_name)
+                if tree is not None:
+                    on_restart = self._make_tree_restart_callback(var_name)
+                    self.app.push_screen(
+                        VariableTreeScreen(tree, var_name, on_restart=on_restart)
+                    )
+                else:
+                    self._set_footer_text(f"Cannot expand '{var_name}'")
+            except Exception:
+                self._set_footer_text(f"Error expanding '{var_name}'")
+            finally:
+                self._vtree_loading = False
+
+        asyncio.ensure_future(_build_and_show())
+
+    def _make_tree_restart_callback(self, var_name: str):
+        """Create an async callback that restarts debug + rebuilds the tree."""
+
+        async def _on_restart():
+            # Force restart: stop current debug, recompile, start fresh.
+            if self._action_task is not None and not self._action_task.done():
+                self._action_task.cancel()
+                try:
+                    await self._action_task
+                except asyncio.CancelledError:
+                    pass
+                self._action_task = None
+
+            await stop_debug_session(self.test)
+            self._maybe_refresh_dwarf_cache()
+            self._reset_story_state()
+            run = self.test.current_run
+            if run is not None:
+                run.aggregate_annotations = False
+            await start_debug_session(
+                self.test, precision_mode=self.test.debug_precision_mode
+            )
+            controller = get_debug_session(self.test)
+            if controller is None:
+                return None
+            return await build_variable_tree(controller, var_name)
+
+        return _on_restart
+
+    def action_open_variable_tree(self) -> None:
+        """Open the variable tree view for the currently selected variable.
+
+        Uses live gdb when a debug session is active (deep expansion).
+        Falls back to pre-captured variables from the current frame when
+        in auto-story mode (limited by the capture depth at trace time).
+        """
+        if self.vars_tree_widget is None:
+            return
+        node = self.vars_tree_widget.cursor_node
+        if node is None:
+            self._set_footer_text("Select a variable first (click or arrow keys).")
+            return
+        path = getattr(node, "data", None)
+        if not isinstance(path, tuple) or not path:
+            return
+        if self._vtree_loading:
+            return
+        var_name = path[0]
+
+        if is_debug_active(self.test):
+            self._open_variable_tree(var_name)
+        else:
+            self._open_variable_tree_from_captured(var_name)
+
+    def _open_variable_tree_from_captured(self, var_name: str) -> None:
+        """Build a tree from pre-captured frame variables (no gdb needed)."""
+        frames = self._line_frames()
+        if not frames:
+            self._set_footer_text("No story frames available.")
+            return
+        idx = self.selected_frame_index
+        if idx < 0 or idx >= len(frames):
+            self._set_footer_text("Select a frame first.")
+            return
+        event = frames[idx]
+        raw_vars = event.variables or []
+        vars_list: list[tuple[str, str, str]] = []
+        for vt in raw_vars:
+            if len(vt) >= 3:
+                vars_list.append(vt)
+            elif len(vt) == 2:
+                vars_list.append((vt[0], vt[1], ""))
+
+        tree = build_tree_from_captured(vars_list, var_name)
+        if tree is None:
+            self._set_footer_text(
+                f"No captured data for '{var_name}'. "
+                "Start a debug session (D) for live expansion."
+            )
+            return
+        self.app.push_screen(VariableTreeScreen(tree, var_name))
 
     async def action_close(self) -> None:
         self.app.pop_screen()
@@ -758,6 +897,7 @@ class TestDebuggerScreen(Screen[None]):
         self._refresh_view(force=True)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
+        self._mouse_shift = event.shift
         self._handle_timeline_click(event)
         if self._mouse_dragging:
             return
@@ -1059,8 +1199,45 @@ class TestDebuggerScreen(Screen[None]):
             )
         self._action_task = asyncio.create_task(_runner())
 
+    def action_toggle_auto_restart(self) -> None:
+        """Toggle auto-restart: when ON, file changes in watch mode restart the debugger."""
+        global_state.debug_auto_restart = not global_state.debug_auto_restart
+        if global_state.debug_auto_restart:
+            self._set_footer_text("Auto-restart ON — file changes will restart the debugger.")
+        else:
+            self._set_footer_text("Auto-restart OFF.")
+        self._refresh_view(force=True)
+
     def _tick(self) -> None:
+        self._check_auto_restart()
         self._refresh_view()
+
+    def _check_auto_restart(self) -> None:
+        """If the watch handler flagged a restart, restart the debug session."""
+        pending = global_state.debug_auto_restart_pending
+        if not pending:
+            return
+        from api._runner import _test_key
+
+        if _test_key(self.test) != pending:
+            return
+        global_state.debug_auto_restart_pending = None
+        if self._action_task is not None and not self._action_task.done():
+            return
+        if not is_debug_active(self.test):
+            return
+        # If the variable tree view is open, let it handle the restart so
+        # the tree is rebuilt with fresh values.
+        if len(self.app.screen_stack) > 1:
+            top = self.app.screen_stack[-1]
+            if hasattr(top, "action_restart") and not getattr(top, "_restarting", False):
+                if hasattr(top, "_on_restart") and top._on_restart is not None:
+                    top.action_restart()
+                    return
+        self._run_action(
+            self._restart_debug_session(),
+            "Auto-restart: recompiled, restarting debugger.",
+        )
 
     def _ensure_debug_active(self, action_label: str) -> bool:
         if is_debug_active(self.test):
@@ -1115,10 +1292,18 @@ class TestDebuggerScreen(Screen[None]):
         text = Text()
         if not self._line_frames():
             text.append("No story yet. Press ")
-            text.append("R", style="bold")
+            text.append("r", style="bold")
             text.append(" to run.", style="dim")
+
+        text.append("  ")
+        text.append("r", style="bold")
+        text.append(" Restart", style="dim")
+        text.append("  ")
+        text.append("R", style="bold")
+        if global_state.debug_auto_restart:
+            text.append(" Auto:ON", style="bold green")
         else:
-            text.append("Story loaded.")
+            text.append(" Auto:OFF", style="dim")
 
         if self._assertion_failures:
             text.append("  ")

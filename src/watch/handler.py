@@ -228,6 +228,24 @@ async def handle_file_changes(changed_paths: dict[str, set[str]]):
             return
 
         if global_state.active_debug_test_key is not None:
+            if global_state.debug_auto_restart:
+                # Auto-restart: apply changes now and signal the debug screen
+                # to restart the session with the recompiled binary.
+                # Only signal if there are real source changes — build
+                # artifacts written to test_build/ (and the directory-modified
+                # noise they generate on parent dirs) would otherwise cause an
+                # infinite restart loop.
+                has_relevant_changes = any(
+                    not _is_in_test_build(os.path.abspath(p))
+                    and not _is_directory_modified_noise(kinds)
+                    for p, kinds in non_breakpoint_paths.items()
+                )
+                if has_relevant_changes:
+                    global_state.debug_auto_restart_pending = (
+                        global_state.active_debug_test_key
+                    )
+                await _apply_file_changes(non_breakpoint_paths)
+                return
             _merge_changed_paths(_deferred_changes, non_breakpoint_paths)
             return
 

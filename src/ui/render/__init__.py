@@ -20,6 +20,7 @@ from .tree import render_tree, render_tree_stdout
 from .test_output_screen import TestOutputScreen
 from .test_debugger_screen import TestDebuggerScreen
 from .options_screen import OptionsScreen
+from .variable_tree_screen import VariableTreeScreen
 
 __all__ = [
     "OutputBoxRenderMeta",
@@ -39,4 +40,5 @@ __all__ = [
     "TestOutputScreen",
     "TestDebuggerScreen",
     "OptionsScreen",
+    "VariableTreeScreen",
 ]
