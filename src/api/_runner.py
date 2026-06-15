@@ -1676,6 +1676,55 @@ async def stop_debug_session(test: Test, persist_annotations: bool = True) -> No
         global_state.active_debug_test_key = None
 
 
+async def _preempt_test(test: Test) -> None:
+    """Lightweight cancellation for priority preemption (search-mode).
+
+    Unlike :func:`cancel_test_and_restore_normal_build`, this does NOT:
+    - Set ``force_rebuild_once`` (avoids unnecessary full rebuilds).
+    - Call ``restore_normal_build_mode()`` (avoids Makefile regeneration).
+    - Call ``stop_debug_session()`` (search-priority only targets normal runs).
+
+    The cancelled test is auto-re-queued via ``rerun_after_user_cancel`` so it
+    resumes in the background once the visible tests finish.
+    """
+    test_key = _test_key(test)
+    run_task = _active_run_tasks.get(test_key)
+
+    test.cancelled_by_user = True
+    test.rerun_after_user_cancel = True
+
+    if run_task is not None and not run_task.done():
+        # Cancel the task FIRST.  This ensures on_complete() fires promptly
+        # (the slot is freed and state_changed() runs to pick up visible tests).
+        # Setting CANCELLED before cancel() means run_test()'s finally block
+        # sees CANCELLED and leaves active_processes intact for our cleanup.
+        test.state = TestState.CANCELLED
+        test.time_state_changed = time.monotonic()
+        run_task.cancel()
+
+        # Now terminate the process (cleanup).  During this await the
+        # CancelledError is processed in run_test(), on_complete() fires,
+        # and the scheduler picks up visible pending tests immediately.
+        process = active_processes.get(test_key)
+        if process is not None and process.returncode is None:
+            try:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=1.0)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+            finally:
+                active_processes.pop(test_key, None)
+    else:
+        # No active run task — just re-queue directly.
+        test.state = TestState.PENDING
+        test.time_start = 0.0
+        test.time_state_changed = time.monotonic()
+
+
 async def cancel_test_and_restore_normal_build(test: Test) -> None:
     test_key = _test_key(test)
     run_task = _active_run_tasks.get(test_key)

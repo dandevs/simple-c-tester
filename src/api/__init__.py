@@ -278,6 +278,8 @@ class TestRunner:
         value so the FIFO scheduler (which pops smallest-first) picks them
         before other pending tests.
         """
+        from api._runner import _preempt_test, state_changed
+
         tests = self.tests
         visible_pending = [
             t for t in tests
@@ -286,20 +288,24 @@ class TestRunner:
         if not visible_pending:
             return
 
-        # Set visible pending timestamps to a small value so they're picked
+        # Set visible pending timestamps to a NEGATIVE value so they're picked
         # first by the FIFO scheduler (which sorts ascending and pops from index 0).
-        # Use 0.0 to guarantee they're older than any test queued via on_complete
-        # (which sets time_state_changed = time.monotonic(), a large positive number).
+        # Must be < 0.0 because Test.time_state_changed defaults to 0.0 for all
+        # never-run pending tests — using 0.0 would be a no-op.
         for t in visible_pending:
-            t.time_state_changed = 0.0
+            t.time_state_changed = -1.0
+
+        # Trigger the scheduler immediately — if there are free slots, visible
+        # pending tests get picked up right now.
+        state_changed()
 
         if not search_active:
             return  # normal mode: only reorder, never cancel
 
-        # Search mode: cancel minimum non-visible running tests to free slots
+        # Re-check capacity after state_changed() may have consumed free slots.
         free_slots = self.state.app_state.available_runners
         if free_slots >= len(visible_pending):
-            return  # enough capacity — normal scheduling handles it
+            return  # enough capacity — visible tests already scheduled
 
         needed = len(visible_pending) - free_slots
         non_visible_running = [
@@ -315,7 +321,13 @@ class TestRunner:
         to_cancel = non_visible_running[:needed]
 
         for test in to_cancel:
-            await self.cancel(test)
+            await _preempt_test(test)
+
+        # Yield to the event loop so CancelledErrors from run_task.cancel()
+        # are processed, on_complete() fires, and available_runners is
+        # incremented.  Then trigger scheduling to pick up visible tests.
+        await asyncio.sleep(0)
+        state_changed()
 
     # ----- lifecycle ----------------------------------------------------
 
