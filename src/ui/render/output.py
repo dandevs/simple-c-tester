@@ -78,7 +78,7 @@ def get_test_output(test: Test) -> list[Text] | None:
         sig = run_ref.signal_name if run_ref is not None else ""
         if sig:
             crash = Text()
-            crash.append(f"\u2620 CRASHED: {sig}", style="bold red")
+            crash.append(f"! CRASHED: {sig}", style="bold red")
             sections.append(crash)
             sections.append(Text())
 
@@ -98,13 +98,13 @@ def get_test_output(test: Test) -> list[Text] | None:
             ubsan_match = _UBSAN_RE.search(stderr_text.plain)
             if asan_match:
                 san = Text()
-                san.append(f"\u26a0 ASan: {asan_match.group(1)}", style="bold yellow")
+                san.append(f"! ASan: {asan_match.group(1)}", style="bold yellow")
                 sections.append(san)
                 sections.append(Text())
             elif ubsan_match:
                 san = Text()
                 san.append(
-                    f"\u26a0 UBSan: {ubsan_match.group(1).strip()[:80]}",
+                    f"! UBSan: {ubsan_match.group(1).strip()[:80]}",
                     style="bold yellow",
                 )
                 sections.append(san)

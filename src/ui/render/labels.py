@@ -128,7 +128,7 @@ def _test_label_base(test: Test, now: float) -> Text:
             )
             avg = sum(prior) / max(1, len(prior))
             if elapsed_ms > avg * 2 and avg > 0:
-                timing_note = f"[{elapsed_ms}ms avg {int(avg)}ms \u26a0]"
+                timing_note = f"[{elapsed_ms}ms avg {int(avg)}ms !]"
                 timing_style = "yellow"
         text.append(f" {timing_note}", style=timing_style)
         return text
@@ -152,7 +152,7 @@ def _test_label_base(test: Test, now: float) -> Text:
                 )
                 avg = sum(prior) / max(1, len(prior))
                 if elapsed_ms > avg * 2 and avg > 0:
-                    timing_note = f"[{elapsed_ms}ms avg {int(avg)}ms \u26a0]"
+                    timing_note = f"[{elapsed_ms}ms avg {int(avg)}ms !]"
                     timing_style = "yellow"
             text.append(f" {timing_note}", style=timing_style)
         return text

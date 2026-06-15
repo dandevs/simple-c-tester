@@ -246,7 +246,7 @@ def _build_timeline_progress_bar(total, selected_index, start_index, end_index, 
         if col == selected_col:
             bar.append("\u25c6", style=f"bold {STORY_META_SELECTED}")
         elif window_start_col <= col <= window_end_col:
-            bar.append("\u2501", style="ansi_blue")
+            bar.append("\u2501", style="blue")
         else:
             bar.append("\u2500", style="dim")
 

@@ -264,7 +264,7 @@ class TestRunnerApp(App[None]):
         Binding("enter", "open_story_selected", "Story"),
         Binding("o", "open_output_selected", "Output"),
         Binding("r", "rerun_selected", "Rerun"),
-        Binding("shift+r", "rerun_all", "Rerun All"),
+        Binding("R", "rerun_all", "Rerun All"),
         Binding("n", "next_failure", "Next Fail"),
         Binding("p", "prev_failure", "Prev Fail"),
         Binding("/", "focus_search", "Search"),
@@ -723,8 +723,9 @@ class TestRunnerApp(App[None]):
             if any(t.state == TestState.RUNNING for t in state.all_tests):
                 self._run_start_time = time.monotonic()
 
-        # Detect run completion (non-watch mode only)
-        if not self.watch_mode and not self._run_complete:
+        # Detect run completion (all modes — watch mode resets via
+        # _reset_test_for_rerun when a new run is triggered).
+        if not self._run_complete:
             if all_tests_finished() and state.all_tests:
                 self._run_complete = True
                 self._run_end_time = time.monotonic()

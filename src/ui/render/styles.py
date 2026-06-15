@@ -62,8 +62,8 @@ SEARCH_HIGHLIGHT_STYLE = "black on yellow"
 # ---------------------------------------------------------------------------
 # Accents
 # ---------------------------------------------------------------------------
-ACCENT_STYLE = "bold ansi_blue"
-ACCENT_CYAN_STYLE = "ansi_cyan"
+ACCENT_STYLE = "bold blue"
+ACCENT_CYAN_STYLE = "cyan"
 
 
 @dataclass

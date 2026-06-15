@@ -146,7 +146,7 @@ class DebugControlsModal(ModalScreen[None]):
         key_width = max(len(key) for key, _ in controls)
         body = Text()
         for index, (key, description) in enumerate(controls):
-            body.append(key.ljust(key_width), style="bold ansi_cyan")
+            body.append(key.ljust(key_width), style="bold cyan")
             body.append("    ")
             body.append(description, style="default")
             if index < len(controls) - 1:
@@ -231,7 +231,7 @@ class TestDebuggerScreen(Screen[None]):
 
     STORY_BAR_BASE = "dim"
     STORY_BAR_WINDOW = "dim"
-    STORY_BAR_ACTIVE = "ansi_blue"
+    STORY_BAR_ACTIVE = "blue"
     STORY_BAR_SELECTED = "yellow"
     STORY_META_HIGHLIGHT = "cyan"
     STORY_META_SELECTED = "yellow"
