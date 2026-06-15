@@ -238,9 +238,18 @@ class VariableTreeScreen(Screen[None]):
                     self._refresh()
                     self._set_footer(f"  Tree refreshed for '{self._var_name}'.")
                 else:
-                    self._set_footer(
-                        f"  Variable '{self._var_name}' not found after restart."
-                    )
+                    if global_state.debug_auto_restart:
+                        self._set_footer(
+                            f"  '{self._var_name}' not found "
+                            f"(compile error or variable removed). "
+                            f"Fix code — tree will auto-refresh on next change."
+                        )
+                    else:
+                        self._set_footer(
+                            f"  '{self._var_name}' not found "
+                            f"(compile error or variable removed). "
+                            f"Fix code and press r to retry."
+                        )
             except Exception:
                 self._set_footer("  Restart failed.")
             finally:

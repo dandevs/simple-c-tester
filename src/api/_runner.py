@@ -1621,6 +1621,12 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
     test.debug_precision_mode = "precise" if precision_mode == "precise" else "loose"
     _start_timeline_run(test, "manual debug")
 
+    # Claim the active debug slot early so that watch/auto-restart keeps
+    # treating this test as "in debug mode" even if compilation fails.
+    # Without this, a compile failure clears active_debug_test_key and the
+    # auto-restart loop can never re-fire after the code is fixed.
+    global_state.active_debug_test_key = test_key
+
     proc_env = os.environ.copy()
     proc_env["COLUMNS"] = str(max(20, subprocess_columns))
 
@@ -1634,7 +1640,6 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
     controller.set_target_output_callback(target_callback)
     controller.set_console_output_callback(console_callback)
 
-    global_state.active_debug_test_key = test_key
     _debug_sessions[test_key] = controller
 
     try:

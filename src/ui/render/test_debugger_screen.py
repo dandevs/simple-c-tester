@@ -1224,8 +1224,6 @@ class TestDebuggerScreen(Screen[None]):
         global_state.debug_auto_restart_pending = None
         if self._action_task is not None and not self._action_task.done():
             return
-        if not is_debug_active(self.test):
-            return
         # If the variable tree view is open, let it handle the restart so
         # the tree is rebuilt with fresh values.
         if len(self.app.screen_stack) > 1:
@@ -1234,6 +1232,12 @@ class TestDebuggerScreen(Screen[None]):
                 if hasattr(top, "_on_restart") and top._on_restart is not None:
                     top.action_restart()
                     return
+        # Only auto-restart if this test is still in debug mode. We check
+        # active_debug_test_key (not is_debug_active) because a previous
+        # compile failure leaves gdb inactive but the key set — the restart
+        # callback will recompile and start a fresh session.
+        if global_state.active_debug_test_key != _test_key(self.test):
+            return
         self._run_action(
             self._restart_debug_session(),
             "Auto-restart: recompiled, restarting debugger.",
