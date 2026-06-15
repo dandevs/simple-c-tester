@@ -91,7 +91,7 @@ OPTION_FIELDS: tuple[OptionField, ...] = (
         "stepper",
         2,
         1,
-        5,
+        100,
     ),
     OptionField(
         "tsv_lines_above", "Lines above frame", "Test Story", "stepper", 4, 0, 20

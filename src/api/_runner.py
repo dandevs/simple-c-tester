@@ -99,6 +99,12 @@ def _classify_for_expansion(value: str, type_hint: str = "") -> str | None:
       - "unknown":  value was unresolved ("?") -> let var_create resolve it
       - None:       plain scalar already shown inline, nothing to expand
     """
+    # NULL or unresolved pointers are not dereferenceable — suppress expansion
+    # regardless of what gdb reports as numchild.  Covers "?", "0x0", "(nil)",
+    # "nullptr", and empty values for any type ending in "*".
+    stripped = value.strip()
+    if type_hint.strip().endswith("*") and stripped in {"?", "0x0", "(nil)", "nullptr", ""}:
+        return None
     if value == "?":
         return "unknown"
     if _looks_pointer_value(value):
