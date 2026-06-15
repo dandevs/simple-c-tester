@@ -245,6 +245,7 @@ class TestRunnerApp(App[None]):
         self.collapsed_suites: set[str] = set()
         self.search_query: str = ""
         self._last_visible_keys: set[str] = set()
+        self._last_search_active: bool = False
         self._prioritize_in_progress = False
         if theme_name == "ansi":
             theme = _ansi_theme()
@@ -488,21 +489,23 @@ class TestRunnerApp(App[None]):
         }
 
     def _maybe_prioritize(self) -> None:
-        """If the visible test set changed, ask the runner to prioritize them."""
+        """If the visible test set or search state changed, ask the runner to prioritize them."""
         if self._prioritize_in_progress:
             return
         visible = self._compute_visible_keys()
-        if visible == self._last_visible_keys:
+        search_active = bool(self.search_query)
+        if visible == self._last_visible_keys and search_active == self._last_search_active:
             return
         self._last_visible_keys = visible
+        self._last_search_active = search_active
         if not visible:
             return
         self._prioritize_in_progress = True
-        asyncio.ensure_future(self._run_prioritize(visible))
+        asyncio.ensure_future(self._run_prioritize(visible, search_active))
 
-    async def _run_prioritize(self, visible: set[str]) -> None:
+    async def _run_prioritize(self, visible: set[str], search_active: bool = False) -> None:
         try:
-            await self.runner.prioritize(visible)
+            await self.runner.prioritize(visible, search_active=search_active)
         except Exception:
             pass  # best-effort; never crash the UI over scheduling
         finally:

@@ -262,21 +262,22 @@ class TestRunner:
         await cancel_test_and_restore_normal_build(test)
         _sync_state_back(self.state)
 
-    async def prioritize(self, visible_keys: set[str]) -> None:
-        """Preempt non-visible running tests so visible pending tests run first.
+    async def prioritize(self, visible_keys: set[str], search_active: bool = False) -> None:
+        """Prioritize visible pending tests for execution.
 
-        If there are visible pending tests and not enough free worker slots,
-        cancel the **minimum** number of non-visible running tests to free
-        capacity.  Cancelled tests are re-queued automatically (via
-        ``rerun_after_user_cancel``) and resume in the background once the
-        visible tests finish.
+        In **normal mode** (``search_active=False``): only bump timestamps so
+        visible pending tests are picked next when slots naturally free up.
+        Never cancel running tests.
 
-        Visible pending tests get their ``time_state_changed`` bumped so the
-        FIFO scheduler (which pops most-recent first) picks them before the
-        re-queued non-visible ones.
+        In **search mode** (``search_active=True``): cancel the minimum number
+        of non-visible running tests to free capacity for visible pending tests.
+        Cancelled tests are re-queued automatically (via ``rerun_after_user_cancel``)
+        and resume in the background once the visible tests finish.
+
+        Visible pending tests get their ``time_state_changed`` set to a small
+        value so the FIFO scheduler (which pops smallest-first) picks them
+        before other pending tests.
         """
-        import time as _time
-
         tests = self.tests
         visible_pending = [
             t for t in tests
@@ -285,6 +286,17 @@ class TestRunner:
         if not visible_pending:
             return
 
+        # Set visible pending timestamps to a small value so they're picked
+        # first by the FIFO scheduler (which sorts ascending and pops from index 0).
+        # Use 0.0 to guarantee they're older than any test queued via on_complete
+        # (which sets time_state_changed = time.monotonic(), a large positive number).
+        for t in visible_pending:
+            t.time_state_changed = 0.0
+
+        if not search_active:
+            return  # normal mode: only reorder, never cancel
+
+        # Search mode: cancel minimum non-visible running tests to free slots
         free_slots = self.state.app_state.available_runners
         if free_slots >= len(visible_pending):
             return  # enough capacity — normal scheduling handles it
@@ -301,13 +313,6 @@ class TestRunner:
         # invested) to minimise wasted computation.
         non_visible_running.sort(key=lambda t: t.time_start, reverse=True)
         to_cancel = non_visible_running[:needed]
-
-        # Bump visible pending timestamps so the scheduler picks them first
-        # after the cancellations free slots.  (+1s keeps them ahead of the
-        # cancelled tests whose timestamp is set to "now" in on_complete.)
-        bump = _time.monotonic() + 1.0
-        for t in visible_pending:
-            t.time_state_changed = bump
 
         for test in to_cancel:
             await self.cancel(test)

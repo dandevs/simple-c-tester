@@ -1833,7 +1833,7 @@ def state_changed():
     )
 
     while state.available_runners > 0 and len(pending_tests) > 0:
-        test = pending_tests.pop()
+        test = pending_tests.pop(0)
         state.available_runners -= 1
         test.state = TestState.RUNNING
         test.time_start = 0.0
