@@ -1,11 +1,8 @@
-#include <stdio.h>
+#include "ctest.h"
 
-int main() {
+int main(void) {
     int result = 20 / 4;
-    // This test will fail - intentionally wrong assertion
-    if (result == 6) {
-        return 0;
-    }
-    fprintf(stderr, "FAIL: Division test expected 6, got %d\n", result);
-    return 1;
+    /* Intentionally wrong: 20 / 4 == 5, not 6. Exercises the wire format. */
+    ASSERT_EQ(6, result);
+    return 0;
 }

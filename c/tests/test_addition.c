@@ -1,9 +1,7 @@
-#include <stdio.h>
+#include "ctest.h"
 
-int main() {
+int main(void) {
     int result = 5 + 3;
-    if (result == 8) {
-        return 0;
-    }
-    return 1;
+    ASSERT_EQ(8, result);
+    return 0;
 }

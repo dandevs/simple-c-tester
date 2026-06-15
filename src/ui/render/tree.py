@@ -89,6 +89,7 @@ def render_tree(
     total_width: int,
     collapsed_suites: set[str] | None = None,
     search_query: str = "",
+    selected_test_key: str | None = None,
 ) -> tuple[list[OutputBoxRegion], list[TestRowRegion], list[SuiteRowRegion]]:
     """Render the full test tree.
 
@@ -114,6 +115,7 @@ def render_tree(
         test_rows=rendered_test_rows,
         suite_rows=rendered_suite_rows,
         lines=collected_lines,
+        selected_test_key=selected_test_key,
     )
 
     root = state.root_suite
@@ -143,6 +145,7 @@ class _Ctx:
     __slots__ = (
         "log", "now", "output_max_lines", "total_width",
         "collapsed", "query", "boxes", "test_rows", "suite_rows", "lines",
+        "selected_test_key",
     )
 
     def __init__(self, **kw):
@@ -179,6 +182,8 @@ def _render_test(
     guide = Text(prefix + connector, style=TREE_GUIDE_STYLE)
     label = test_label(test, ctx.now, ctx.query)
     row = guide + label
+    if ctx.selected_test_key and test.source_path == ctx.selected_test_key:
+        row.stylize("reverse")
     ctx.lines.append(row)
     ctx.test_rows.append(
         TestRowRegion(

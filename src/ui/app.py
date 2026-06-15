@@ -12,7 +12,7 @@ from textual.widgets import Input, RichLog, Static
 
 import state as global_state
 from state import state
-from core.models import Test, Suite, TestState
+from core.models import Test, Suite, TestState, TestRun
 from api import TestRunner
 from ui.render import (
     TestOutputScreen,
@@ -101,7 +101,10 @@ def _collect_all_suite_keys(suite: Suite, parent_key: str = "") -> set[str]:
     return keys
 
 
-def _build_status_line() -> Text:
+def _build_status_line(
+    run_complete: bool = False,
+    total_elapsed: float = 0.0,
+) -> Text:
     """Build the one-line status summary from current test states."""
     tests = state.all_tests
     total = len(tests)
@@ -129,6 +132,16 @@ def _build_status_line() -> Text:
     if pending:
         text.append(f"  \u22ef {pending}", style=STATUS_PENDING_STYLE)
 
+    if run_complete:
+        text.append("  ", style=SEPARATOR_STYLE)
+        text.append("\u2502", style=SEPARATOR_STYLE)
+        text.append("  ", style=SEPARATOR_STYLE)
+        if failed:
+            text.append(f"DONE \u2717 {failed} failed", style=STATUS_FAIL_STYLE)
+        else:
+            text.append("DONE \u2713 all passed", style=STATUS_PASS_STYLE)
+        text.append(f"  {total_elapsed:.1f}s", style=MUTED_STYLE)
+
     return text
 
 
@@ -136,26 +149,30 @@ def _footer_text(watch_mode: bool) -> Text:
     sep = Text(" \u2502 ", style=SEPARATOR_STYLE)
 
     text = Text()
+    text.append("\u2191\u2193", style="bold")
+    text.append(" Nav", style=MUTED_STYLE)
+    text.append(sep)
     text.append("/", style="bold")
     text.append(" Search", style=MUTED_STYLE)
-    text.append(sep)
-    text.append("F", style="bold")
-    text.append(" Fold", style=MUTED_STYLE)
-    text.append(sep)
-    text.append("U", style="bold")
-    text.append(" Unfold", style=MUTED_STYLE)
     text.append(sep)
     text.append("Enter", style="bold")
     text.append(" Story", style=MUTED_STYLE)
     text.append(sep)
-    text.append("Click", style="bold")
+    text.append("o", style="bold")
     text.append(" Output", style=MUTED_STYLE)
-    if watch_mode:
-        text.append(sep)
-        text.append("Auto-rerun", style=MUTED_STYLE)
     text.append(sep)
-    text.append("Ctrl+C", style="bold")
-    text.append(" Exit", style=MUTED_STYLE)
+    text.append("r", style="bold")
+    text.append(" Rerun", style=MUTED_STYLE)
+    text.append(sep)
+    text.append("R", style="bold")
+    text.append(" Rerun All", style=MUTED_STYLE)
+    if not watch_mode:
+        text.append(sep)
+        text.append("n/p", style="bold")
+        text.append(" Failures", style=MUTED_STYLE)
+    text.append(sep)
+    text.append("Q", style="bold")
+    text.append(" Quit", style=MUTED_STYLE)
     return text
 
 
@@ -209,6 +226,17 @@ class TestRunnerApp(App[None]):
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "Exit", priority=True),
+        Binding("q", "quit", "Quit"),
+        Binding("up", "nav_up", "Prev"),
+        Binding("down", "nav_down", "Next"),
+        Binding("k", "nav_up", "Prev"),
+        Binding("j", "nav_down", "Next"),
+        Binding("enter", "open_story_selected", "Story"),
+        Binding("o", "open_output_selected", "Output"),
+        Binding("r", "rerun_selected", "Rerun"),
+        Binding("shift+r", "rerun_all", "Rerun All"),
+        Binding("n", "next_failure", "Next Fail"),
+        Binding("p", "prev_failure", "Prev Fail"),
         Binding("/", "focus_search", "Search"),
         Binding("escape", "clear_search", "Clear"),
         Binding("f", "fold_all", "Fold All"),
@@ -247,6 +275,12 @@ class TestRunnerApp(App[None]):
         self._last_visible_keys: set[str] = set()
         self._last_search_active: bool = False
         self._prioritize_in_progress = False
+        # Keyboard cursor navigation
+        self.selected_test_key: str | None = None
+        # Run lifecycle tracking
+        self._run_complete: bool = False
+        self._run_start_time: float = 0.0
+        self._run_end_time: float = 0.0
         if theme_name == "ansi":
             theme = _ansi_theme()
             self.register_theme(theme)
@@ -274,6 +308,8 @@ class TestRunnerApp(App[None]):
 
         self._set_subprocess_columns_from_ui()
         self._render_tree()
+        self._init_selection()
+        self._dirty = True  # force re-render with selection highlight
 
         if self.watch_mode:
             from watchdog.observers import Observer
@@ -352,6 +388,122 @@ class TestRunnerApp(App[None]):
         else:
             self.collapsed_suites.add(suite_key)
         self._dirty = True
+
+    # ----- Keyboard navigation ------------------------------------------
+
+    def _visible_test_keys(self) -> list[str]:
+        """Return test source-paths in tree order (from the last render)."""
+        return [r.test_key for r in self.rendered_test_rows]
+
+    def _init_selection(self) -> None:
+        """Select the first visible test if nothing is selected, or fix the
+        selection if the currently selected test was filtered out by search."""
+        keys = self._visible_test_keys()
+        if not keys:
+            return
+        if self.selected_test_key is None or self.selected_test_key not in keys:
+            self.selected_test_key = keys[0]
+
+    def action_nav_up(self) -> None:
+        if not self._on_main_screen():
+            return
+        keys = self._visible_test_keys()
+        if not keys:
+            return
+        if self.selected_test_key is None or self.selected_test_key not in keys:
+            self.selected_test_key = keys[-1]
+        else:
+            idx = keys.index(self.selected_test_key)
+            self.selected_test_key = keys[max(0, idx - 1)]
+        self._dirty = True
+
+    def action_nav_down(self) -> None:
+        if not self._on_main_screen():
+            return
+        keys = self._visible_test_keys()
+        if not keys:
+            return
+        if self.selected_test_key is None or self.selected_test_key not in keys:
+            self.selected_test_key = keys[0]
+        else:
+            idx = keys.index(self.selected_test_key)
+            self.selected_test_key = keys[min(len(keys) - 1, idx + 1)]
+        self._dirty = True
+
+    def action_open_story_selected(self) -> None:
+        if not self._on_main_screen() or self.selected_test_key is None:
+            return
+        test = self._get_test_by_key(self.selected_test_key)
+        if test is not None:
+            self.push_screen(TestDebuggerScreen(test))
+
+    def action_open_output_selected(self) -> None:
+        if not self._on_main_screen() or self.selected_test_key is None:
+            return
+        test = self._get_test_by_key(self.selected_test_key)
+        if test is not None:
+            self.push_screen(TestOutputScreen(test))
+
+    def action_next_failure(self) -> None:
+        if not self._on_main_screen():
+            return
+        self._jump_failure(forward=True)
+
+    def action_prev_failure(self) -> None:
+        if not self._on_main_screen():
+            return
+        self._jump_failure(forward=False)
+
+    def _jump_failure(self, forward: bool) -> None:
+        keys = self._visible_test_keys()
+        if not keys:
+            return
+        failed = []
+        for k in keys:
+            t = self._get_test_by_key(k)
+            if t is not None and t.state == TestState.FAILED:
+                failed.append(k)
+        if not failed:
+            return
+        if self.selected_test_key is None or self.selected_test_key not in keys:
+            self.selected_test_key = failed[0]
+            self._dirty = True
+            return
+        idx = keys.index(self.selected_test_key)
+        if forward:
+            candidates = [k for k in failed if keys.index(k) > idx]
+        else:
+            candidates = [k for k in reversed(failed) if keys.index(k) < idx]
+        if candidates:
+            self.selected_test_key = candidates[0]
+            self._dirty = True
+
+    # ----- Run controls ------------------------------------------------
+
+    def action_rerun_selected(self) -> None:
+        if not self._on_main_screen() or self.selected_test_key is None:
+            return
+        test = self._get_test_by_key(self.selected_test_key)
+        if test is None:
+            return
+        self._reset_test_for_rerun(test)
+        self._dirty = True
+
+    def action_rerun_all(self) -> None:
+        if not self._on_main_screen():
+            return
+        for test in state.all_tests:
+            self._reset_test_for_rerun(test)
+        self._dirty = True
+
+    def _reset_test_for_rerun(self, test: Test) -> None:
+        """Reset a test to PENDING so the scheduler picks it up again."""
+        test.state = TestState.PENDING
+        test.current_run = TestRun()
+        test.time_state_changed = time.monotonic()
+        self._run_complete = False
+        self._run_start_time = 0.0
+        self.runner.schedule_run()
 
     # ----- Engine event handling ----------------------------------------
 
@@ -536,15 +688,38 @@ class TestRunnerApp(App[None]):
             self._update_dep_warning()
             self._flush_deferred_watch_changes()
 
+        # Track run start (first time we see running tests)
+        if not self._run_complete and self._run_start_time == 0.0:
+            if any(t.state == TestState.RUNNING for t in state.all_tests):
+                self._run_start_time = time.monotonic()
+
+        # Detect run completion (non-watch mode only)
+        if not self.watch_mode and not self._run_complete:
+            if all_tests_finished() and state.all_tests:
+                self._run_complete = True
+                self._run_end_time = time.monotonic()
+
         # Status header always refreshes (cheap) so counters stay live.
         if self.status_widget is not None:
-            self.status_widget.update(_build_status_line())
+            elapsed = 0.0
+            if self._run_complete:
+                elapsed = self._run_end_time - self._run_start_time
+            elif self._run_start_time > 0:
+                elapsed = time.monotonic() - self._run_start_time
+            self.status_widget.update(
+                _build_status_line(
+                    run_complete=self._run_complete,
+                    total_elapsed=elapsed,
+                )
+            )
 
         now = time.monotonic()
         if self._dirty:
+            self._init_selection()
             self._render_tree()
             self._dirty = False
             self._last_tree_render = now
+            self._ensure_selected_visible()
         elif has_active_tests() and (
             now - self._last_tree_render
         ) >= self.COSMETIC_RENDER_INTERVAL:
@@ -554,9 +729,6 @@ class TestRunnerApp(App[None]):
         # Visibility-priority: preempt non-visible running tests so visible
         # pending tests get slots.  Only fires when the visible set changes.
         self._maybe_prioritize()
-
-        if not self.watch_mode and all_tests_finished():
-            self.exit()
 
     async def _regen_makefile(self) -> None:
         """Regenerate the Makefile in a background thread.
@@ -590,6 +762,7 @@ class TestRunnerApp(App[None]):
                 max(20, log.size.width or self.size.width or 80),
                 collapsed_suites=self.collapsed_suites,
                 search_query=self.search_query,
+                selected_test_key=self.selected_test_key,
             )
         )
 
@@ -602,6 +775,23 @@ class TestRunnerApp(App[None]):
                 animate=False,
                 immediate=True,
             )
+
+    def _ensure_selected_visible(self) -> None:
+        """Scroll the tree so the selected test row is in view."""
+        if self.log_widget is None or self.selected_test_key is None:
+            return
+        for row in self.rendered_test_rows:
+            if row.test_key != self.selected_test_key:
+                continue
+            top = self.log_widget.scroll_y
+            height = self.log_widget.size.height or 1
+            bottom = top + height
+            if row.line < top or row.line >= bottom:
+                target = max(0, row.line - height // 3)
+                self.log_widget.scroll_to(
+                    y=target, animate=False, immediate=True
+                )
+            return
 
     def _update_dep_warning(self) -> None:
         if not self.watch_mode:

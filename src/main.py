@@ -10,15 +10,57 @@ Run from a project root containing a ``tests/`` directory (e.g. ``c/``)::
     python3 ../src/main.py
 """
 
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.dirname(__file__))
+
+# Handle "ctester init" before any heavy imports — pygdbmi/textual may not be
+# installed in environments that only need the init scaffolding command.
+if len(_sys.argv) > 1 and _sys.argv[1] == "init":
+    from pathlib import Path
+
+    _tests_path = Path("tests")
+    _created_dir = not _tests_path.exists()
+    _tests_path.mkdir(exist_ok=True)
+
+    _bundled = Path(_os.path.dirname(__file__)) / "api" / "resources" / "ctest.h"
+    _bundled_text = _bundled.read_text()
+    _target = _tests_path / "ctest.h"
+
+    if _target.exists():
+        if _target.read_text() == _bundled_text:
+            _action = "up to date"
+        else:
+            _target.write_text(_bundled_text)
+            _action = "updated"
+    else:
+        _target.write_text(_bundled_text)
+        _action = "created"
+
+    print("Initializing CTester project...")
+    if _created_dir:
+        print(f"  Created directory: {_tests_path}/")
+    print(f"  ctest.h: {_action} at {_target}")
+    print(
+        "\n  Add to your tests:\n"
+        '    #include "ctest.h"\n'
+        "\n"
+        "  Assertions (fatal - return 1 on failure):\n"
+        "    ASSERT_EQ(expected, actual)   ASSERT_TRUE(cond)\n"
+        "    ASSERT_STREQ(a, b)            ASSERT_NULL(ptr)\n"
+        "    ASSERT_GT(a, b)   ASSERT_LT(a, b)   ...\n"
+        "\n"
+        "  Soft checks (report and continue):\n"
+        "    EXPECT_EQ(expected, actual)   EXPECT_TRUE(cond)\n"
+        "    return TEST_RESULT();\n"
+    )
+    _sys.exit(0)
+
 import argparse
 import asyncio
 import shutil
 import sys
 from pathlib import Path
-
-import sys as _sys
-import os as _os
-_sys.path.insert(0, _os.path.dirname(__file__))
 
 from api import TestRunner, RunnerConfig
 from core.config import RunnerConfig as _RunnerConfig  # noqa: F401 (re-export clarity)
@@ -162,6 +204,7 @@ async def _main():
 
 
 def entry():
+    # "ctester init" is handled at the top of this module before heavy imports.
     try:
         asyncio.run(_main())
     except KeyboardInterrupt:
