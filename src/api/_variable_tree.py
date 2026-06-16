@@ -93,7 +93,7 @@ async def build_variable_tree(
     node_count = [0]
 
     try:
-        return await _build_node(
+        built = await _build_node(
             controller,
             var_name,
             expression,
@@ -106,6 +106,7 @@ async def build_variable_tree(
         )
     finally:
         await controller.var_delete(var_name, timeout=1.0)
+    return _compact_node(built) if built is not None else None
 
 
 async def _build_node(
@@ -181,16 +182,22 @@ async def _build_node(
             evaluated = await controller.var_evaluate(child_var_name, timeout=1.0)
             if evaluated is not None:
                 child_value = evaluated
-        if child_value in {"", "{...}"}:
+        # Only "" is truly unresolved. "{...}" is the legitimate value gdb
+        # returns for compound children (struct/union/array); preserving it
+        # keeps their node boxes readable instead of degrading to "?".
+        if child_value == "":
             child_value = "?"
 
-        # Skip NULL/unresolved pointer children — they add visual noise
-        # without structural value.
+        # Skip NULL/unresolved POINTER children only — they add visual noise
+        # without structural value. Aggregate children (struct/union/array)
+        # are always expandable via their own children even when their scalar
+        # value is "{...}", so they must never be skipped here (this is what
+        # previously hid union data from the tree).
         if child_numchild > 0:
             child_stripped = child_value.strip()
-            if _is_pointer_type(child_type) and child_stripped in _NULL_VALUES:
-                continue
-            if child_stripped == "?":
+            if _is_pointer_type(child_type) and (
+                child_stripped in _NULL_VALUES or child_stripped == "?"
+            ):
                 continue
 
         # Scalar fields (numchild == 0) are shown inside the node box.
@@ -216,6 +223,114 @@ async def _build_node(
                 node.children.append(child_node)
 
     return node
+
+
+# ---------------------------------------------------------------------------
+# Compaction pass — inline non-graph content as dotted fields
+# ---------------------------------------------------------------------------
+#
+# Only **graph nodes** (pointers to a struct/union, and by-value aggregates
+# that contain one) are drawn as their own boxes. Everything else — scalars,
+# scalar pointers (char *, char **, …), arrays, and pure-data aggregates such
+# as a union whose members only hold scalars — is flattened into the nearest
+# graph-node ancestor as dotted-name fields. This keeps the diagram focused on
+# the data-structure graph instead of drawing a box for every char * deref.
+
+
+def _points_to_aggregate(type_hint: str) -> bool:
+    """True for pointers whose target is a struct/union (a graph edge)."""
+    t = type_hint.strip()
+    if not t.endswith("*"):
+        return False
+    target = t[:-1].strip()
+    for qualifier in ("const ", "volatile ", "restrict "):
+        if target.startswith(qualifier):
+            target = target[len(qualifier):].strip()
+    return (
+        target.startswith("struct")
+        or target.startswith("union")
+        or target.endswith("{...}")
+    )
+
+
+def _has_graph_node(node: VarTreeNode) -> bool:
+    """True if *node* or any descendant is a pointer to a struct/union.
+
+    A node's own ``struct s_node *`` type qualifies it as a box even when its
+    pointer children are all NULL (a leaf in the graph), so leaves are never
+    collapsed away.
+    """
+    if _points_to_aggregate(node.type_hint):
+        return True
+    return any(_has_graph_node(child) for child in node.children)
+
+
+def _last_segment(name: str) -> str:
+    """Final dotted-path component (e.g. ``n.u_data.cmd`` → ``cmd``)."""
+    return name.rsplit(".", 1)[-1] if "." in name else name
+
+
+def _join_path(prefix: str, segment: str) -> str:
+    """Join path segments; array-index segments like ``[0]`` attach without a dot."""
+    if not segment:
+        return prefix
+    if segment.startswith("["):
+        return f"{prefix}{segment}"
+    return f"{prefix}.{segment}"
+
+
+def _marked_value(node: VarTreeNode) -> str:
+    """Value with a trailing (cycle)/(null) marker when relevant."""
+    value = node.value or ""
+    if node.is_cycle:
+        return f"{value} (cycle)".strip()
+    if node.is_null:
+        return f"{value} (null)".strip()
+    return value
+
+
+def _inline_subtree(node: VarTreeNode, prefix: str) -> list[VarField]:
+    """Flatten a graph-node-free subtree into dotted-name fields.
+
+    Scalar pointers collapse to a single field showing their address (gdb
+    already includes the string preview for ``char *``); deref levels are not
+    chased. By-value aggregates emit their members with growing dotted
+    prefixes. Only ever called on subtrees with no pointer-to-aggregate.
+    """
+    if _is_pointer_type(node.type_hint):
+        return [VarField(name=prefix, value=_marked_value(node), type_hint=node.type_hint)]
+
+    fields: list[VarField] = []
+    for f in node.fields:
+        fields.append(VarField(name=_join_path(prefix, f.name), value=f.value, type_hint=f.type_hint))
+    for child in node.children:
+        child_prefix = _join_path(prefix, _last_segment(child.name))
+        fields.extend(_inline_subtree(child, child_prefix))
+    # Empty / unresolved aggregate — keep it visible as a single field.
+    if not fields:
+        fields.append(VarField(name=prefix, value=_marked_value(node), type_hint=node.type_hint))
+    return fields
+
+
+def _compact_node(node: VarTreeNode) -> VarTreeNode:
+    """Return a copy with non-graph children inlined as dotted fields."""
+    fields = list(node.fields)
+    children: list[VarTreeNode] = []
+    for child in node.children:
+        if _has_graph_node(child):
+            children.append(_compact_node(child))
+        else:
+            fields.extend(_inline_subtree(child, _last_segment(child.name)))
+    return VarTreeNode(
+        name=node.name,
+        value=node.value,
+        type_hint=node.type_hint,
+        fields=fields,
+        children=children,
+        is_cycle=node.is_cycle,
+        is_null=node.is_null,
+        address=node.address,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -280,10 +395,13 @@ def build_tree_from_captured(
             child_display = f"{display}.{seg}"
 
             if child_path in internal:
-                # Skip NULL/unresolved children
-                if _is_pointer_type(child_type) and child_val.strip() in _NULL_VALUES:
-                    continue
-                if child_val.strip() == "?":
+                # Skip NULL/unresolved POINTER children only. Aggregate
+                # children (struct/union/array) are expandable even when
+                # their captured value degraded to "?" (a compound value),
+                # so skipping them here would hide union data from the tree.
+                if _is_pointer_type(child_type) and (
+                    child_val.strip() in _NULL_VALUES or child_val.strip() == "?"
+                ):
                     continue
                 node.children.append(_build(child_path, child_display))
             else:
@@ -292,7 +410,8 @@ def build_tree_from_captured(
                 )
         return node
 
-    return _build((root_name,), root_name)
+    built = _build((root_name,), root_name)
+    return _compact_node(built) if built is not None else None
 
 
 __all__ = [
