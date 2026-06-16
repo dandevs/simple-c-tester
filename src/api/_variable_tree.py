@@ -31,6 +31,9 @@ class VarField:
     name: str
     value: str
     type_hint: str
+    # gdb expression for this field (e.g. ``head->data``). Populated during
+    # build and the inlining pass so any field line can be expanded on its own.
+    expr: str = ""
 
 
 @dataclass
@@ -45,6 +48,12 @@ class VarTreeNode:
     is_cycle: bool = False
     is_null: bool = False
     address: str = ""
+    # gdb expression that produced this node (e.g. ``head->next``). Lets the UI
+    # re-expand any single node as an artificial array via ``*(expr)@N``.
+    expr: str = ""
+    # True when this node is a scalar pointer expanded into array elements.
+    # The compaction pass keeps such nodes as their own boxes (not inlined).
+    is_expanded_array: bool = False
 
 
 # Pointer values that represent NULL and should not be expanded.
@@ -62,6 +71,39 @@ def _looks_pointer_address(value: str) -> bool:
     return v.startswith("0x")
 
 
+def _safe_base(expr: str) -> str:
+    """Parenthesise *expr* before an index operator if it needs grouping.
+
+    Indexing binds tighter than dereference in C, so ``*p[i]`` parses as
+    ``*(p[i])``. For our array elements we want ``(*p)[i]``, hence the wrap
+    when *expr* is not a bare token. Member access (``.`` / ``->``) binds tight
+    enough that no wrapping is needed there.
+    """
+    e = expr.strip()
+    if not e:
+        return e
+    if e.startswith("(") and e.endswith(")"):
+        return e
+    if e.startswith("*") or "@" in e:
+        return f"({e})"
+    return e
+
+
+def _child_expr(parent_expr: str, parent_type: str, child_exp: str) -> str:
+    """Reconstruct a child's gdb expression from its parent's.
+
+    Pointer parents dereference via ``->`` (gdb varobj auto-derefs pointer
+    children); by-value aggregates use ``.``; numeric ``child_exp`` is an
+    array index.
+    """
+    idx = child_exp.strip().strip("[]")
+    if idx.lstrip("-").isdigit():
+        return f"{_safe_base(parent_expr)}[{idx}]"
+    if parent_type.strip().endswith("*"):
+        return f"{parent_expr}->{child_exp}"
+    return f"{parent_expr}.{child_exp}"
+
+
 async def build_variable_tree(
     controller: GdbMIController,
     expression: str,
@@ -72,6 +114,9 @@ async def build_variable_tree(
     Returns ``None`` if gdb cannot create a variable object for the
     expression.  Cycles are detected by pointer address and rendered as
     leaf nodes with ``is_cycle=True``.
+
+    Pointer/array expansion is left entirely to the user (hover a pointer
+    line in the tree view and press ``a``); nothing is auto-expanded here.
     """
     created = await controller.var_create(expression, frame="*", timeout=2.0)
     if created is None:
@@ -103,6 +148,7 @@ async def build_variable_tree(
             visited,
             node_count,
             max_nodes,
+            expr=expression,
         )
     finally:
         await controller.var_delete(var_name, timeout=1.0)
@@ -119,16 +165,18 @@ async def _build_node(
     visited: set[str],
     node_count: list[int],
     max_nodes: int,
+    expr: str = "",
 ) -> VarTreeNode:
     """Classify the gdb variable object's children into fields vs. edges.
 
     A single ``var_create`` / ``var_delete`` pair brackets the whole tree
     because ``var_list_children`` returns child var-objects that persist
-    until the root is deleted.
+    until the root is deleted.  *expr* is the gdb expression for this node,
+    threaded through so any node can later be re-expanded as an array.
     """
     node_count[0] += 1
     if node_count[0] > max_nodes:
-        return VarTreeNode(name=display_name, value="...", type_hint="")
+        return VarTreeNode(name=display_name, value="...", type_hint="", expr=expr)
 
     address = value.strip() if _looks_pointer_address(value) else ""
 
@@ -139,6 +187,7 @@ async def _build_node(
             value=value,
             type_hint=type_hint,
             is_null=True,
+            expr=expr,
         )
 
     # Cycle detection — we've already visited this address.
@@ -149,6 +198,7 @@ async def _build_node(
             type_hint=type_hint,
             is_cycle=True,
             address=address,
+            expr=expr,
         )
     if address:
         visited.add(address)
@@ -158,6 +208,7 @@ async def _build_node(
         value=value,
         type_hint=type_hint,
         address=address,
+        expr=expr,
     )
 
     if numchild <= 0:
@@ -176,6 +227,9 @@ async def _build_node(
 
         if not child_exp:
             continue
+
+        child_expr = _child_expr(expr, type_hint, child_exp)
+        child_display = f"{display_name}.{child_exp}"
 
         # Resolve lazy values.
         if child_value in {"?", "", "{...}"}:
@@ -204,10 +258,14 @@ async def _build_node(
         # Pointer/aggregate fields (numchild > 0) become tree edges.
         if child_numchild <= 0:
             node.fields.append(
-                VarField(name=child_exp, value=child_value, type_hint=child_type)
+                VarField(
+                    name=child_exp,
+                    value=child_value,
+                    type_hint=child_type,
+                    expr=child_expr,
+                )
             )
         else:
-            child_display = f"{display_name}.{child_exp}"
             child_node = await _build_node(
                 controller,
                 child_var_name,
@@ -218,6 +276,7 @@ async def _build_node(
                 visited,
                 node_count,
                 max_nodes,
+                expr=child_expr,
             )
             if child_node is not None:
                 node.children.append(child_node)
@@ -254,13 +313,15 @@ def _points_to_aggregate(type_hint: str) -> bool:
 
 
 def _has_graph_node(node: VarTreeNode) -> bool:
-    """True if *node* or any descendant is a pointer to a struct/union.
+    """True if *node* or any descendant is drawn as its own box.
 
     A node's own ``struct s_node *`` type qualifies it as a box even when its
     pointer children are all NULL (a leaf in the graph), so leaves are never
-    collapsed away.
+    collapsed away.  A scalar pointer expanded into an array
+    (``is_expanded_array``) is also kept as a box so its element fields stay
+    visible and the node stays hoverable for re-expansion.
     """
-    if _points_to_aggregate(node.type_hint):
+    if node.is_expanded_array or _points_to_aggregate(node.type_hint):
         return True
     return any(_has_graph_node(child) for child in node.children)
 
@@ -296,28 +357,47 @@ def _inline_subtree(node: VarTreeNode, prefix: str) -> list[VarField]:
     already includes the string preview for ``char *``); deref levels are not
     chased. By-value aggregates emit their members with growing dotted
     prefixes. Only ever called on subtrees with no pointer-to-aggregate.
+
+    Each field carries the gdb ``expr`` of the variable it represents, so a
+    hovered field line can be expanded on its own.
     """
     if _is_pointer_type(node.type_hint):
-        return [VarField(name=prefix, value=_marked_value(node), type_hint=node.type_hint)]
+        return [VarField(
+            name=prefix, value=_marked_value(node),
+            type_hint=node.type_hint, expr=node.expr,
+        )]
 
     fields: list[VarField] = []
     for f in node.fields:
-        fields.append(VarField(name=_join_path(prefix, f.name), value=f.value, type_hint=f.type_hint))
+        fields.append(VarField(
+            name=_join_path(prefix, f.name), value=f.value,
+            type_hint=f.type_hint, expr=f.expr,
+        ))
     for child in node.children:
         child_prefix = _join_path(prefix, _last_segment(child.name))
         fields.extend(_inline_subtree(child, child_prefix))
     # Empty / unresolved aggregate — keep it visible as a single field.
     if not fields:
-        fields.append(VarField(name=prefix, value=_marked_value(node), type_hint=node.type_hint))
+        fields.append(VarField(
+            name=prefix, value=_marked_value(node),
+            type_hint=node.type_hint, expr=node.expr,
+        ))
     return fields
 
 
 def _compact_node(node: VarTreeNode) -> VarTreeNode:
-    """Return a copy with non-graph children inlined as dotted fields."""
+    """Return a copy with non-graph children inlined as dotted fields.
+
+    Children of an expanded array are always kept as their own boxes: an
+    array slot is a meaningful position the user asked to see, so even a
+    struct element with no live graph edge (e.g. a trailing ``next = NULL``)
+    must not be flattened into the array node's field list.
+    """
     fields = list(node.fields)
     children: list[VarTreeNode] = []
+    keep_all_children = node.is_expanded_array
     for child in node.children:
-        if _has_graph_node(child):
+        if keep_all_children or _has_graph_node(child):
             children.append(_compact_node(child))
         else:
             fields.extend(_inline_subtree(child, _last_segment(child.name)))
@@ -330,6 +410,8 @@ def _compact_node(node: VarTreeNode) -> VarTreeNode:
         is_cycle=node.is_cycle,
         is_null=node.is_null,
         address=node.address,
+        expr=node.expr,
+        is_expanded_array=node.is_expanded_array,
     )
 
 
@@ -414,10 +496,168 @@ def build_tree_from_captured(
     return _compact_node(built) if built is not None else None
 
 
+# ---------------------------------------------------------------------------
+# Array expansion — turn a pointer into a visible element array on demand
+# ---------------------------------------------------------------------------
+#
+# A bare scalar pointer (``int *``, ``char *``, ...) carries no length info in
+# its type, so gdb's varobj reports ``numchild`` of 0 (or 1 for the single
+# dereferenced element). To show ``arr[0] .. arr[N-1]`` we tell gdb to treat
+# the memory as an artificial array via the ``@`` operator: ``*(expr)@N``.
+#
+# Expansion is entirely user-driven: in the tree view you hover a pointer line
+# and press ``a``, then type the element count. :func:`build_array_subtree`
+# rebuilds that one variable as ``*(expr)@count`` and the result splices back
+# into the existing tree. Nothing is auto-expanded at build time.
+
+# Default count pre-filled in the expand prompt (the user can change it).
+DEFAULT_EXPAND_COUNT = 8
+
+
+async def _build_array_node(
+    controller: GdbMIController,
+    base_expr: str,
+    base_display: str,
+    base_value: str,
+    base_type: str,
+    count: int,
+    visited: set[str],
+    node_count: list[int],
+    max_nodes: int,
+) -> VarTreeNode | None:
+    """Build an ``is_expanded_array`` node for *base_expr* as *count* elements.
+
+    Creates a throwaway ``*(base_expr)@count`` varobj, lists its element
+    children, and classifies each as a field (scalar) or a recursed sub-node.
+    The returned node keeps *base_value* / *base_type* (the pointer's own
+    identity) so it splices cleanly into an existing tree.
+    """
+    safe = max(1, min(count, max_nodes))
+    arr_expr = f"*({base_expr})@{safe}"
+    created = await controller.var_create(arr_expr, frame="*", timeout=2.0)
+    if created is None:
+        return None
+    arr_var = str(created.get("name", ""))
+    try:
+        children_data = await controller.var_list_children(arr_var, timeout=1.5)
+        # NOTE: the element loop below may recurse via _build_node, which calls
+        # var_list_children on the element varobjs — so the array varobj (and
+        # its children) must stay alive until the loop finishes. Deletion is
+        # deferred to the finally block.
+        node_count[0] += 1
+        node = VarTreeNode(
+            name=base_display,
+            value=base_value,
+            type_hint=base_type,
+            address=base_value.strip() if _looks_pointer_address(base_value) else "",
+            expr=base_expr,
+            is_expanded_array=True,
+        )
+        if children_data:
+            await _populate_array_elements(
+                controller, node, children_data, base_expr, base_display,
+                visited, node_count, max_nodes,
+            )
+        return node
+    finally:
+        await controller.var_delete(arr_var, timeout=1.0)
+
+
+async def _populate_array_elements(
+    controller: GdbMIController,
+    node: VarTreeNode,
+    children_data: list[dict],
+    base_expr: str,
+    base_display: str,
+    visited: set[str],
+    node_count: list[int],
+    max_nodes: int,
+) -> None:
+    """Classify each artificial-array element as a field or recursed sub-node."""
+    for child in children_data:
+        idx = str(child.get("exp", ""))
+        child_var_name = str(child.get("name", ""))
+        child_value = str(child.get("value", "?"))
+        child_type = str(child.get("type", ""))
+        child_numchild = int(child.get("numchild", 0))
+        if not idx:
+            continue
+
+        if child_value in {"?", "", "{...}"}:
+            evaluated = await controller.var_evaluate(child_var_name, timeout=1.0)
+            if evaluated is not None:
+                child_value = evaluated
+        if child_value == "":
+            child_value = "?"
+
+        element_expr = f"{_safe_base(base_expr)}[{idx}]"
+        element_display = f"{base_display}[{idx}]"
+        if child_numchild <= 0:
+            node.fields.append(
+                VarField(
+                    name=f"[{idx}]", value=child_value,
+                    type_hint=child_type, expr=element_expr,
+                )
+            )
+        else:
+            element_node = await _build_node(
+                controller,
+                child_var_name,
+                element_display,
+                child_value,
+                child_type,
+                child_numchild,
+                visited,
+                node_count,
+                max_nodes,
+                expr=element_expr,
+            )
+            if element_node is not None:
+                node.children.append(element_node)
+
+
+async def build_array_subtree(
+    controller: GdbMIController,
+    base_expr: str,
+    base_display: str,
+    base_value: str,
+    base_type: str,
+    count: int,
+    max_nodes: int = MAX_NODES,
+) -> VarTreeNode | None:
+    """Rebuild a single variable as an artificial array of *count* elements.
+
+    Used by the per-variable ``a`` action.  Returns a fresh
+    :class:`VarTreeNode` with ``is_expanded_array=True``, keeping the
+    pointer's *base_value* / *base_type* so it splices into the existing tree
+    at the node named *base_display*.  Returns ``None`` if gdb rejects the
+    ``*(base_expr)@count`` expression.
+
+    The result is run through the compaction pass so an expanded array shows
+    scalar pointers inlined as fields and struct/union edges as sub-boxes.
+    """
+    visited: set[str] = set()
+    node_count = [0]
+    built = await _build_array_node(
+        controller,
+        base_expr,
+        base_display,
+        base_value,
+        base_type,
+        count,
+        visited,
+        node_count,
+        max_nodes,
+    )
+    return _compact_node(built) if built is not None else None
+
+
 __all__ = [
     "VarField",
     "VarTreeNode",
     "build_variable_tree",
+    "build_array_subtree",
     "build_tree_from_captured",
     "MAX_NODES",
+    "DEFAULT_EXPAND_COUNT",
 ]

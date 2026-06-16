@@ -44,6 +44,8 @@ _STYLE_FIELD_NAME = "cyan"
 _STYLE_FIELD_VAL = "green"
 _STYLE_MARKER = "dim"
 _STYLE_CONNECTOR = "dim"
+# Background appended to every segment of the hovered variable line.
+_STYLE_HOVER_BG = "on ansi_yellow"
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +66,28 @@ class PositionedNode:
     children: list["PositionedNode"] = field(default_factory=list)
 
 
+@dataclass
+class LineTarget:
+    """A hoverable variable line inside a box (title or a field).
+
+    Carries the gdb ``expr`` so the UI can expand exactly this variable, and
+    ``is_title`` to distinguish a box's own variable (re-expand the node) from
+    an inlined field (promote it into its own child box).
+    """
+
+    expr: str
+    type_hint: str
+    is_title: bool
+
+    @property
+    def is_pointer(self) -> bool:
+        return self.type_hint.strip().endswith("*")
+
+
+# A rendered content line: styled segments plus an optional hover target.
+ContentEntry = tuple[list[tuple[str, str]], LineTarget | None]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -80,45 +104,60 @@ def _short_name(name: str) -> str:
     return name
 
 
-def _content_lines(node: VarTreeNode) -> list[list[tuple[str, str]]]:
-    """Build the styled text segments for each content line inside the box."""
-    lines: list[list[tuple[str, str]]] = []
+def _content_entries(node: VarTreeNode) -> list[ContentEntry]:
+    """Build styled segments + hover target for each content line in the box.
 
-    # Line 0: name = value
+    The title line (``name = value``) and every field line are hoverable
+    targets carrying the variable's gdb ``expr``; type/marker lines are not.
+    Line order is stable and shared by width/height/render/hit-test.
+    """
+    entries: list[ContentEntry] = []
+
+    # Line 0: name = value (the node's own variable — always hoverable)
     val_style = _STYLE_VAL
     if node.is_null:
         val_style = _STYLE_VAL_NULL
     elif node.is_cycle:
         val_style = _STYLE_VAL_CYCLE
-    lines.append([(_short_name(node.name) + " = ", _STYLE_NAME),
-                  (_truncate(node.value), val_style)])
+    title_target = LineTarget(expr=node.expr, type_hint=node.type_hint, is_title=True)
+    entries.append((
+        [(_short_name(node.name) + " = ", _STYLE_NAME),
+         (_truncate(node.value), val_style)],
+        title_target,
+    ))
 
-    # Type hint
+    # Type hint (not hoverable)
     if node.type_hint:
-        lines.append([("[" + node.type_hint + "]", _STYLE_TYPE)])
+        entries.append(([("[" + node.type_hint + "]", _STYLE_TYPE)], None))
 
-    # Markers
+    # Markers (not hoverable)
     if node.is_null:
-        lines.append([("(null)", _STYLE_MARKER)])
+        entries.append([("(null)", _STYLE_MARKER)], None)
     if node.is_cycle:
-        lines.append([("(cycle)", _STYLE_MARKER)])
+        entries.append([("(cycle)", _STYLE_MARKER)], None)
 
-    # Scalar fields
+    # Fields (each hoverable, carrying its own gdb expr)
     for f in node.fields:
-        lines.append([(f.name + " = ", _STYLE_FIELD_NAME),
-                      (_truncate(f.value), _STYLE_FIELD_VAL)])
+        target = LineTarget(expr=f.expr, type_hint=f.type_hint, is_title=False)
+        entries.append((
+            [(f.name + " = ", _STYLE_FIELD_NAME),
+             (_truncate(f.value), _STYLE_FIELD_VAL)],
+            target,
+        ))
 
-    return lines
+    return entries
 
 
 def _node_width(node: VarTreeNode) -> int:
-    lines = _content_lines(node)
-    content_w = max((sum(len(text) for text, _ in segs) for segs in lines), default=1)
+    entries = _content_entries(node)
+    content_w = max(
+        (sum(len(text) for text, _ in segs) for segs, _ in entries), default=1
+    )
     return content_w + 4  # +2 padding, +2 borders
 
 
 def _node_height(node: VarTreeNode) -> int:
-    return len(_content_lines(node)) + 2  # +2 top/bottom border
+    return len(_content_entries(node)) + 2  # +2 top/bottom border
 
 
 # ---------------------------------------------------------------------------
@@ -222,12 +261,15 @@ def render_tree(
     pan_y: int = 0,
     viewport_w: int = 80,
     viewport_h: int = 24,
+    highlight_expr: str | None = None,
 ) -> Group:
     """Render the positioned tree as a Rich ``Group`` clipped to a viewport.
 
     ``pan_x`` / ``pan_y`` specify the top-left corner of the visible region
-    in grid coordinates.  The result always has exactly ``viewport_h`` lines
-    (padded with blank lines if the tree is smaller).
+    in grid coordinates.  ``highlight_expr`` paints the background of the
+    single variable line whose gdb expr matches (mouse-hover feedback).
+    The result always has exactly ``viewport_h`` lines (padded with blank
+    lines if the tree is smaller).
     """
     grid_w, grid_h = _grid_dims(root)
     if grid_w == 0 or grid_h == 0:
@@ -245,7 +287,7 @@ def render_tree(
 
     # Draw node boxes
     for pn in all_nodes:
-        _draw_box(chars, styles, pn)
+        _draw_box(chars, styles, pn, highlight_expr)
 
     # Fixup pass: mark each child's top-border centre with ┴ so the
     # incoming connector visibly joins the box (drawn after boxes win).
@@ -376,6 +418,7 @@ def _draw_box(
     chars: list[list[str]],
     styles: list[list[str]],
     pn: PositionedNode,
+    highlight_expr: str | None = None,
 ) -> None:
     x, y, w, h = pn.x, pn.y, pn.width, pn.height
     node = pn.node
@@ -403,18 +446,68 @@ def _draw_box(
         _set(chars, styles, x + i, y + h - 1, ch, border)
     _set(chars, styles, x + w - 1, y + h - 1, "\u2518", border)  # ┘
 
-    # Content lines
-    segments_list = _content_lines(node)
-    for row_idx, segments in enumerate(segments_list):
+    # Content lines — each entry may be the hovered variable line.
+    entries = _content_entries(node)
+    for row_idx, (segments, target) in enumerate(entries):
         row = y + 1 + row_idx
+        hovered = (
+            highlight_expr is not None
+            and target is not None
+            and target.expr == highlight_expr
+        )
         _set(chars, styles, x, row, "\u2502", border)  # │ left
+        if hovered:
+            # Paint the full inner width with the hover background first.
+            for col in range(x + 1, x + w - 1):
+                _set(chars, styles, col, row, " ", _STYLE_HOVER_BG)
         col = x + 1  # 1-char left padding
         for text, style in segments:
+            seg_style = f"{style} {_STYLE_HOVER_BG}" if hovered else style
             for ch in text:
                 if col < x + w - 1:
-                    _set(chars, styles, col, row, ch, style)
+                    _set(chars, styles, col, row, ch, seg_style)
                     col += 1
         _set(chars, styles, x + w - 1, row, "\u2502", border)  # │ right
+
+
+# ---------------------------------------------------------------------------
+# Hit testing (mouse → variable line)
+# ---------------------------------------------------------------------------
+
+
+def box_at(root: PositionedNode, gx: int, gy: int) -> PositionedNode | None:
+    """Positioned node whose box contains grid cell (gx, gy), else None.
+
+    Boxes never overlap in this layout, so the first match is the answer.
+    """
+    if root.x <= gx < root.x + root.width and root.y <= gy < root.y + root.height:
+        return root
+    for child in root.children:
+        hit = box_at(child, gx, gy)
+        if hit is not None:
+            return hit
+    return None
+
+
+def hit_test_line(
+    root: PositionedNode, gx: int, gy: int
+) -> tuple[PositionedNode, LineTarget] | None:
+    """Resolve a grid cell to the hoverable variable line under it.
+
+    Returns the containing positioned node and the line's
+    :class:`LineTarget`, or ``None`` if the cell sits on a non-variable line
+    (type/marker/border) or outside every box.
+    """
+    pn = box_at(root, gx, gy)
+    if pn is None:
+        return None
+    row = gy - pn.y - 1
+    entries = _content_entries(pn.node)
+    if 0 <= row < len(entries):
+        target = entries[row][1]
+        if target is not None:
+            return (pn, target)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +522,10 @@ def grid_size(root: PositionedNode) -> tuple[int, int]:
 
 __all__ = [
     "PositionedNode",
+    "LineTarget",
     "compute_layout",
     "render_tree",
     "grid_size",
+    "box_at",
+    "hit_test_line",
 ]

@@ -35,7 +35,11 @@ from runner import (
     cancel_pending_story_annotations_persist,
 )
 from core.userconfig import save_user_config
-from api._variable_tree import build_variable_tree, build_tree_from_captured
+from api._variable_tree import (
+    build_variable_tree,
+    build_array_subtree,
+    build_tree_from_captured,
+)
 from runner.story_filters import normalized_story_filter_profile
 from runner.story_annotations import invalidate_story_annotation_cache
 from .clipboard import copy_to_clipboard
@@ -438,8 +442,14 @@ class TestDebuggerScreen(Screen[None]):
                 tree = await build_variable_tree(controller, var_name)
                 if tree is not None:
                     on_restart = self._make_tree_restart_callback(var_name)
+                    on_expand_node = self._make_tree_expand_callback()
                     self.app.push_screen(
-                        VariableTreeScreen(tree, var_name, on_restart=on_restart)
+                        VariableTreeScreen(
+                            tree,
+                            var_name,
+                            on_restart=on_restart,
+                            on_expand_node=on_expand_node,
+                        )
                     )
                 else:
                     self._set_footer_text(f"Cannot expand '{var_name}'")
@@ -478,6 +488,25 @@ class TestDebuggerScreen(Screen[None]):
             return await build_variable_tree(controller, var_name)
 
         return _on_restart
+
+    def _make_tree_expand_callback(self):
+        """Create a per-variable async callback for the ``a`` expand action.
+
+        Receives a variable's gdb identity (expr, display, value, type_hint)
+        and a count, and rebuilds it as ``*(expr)@count`` via the live gdb
+        controller (no debug restart). Works for both a node's title line
+        (re-expands the node) and an inlined field (promotes it to a box).
+        """
+
+        async def _on_expand_node(expr, display, value, type_hint, count: int):
+            controller = get_debug_session(self.test)
+            if controller is None:
+                return None
+            return await build_array_subtree(
+                controller, expr, display, value, type_hint, count
+            )
+
+        return _on_expand_node
 
     def action_open_variable_tree(self) -> None:
         """Open the variable tree view for the currently selected variable.
