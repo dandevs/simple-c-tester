@@ -20,6 +20,9 @@ from runner.execute import (
 
 _change_lock = asyncio.Lock()
 _deferred_changes: dict[str, set[str]] = {}
+# Moves deferred while a manual debug session is active (no auto-restart).
+# Each entry is (src_path, dest_path).  Flushed by flush_deferred_changes.
+_deferred_moves: list[tuple[str, str]] = []
 
 # Debounce tuning.  Per-event delay stays at BASE_DEBOUNCE (100 ms) so brief
 # edit bursts collapse into one batch.  Under mass changes (git checkout,
@@ -96,7 +99,71 @@ def _remove_test(abs_source_path: str) -> None:
 _MASS_CHANGE_THRESHOLD = 25
 
 
-async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
+def _apply_test_renames(moves: list[tuple[str, str]]) -> dict[str, Test]:
+    """Detect test renames in ``moves`` and repoint the matching ``Test``
+    objects in place.
+
+    Watchdog's ``on_moved`` decomposes a rename into ``deleted@src`` +
+    ``created@dst``; without intervention that becomes delete-old-Test +
+    create-new-Test and the per-test identity is lost (timing_history,
+    story_annotations, debug_precision_mode / story_filter_profile
+    preferences, the owned ``DwarfCache``, etc.).  By repointing
+    ``test.source_path`` before the main per-path loop runs, the existing
+    delete/create logic sees the repointed test as already at the new path
+    and treats the events as no-ops (the deleted@src lookup matches nothing;
+    the created@dst lookup matches the repointed test and feeds it into
+    ``affected``).
+
+    Moves whose source is not a current test, or whose destination is not
+    under ``tests/`` / not a ``.c`` file, are left for the regular
+    delete+create path to handle.
+
+    Returns a ``{new_source_path: Test}`` dict of repointed tests.
+    """
+    renamed: dict[str, Test] = {}
+    if not moves:
+        return renamed
+
+    tests_dir = os.path.abspath("tests")
+    for src, dst in moves:
+        src_canon = normalize_dep_path(src)
+        dst_abs = os.path.abspath(dst)
+        if not _is_under(dst_abs, tests_dir) or not dst_abs.endswith(".c"):
+            continue
+
+        matching: Test | None = None
+        for test in state.all_tests:
+            if normalize_dep_path(test.source_path) == src_canon:
+                matching = test
+                break
+        if matching is None:
+            continue
+
+        # Don't repoint onto an existing test (rename collision / overwrite).
+        dst_canon = normalize_dep_path(dst)
+        if any(
+            normalize_dep_path(t.source_path) == dst_canon
+            for t in state.all_tests
+            if t is not matching
+        ):
+            continue
+
+        matching.source_path = os.path.relpath(dst_abs)
+        matching.name = os.path.splitext(os.path.basename(dst_abs))[0]
+        matching.include_dirs = []
+        matching.dependencies = []
+        renamed[matching.source_path] = matching
+
+    return renamed
+
+
+async def _apply_file_changes(
+    changed_paths: dict[str, set[str]],
+    moves: list[tuple[str, str]] | None = None,
+) -> None:
+    if moves is None:
+        moves = []
+
     breakpoints_changed = False
     relevant_code_changes = False
     affected: dict[str, Test] = {}
@@ -104,6 +171,11 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
     src_dir = os.path.abspath("src")
     tests_dir = os.path.abspath("tests")
     removed_tests: set[str] = set()
+
+    # Phase 0: repoint renamed tests in place so their identity survives the
+    # delete+create decomposition.  Runs before mass-change detection and the
+    # per-path loop.
+    renamed_tests = _apply_test_renames(moves)
 
     if len(changed_paths) >= _MASS_CHANGE_THRESHOLD:
         rerun_all = True
@@ -233,7 +305,12 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
     state_changed()
 
 
-async def handle_file_changes(changed_paths: dict[str, set[str]]):
+async def handle_file_changes(
+    changed_paths: dict[str, set[str]],
+    moves: list[tuple[str, str]] | None = None,
+):
+    if moves is None:
+        moves = []
     async with _change_lock:
         breakpoint_paths: dict[str, set[str]] = {}
         non_breakpoint_paths: dict[str, set[str]] = {}
@@ -257,7 +334,7 @@ async def handle_file_changes(changed_paths: dict[str, set[str]]):
             else:
                 state_changed()
 
-        if not non_breakpoint_paths:
+        if not non_breakpoint_paths and not moves:
             return
 
         if global_state.active_debug_test_key is not None:
@@ -277,23 +354,26 @@ async def handle_file_changes(changed_paths: dict[str, set[str]]):
                     global_state.debug_auto_restart_pending = (
                         global_state.active_debug_test_key
                     )
-                await _apply_file_changes(non_breakpoint_paths)
+                await _apply_file_changes(non_breakpoint_paths, moves)
                 return
             _merge_changed_paths(_deferred_changes, non_breakpoint_paths)
+            _deferred_moves.extend(moves)
             return
 
-        await _apply_file_changes(non_breakpoint_paths)
+        await _apply_file_changes(non_breakpoint_paths, moves)
 
 
 async def flush_deferred_changes() -> None:
     async with _change_lock:
         if global_state.active_debug_test_key is not None:
             return
-        if not _deferred_changes:
+        if not _deferred_changes and not _deferred_moves:
             return
         queued = {path: set(kinds) for path, kinds in _deferred_changes.items()}
+        queued_moves = list(_deferred_moves)
         _deferred_changes.clear()
-        await _apply_file_changes(queued)
+        _deferred_moves.clear()
+        await _apply_file_changes(queued, queued_moves)
 
 
 class DebounceHandler(FileSystemEventHandler):
@@ -301,6 +381,9 @@ class DebounceHandler(FileSystemEventHandler):
         self._loop = loop
         self._timer: threading.Timer | None = None
         self._changed: dict[str, set[str]] = {}
+        # Captured (src, dst) pairs from on_moved so test renames can be
+        # detected as moves rather than delete+create pairs.
+        self._moves: list[tuple[str, str]] = []
         self._lock = threading.Lock()
         # monotonic timestamp of the first event in the current burst; None when
         # no burst is in progress.  Used to cap total debounce wait at
@@ -347,15 +430,17 @@ class DebounceHandler(FileSystemEventHandler):
     def _schedule(self):
         with self._lock:
             changed = {path: set(kinds) for path, kinds in self._changed.items()}
+            moves = list(self._moves)
             self._changed.clear()
+            self._moves.clear()
             self._timer = None
             self._burst_start = None
 
-        if not changed:
+        if not changed and not moves:
             return
 
         self._loop.call_soon_threadsafe(
-            asyncio.create_task, handle_file_changes(changed)
+            asyncio.create_task, handle_file_changes(changed, moves)
         )
 
     def on_modified(self, event: FileSystemEvent):
@@ -371,4 +456,10 @@ class DebounceHandler(FileSystemEventHandler):
         with self._lock:
             self._record_change(event.src_path, "deleted", event.is_directory)
             self._record_change(event.dest_path, "created", event.is_directory)
+            # Keep the (src, dst) pair so test renames can preserve identity.
+            # The split delete+create events above are still recorded so
+            # non-test moves fall through to the normal path.
+            self._moves.append(
+                (os.fsdecode(event.src_path), os.fsdecode(event.dest_path))
+            )
             self._arm_timer_locked()
