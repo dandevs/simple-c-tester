@@ -88,6 +88,14 @@ def _remove_test(abs_source_path: str) -> None:
     active_processes.pop(abs_source_path, None)
 
 
+# When a single debounce batch contains this many or more changed paths we
+# assume a mass change is in progress (git checkout, directory move, bulk
+# refactor).  The per-path dep_index lookup is wasted precision work in that
+# case because everything will rerun anyway, so we flip rerun_all eagerly and
+# skip the mapping.  Test-add / test-remove detection still runs.
+_MASS_CHANGE_THRESHOLD = 25
+
+
 async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
     breakpoints_changed = False
     relevant_code_changes = False
@@ -96,6 +104,9 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
     src_dir = os.path.abspath("src")
     tests_dir = os.path.abspath("tests")
     removed_tests: set[str] = set()
+
+    if len(changed_paths) >= _MASS_CHANGE_THRESHOLD:
+        rerun_all = True
 
     for path, event_kinds in changed_paths.items():
         abs_path = os.path.abspath(path)
@@ -123,6 +134,14 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
         is_directory_event = "directory" in event_kinds
 
         if _is_directory_modified_noise(event_kinds):
+            continue
+
+        if rerun_all:
+            # Mass-change fast path: we're going to rebuild everything anyway,
+            # so skip per-path dep_index mapping.  Still detect test removals
+            # so the suite tree stays correct.
+            if "deleted" in event_kinds and in_tests and abs_path.endswith(".c"):
+                removed_tests.add(abs_path)
             continue
 
         mapped_for_path = False
