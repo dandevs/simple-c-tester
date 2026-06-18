@@ -486,6 +486,11 @@ def generate_makefile(
     message_length = max(20, int(terminal_width if terminal_width is not None else 80))
     debug_flags = "-g -O0 -fno-omit-frame-pointer" if config.debug_build else ""
     sanitize_flags = "-fsanitize=address,undefined" if config.sanitize else ""
+    # Statically link the sanitizer runtimes so they initialise before any other
+    # library. Avoids the "ASan runtime does not come first in initial library
+    # list" error regardless of how the binary is launched (direct exec / gdb).
+    # Only meaningful on the link lines, not the -c compile line.
+    sanitize_link_flags = "-static-libasan -static-libubsan" if config.sanitize else ""
     cflags = config.cflags
 
     project_sources = discover_project_sources(rs)
@@ -527,12 +532,12 @@ def generate_makefile(
         if project_sources:
             lines.append(f"{target}: {source} {lib_target}")
             lines.append(
-                f"\tgcc {test_include_flags} {debug_flags} {sanitize_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -Wl,-Map,{map_file} -o {target} {source} {lib_target} {cflags}"
+                f"\tgcc {test_include_flags} {debug_flags} {sanitize_flags} {sanitize_link_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -Wl,-Map,{map_file} -o {target} {source} {lib_target} {cflags}"
             )
         else:
             lines.append(f"{target}: {source}")
             lines.append(
-                f"\tgcc {test_include_flags} {debug_flags} {sanitize_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -o {target} {source} {cflags}"
+                f"\tgcc {test_include_flags} {debug_flags} {sanitize_flags} {sanitize_link_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_file} -o {target} {source} {cflags}"
             )
         lines.append("")
 

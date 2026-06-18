@@ -1514,6 +1514,22 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
     _persist_story_annotations(test)
 
 
+def _build_proc_env() -> dict[str, str]:
+    """Build the environment for test compile/run subprocesses.
+
+    Sets ``COLUMNS`` for gcc message wrapping and, when LeakSanitizer is
+    disabled, injects ``ASAN_OPTIONS=detect_leaks=0`` (merged with any value
+    the user already exported) so ASan skips the leak check at exit.
+    """
+    proc_env = os.environ.copy()
+    proc_env["COLUMNS"] = str(max(20, subprocess_columns))
+    if not global_state.leak_sanitizer_enabled:
+        existing = proc_env.get("ASAN_OPTIONS", "")
+        opts = f"{existing} detect_leaks=0".strip()
+        proc_env["ASAN_OPTIONS"] = opts
+    return proc_env
+
+
 async def run_test(test: Test, on_complete: Callable[[], None]):
     process_key = _test_key(test)
     current_task = asyncio.current_task()
@@ -1521,8 +1537,7 @@ async def run_test(test: Test, on_complete: Callable[[], None]):
         if test.state == TestState.CANCELLED:
             return
 
-        proc_env = os.environ.copy()
-        proc_env["COLUMNS"] = str(max(20, subprocess_columns))
+        proc_env = _build_proc_env()
 
         if test.timeline_capture_enabled or global_state.timeline_capture_enabled:
             await _ensure_debug_build_mode(True)
@@ -1627,8 +1642,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
     # auto-restart loop can never re-fire after the code is fixed.
     global_state.active_debug_test_key = test_key
 
-    proc_env = os.environ.copy()
-    proc_env["COLUMNS"] = str(max(20, subprocess_columns))
+    proc_env = _build_proc_env()
 
     compiled, binary_path = await _compile_binary_for_test(test, proc_env)
     if not compiled:

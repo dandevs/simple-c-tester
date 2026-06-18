@@ -171,9 +171,14 @@ def parse_args():
         help="Compile tests with debug flags (-g -O0)",
     )
     parser.add_argument(
-        "--sanitize",
+        "--no-sanitize",
         action="store_true",
-        help="Compile with AddressSanitizer + UndefinedBehaviorSanitizer",
+        help="Disable AddressSanitizer + UndefinedBehaviorSanitizer (on by default)",
+    )
+    parser.add_argument(
+        "--no-leak-sanitizer",
+        action="store_true",
+        help="Disable LeakSanitizer via ASAN_OPTIONS=detect_leaks=0 (on by default)",
     )
     parser.add_argument(
         "--story-filter-profile",
@@ -256,7 +261,8 @@ def _build_config(args, user_config: dict) -> RunnerConfig:
 
     For each menu field: ``cli_arg`` wins if explicitly passed, else the
     persisted ``user_config`` value, else the builtin default.  Non-menu flags
-    (watch, debug-build, sanitize, cflags) keep their plain CLI/default values.
+    (watch, debug-build, no-sanitize, no-leak-sanitizer, cflags) keep their
+    plain CLI/default values.
     """
 
     def resolve(key: str, attr: str, default, coerce=lambda v: v):
@@ -275,7 +281,8 @@ def _build_config(args, user_config: dict) -> RunnerConfig:
         theme=resolve("theme", "theme", "ansi"),
         timeline=timeline,
         debug_build=bool(args.debug_build or timeline),
-        sanitize=bool(args.sanitize),
+        sanitize=not args.no_sanitize,
+        leak_sanitizer=not args.no_leak_sanitizer,
         story_filter_profile=normalized_story_filter_profile(
             resolve("story_filter_profile", "story_filter_profile", "balanced")
         ),

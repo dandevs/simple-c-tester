@@ -111,6 +111,7 @@ def _apply_config(config: RunnerConfig) -> None:
     gs.debug_build_enabled = bool(config.debug_build or config.timeline)
     gs.timeline_capture_enabled = config.timeline
     gs.sanitize_enabled = bool(config.sanitize)
+    gs.leak_sanitizer_enabled = bool(config.leak_sanitizer)
     gs.cflags = config.cflags
     gs.tsv_lines_above = config.tsv_lines_above
     gs.tsv_lines_below = config.tsv_lines_below

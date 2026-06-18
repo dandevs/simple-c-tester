@@ -43,8 +43,12 @@ class RunnerConfig:
     timeline: bool = False
 
     # --- sanitizer --------------------------------------------------------
-    #: Compile and link with -fsanitize=address,undefined.
-    sanitize: bool = False
+    #: Compile and link with -fsanitize=address,undefined. On by default;
+    #: use ``--no-sanitize`` to disable.
+    sanitize: bool = True
+    #: Enable LeakSanitizer (bundled inside ASan on Linux). On by default;
+    #: use ``--no-leak-sanitizer`` to disable via ``ASAN_OPTIONS``.
+    leak_sanitizer: bool = True
 
     # --- UI / output -----------------------------------------------------
     #: Maximum output lines shown per inline output box.
