@@ -146,6 +146,7 @@ from core.build import (  # noqa: F401,E402
     DB_PATH,
     SRC_DIR,
     discover_project_sources as _discover_project_sources_core,
+    normalize_dep_path,
     resolve_include_dirs,
 )
 

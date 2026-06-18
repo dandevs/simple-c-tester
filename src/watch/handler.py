@@ -9,7 +9,7 @@ from watchdog.events import FileSystemEventHandler
 import state as global_state
 from state import state, dep_index, active_processes
 from core.models import Test, TestState, Suite
-from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph
+from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph, normalize_dep_path
 from runner.execute import (
     state_changed,
     is_editor_breakpoints_file_path,
@@ -90,6 +90,11 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
 
     for path, event_kinds in changed_paths.items():
         abs_path = os.path.abspath(path)
+        # dep_index keys are realpath-canonicalised (see core.build.normalize_dep_path)
+        # so the lookup key must be too — otherwise symlinks in the project tree
+        # break precision reruns (the same physical file would appear under two
+        # keys and only one would match).
+        dep_key = normalize_dep_path(path)
 
         if is_editor_breakpoints_file_path(abs_path):
             if "deleted" in event_kinds:
@@ -112,11 +117,11 @@ async def _apply_file_changes(changed_paths: dict[str, set[str]]) -> None:
             continue
 
         mapped_for_path = False
-        for test in dep_index.get(abs_path, []):
+        for test in dep_index.get(dep_key, []):
             affected[test.source_path] = test
             mapped_for_path = True
         for test in state.all_tests:
-            if os.path.abspath(test.source_path) == abs_path:
+            if normalize_dep_path(test.source_path) == dep_key:
                 affected[test.source_path] = test
                 mapped_for_path = True
 

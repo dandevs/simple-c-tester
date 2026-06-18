@@ -57,7 +57,30 @@ def _find_header_dir(header_name: str) -> str | None:
 
 
 def _normalize_dep_path(path: str) -> str:
-    return os.path.abspath(os.path.normpath(path))
+    """Canonicalise a dependency path for use as a dep_index / db.json key.
+
+    Uses :func:`os.path.realpath` so that the same physical file reached via
+    different paths (e.g. a project tree accessed both directly and through
+    a symlink, common on macOS Homebrew setups and in dev containers)
+    collapses to a single key.  Without this, ``dep_index`` could carry two
+    entries for the same file and only one of them would match a watch event,
+    silently breaking precision reruns for the affected tests.
+
+    ``realpath`` resolves directory symlinks on the path even when the leaf
+    does not exist, so phantom paths from stale ``.d`` files still normalise
+    consistently.
+    """
+    return os.path.realpath(os.path.normpath(path))
+
+
+def normalize_dep_path(path: str) -> str:
+    """Public alias for :func:`_normalize_dep_path`.
+
+    Call sites outside ``core.build`` (notably watch-mode event matching in
+    ``watch.handler``) should use this so dep_index keys and lookup keys stay
+    in lock-step.
+    """
+    return _normalize_dep_path(path)
 
 
 def _normalized_precision_mode(value) -> str:
@@ -641,6 +664,7 @@ __all__ = [
     "generate_makefile",
     "hydrate_dependencies_from_db",
     "load_dependency_db",
+    "normalize_dep_path",
     "persist_user_preferences",
     "rebuild_dep_index",
     "refresh_dependency_graph",
