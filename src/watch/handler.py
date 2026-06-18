@@ -24,6 +24,14 @@ _deferred_changes: dict[str, set[str]] = {}
 # Each entry is (src_path, dest_path).  Flushed by flush_deferred_changes.
 _deferred_moves: list[tuple[str, str]] = []
 
+# Pre-lock coalescing buffers.  handle_file_changes deposits its events here
+# before acquiring _change_lock.  The first task to acquire the lock becomes
+# the processor and drains these in a loop, absorbing events from concurrent
+# calls that would otherwise each run their own full rebuild pass.
+_pending_changes: dict[str, set[str]] = {}
+_pending_moves: list[tuple[str, str]] = []
+_pending_breakpoints: dict[str, set[str]] = {}
+
 # Debounce tuning.  Per-event delay stays at BASE_DEBOUNCE (100 ms) so brief
 # edit bursts collapse into one batch.  Under mass changes (git checkout,
 # large refactors) events can stream for seconds; if we kept resetting the
@@ -309,58 +317,91 @@ async def handle_file_changes(
     changed_paths: dict[str, set[str]],
     moves: list[tuple[str, str]] | None = None,
 ):
+    """Coalescing entry point for file-change events.
+
+    Each call deposits its events into shared ``_pending_*`` buffers
+    *before* acquiring ``_change_lock``.  The first call to acquire the
+    lock becomes the processor and drains the buffers in a loop; events
+    arriving while it runs (deposited by the pre-lock merge of other
+    concurrent calls) trigger another iteration, so a burst that lands
+    N separate ``handle_file_changes`` tasks collapses into as few
+    rebuild cycles as possible — ideally one.  Without this, every
+    debounced 100 ms window during a multi-second mass change would
+    queue its own serialised make+build+refresh pass behind the lock.
+    """
     if moves is None:
         moves = []
+    for path, event_kinds in changed_paths.items():
+        abs_path = os.path.abspath(path)
+        if is_editor_breakpoints_file_path(abs_path):
+            _merge_changed_paths(_pending_breakpoints, {path: event_kinds})
+        else:
+            _merge_changed_paths(_pending_changes, {path: event_kinds})
+    if moves:
+        _pending_moves.extend(moves)
+
     async with _change_lock:
-        breakpoint_paths: dict[str, set[str]] = {}
-        non_breakpoint_paths: dict[str, set[str]] = {}
-        for path, event_kinds in changed_paths.items():
+        # Drain pending in a loop.  Each iteration runs one batch; new events
+        # arriving while we run land in _pending_* (via the pre-lock merge of
+        # other handle_file_changes tasks) and trigger another iteration.
+        while _pending_changes or _pending_moves or _pending_breakpoints:
+            batch_paths = {
+                p: set(k) for p, k in _pending_changes.items()
+            }
+            batch_moves = list(_pending_moves)
+            batch_bps = {p: set(k) for p, k in _pending_breakpoints.items()}
+            _pending_changes.clear()
+            _pending_moves.clear()
+            _pending_breakpoints.clear()
+            await _drain_one_batch(batch_paths, batch_moves, batch_bps)
+
+
+async def _drain_one_batch(
+    non_breakpoint_paths: dict[str, set[str]],
+    moves: list[tuple[str, str]],
+    breakpoint_paths: dict[str, set[str]],
+) -> None:
+    """Process one (possibly coalesced) batch.  Caller holds ``_change_lock``."""
+    if breakpoint_paths:
+        for path, event_kinds in breakpoint_paths.items():
             abs_path = os.path.abspath(path)
-            if is_editor_breakpoints_file_path(abs_path):
-                breakpoint_paths[path] = event_kinds
-            else:
-                non_breakpoint_paths[path] = event_kinds
-
-        if breakpoint_paths:
-            for path, event_kinds in breakpoint_paths.items():
-                abs_path = os.path.abspath(path)
-                if "deleted" in event_kinds:
-                    refresh_editor_breakpoints_cache(force=True)
-                elif event_kinds & {"created", "modified", "moved"}:
-                    refresh_editor_breakpoints_cache(force=True)
-
-            if global_state.active_debug_test_key is not None:
-                await sync_editor_breakpoints_for_active_debug()
-            else:
-                state_changed()
-
-        if not non_breakpoint_paths and not moves:
-            return
+            if "deleted" in event_kinds:
+                refresh_editor_breakpoints_cache(force=True)
+            elif event_kinds & {"created", "modified", "moved"}:
+                refresh_editor_breakpoints_cache(force=True)
 
         if global_state.active_debug_test_key is not None:
-            if global_state.debug_auto_restart:
-                # Auto-restart: apply changes now and signal the debug screen
-                # to restart the session with the recompiled binary.
-                # Only signal if there are real source changes — build
-                # artifacts written to test_build/ (and the directory-modified
-                # noise they generate on parent dirs) would otherwise cause an
-                # infinite restart loop.
-                has_relevant_changes = any(
-                    not _is_in_test_build(os.path.abspath(p))
-                    and not _is_directory_modified_noise(kinds)
-                    for p, kinds in non_breakpoint_paths.items()
-                )
-                if has_relevant_changes:
-                    global_state.debug_auto_restart_pending = (
-                        global_state.active_debug_test_key
-                    )
-                await _apply_file_changes(non_breakpoint_paths, moves)
-                return
-            _merge_changed_paths(_deferred_changes, non_breakpoint_paths)
-            _deferred_moves.extend(moves)
-            return
+            await sync_editor_breakpoints_for_active_debug()
+        else:
+            state_changed()
 
-        await _apply_file_changes(non_breakpoint_paths, moves)
+    if not non_breakpoint_paths and not moves:
+        return
+
+    if global_state.active_debug_test_key is not None:
+        if global_state.debug_auto_restart:
+            # Auto-restart: apply changes now and signal the debug screen
+            # to restart the session with the recompiled binary.
+            # Only signal if there are real source changes — build
+            # artifacts written to test_build/ (and the directory-modified
+            # noise they generate on parent dirs) would otherwise cause an
+            # infinite restart loop.
+            has_relevant_changes = any(
+                not _is_in_test_build(os.path.abspath(p))
+                and not _is_directory_modified_noise(kinds)
+                for p, kinds in non_breakpoint_paths.items()
+            )
+            if has_relevant_changes:
+                global_state.debug_auto_restart_pending = (
+                    global_state.active_debug_test_key
+                )
+            await _apply_file_changes(non_breakpoint_paths, moves)
+            return
+        _merge_changed_paths(_deferred_changes, non_breakpoint_paths)
+        _deferred_moves.extend(moves)
+        return
+
+    await _apply_file_changes(non_breakpoint_paths, moves)
 
 
 async def flush_deferred_changes() -> None:
