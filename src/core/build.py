@@ -20,12 +20,13 @@ import json
 import os
 import re
 import subprocess
+import threading
 from typing import TYPE_CHECKING
 
 from .config import RunnerConfig
 from .state import RunnerState
 from .story.filters import normalized_story_filter_profile
-from .artifacts import test_binary_path, test_dep_path, test_map_path
+from .artifacts import test_artifact_stem, test_binary_path, test_dep_path, test_map_path
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -48,6 +49,13 @@ _HASH_CHUNK = 65536
 # runner can skip the affected rebuild.  Populated by refresh_dependency_graph
 # and persisted to db.json so the cache survives restarts.
 _DEP_HASH_CACHE: dict[str, tuple[int, str]] = {}
+
+# Serialises db.json writes.  refresh_dependency_graph runs in a worker
+# thread (via asyncio.to_thread) and fires once per test compile, so under
+# the default --parallel 4 several saves can race on the shared .tmp file.
+# The lock keeps each save atomic end-to-end; without it the .tmp rename
+# fails spuriously with ENOENT when a concurrent caller consumed it first.
+_DB_WRITE_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -125,18 +133,24 @@ def _atomic_write_db(content: str) -> None:
     ``.bak`` so a corrupt or accidentally-clobbered write can be recovered
     by hand.  Rotation failures are swallowed: losing the backup is bad but
     losing the save is worse.
+
+    Serialised by ``_DB_WRITE_LOCK``: under ``--parallel N`` several test
+    workers can call ``refresh_dependency_graph`` (and therefore this
+    function) at once, and without serialisation they would race on the
+    shared ``.tmp`` path.
     """
-    os.makedirs("test_build", exist_ok=True)
-    if os.path.exists(DB_PATH):
-        try:
-            os.replace(DB_PATH, DB_BAK_PATH)
-        except OSError:
-            pass
-    with open(DB_TMP_PATH, "w", encoding="utf-8") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(DB_TMP_PATH, DB_PATH)
+    with _DB_WRITE_LOCK:
+        os.makedirs("test_build", exist_ok=True)
+        if os.path.exists(DB_PATH):
+            try:
+                os.replace(DB_PATH, DB_BAK_PATH)
+            except OSError:
+                pass
+        with open(DB_TMP_PATH, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(DB_TMP_PATH, DB_PATH)
 
 
 def _load_db_json() -> dict | None:
@@ -155,7 +169,7 @@ def _load_db_json() -> dict | None:
     return None
 
 
-
+def _parse_missing_header(stderr: str) -> str | None:
     match = _MISSING_HEADER_RE.search(stderr)
     return match.group(1) if match else None
 
