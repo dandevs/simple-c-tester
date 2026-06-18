@@ -1,13 +1,17 @@
 """Thin CLI entry point.
 
 Parses arguments, builds an immutable :class:`RunnerConfig`, constructs a
-:class:`TestRunner` (the public API), discovers tests, prepares the build, and
-launches the Textual TUI.  The engine is driven entirely through the API;
-``main.py`` no longer mutates the legacy global ``state`` module directly.
+:class:`TestRunner` (the public API), discovers tests, prepares the build,
+and either runs all tests headlessly (printing the result tree and exiting)
+or — with ``--watch`` — launches the interactive Textual TUI.  The engine is
+driven entirely through the API; ``main.py`` no longer mutates the legacy
+global ``state`` module directly.
 
 Run from a project root containing a ``tests/`` directory (e.g. ``c/``)::
 
-    python3 ../src/main.py
+    python3 ../src/main.py                 # run all tests, print, exit
+    python3 ../src/main.py tests/foo.c     # run only the named file(s)
+    python3 ../src/main.py --watch         # interactive TUI
 """
 
 import sys as _sys
@@ -96,26 +100,53 @@ if len(_sys.argv) > 2 and _sys.argv[1] == "new":
 
 import argparse
 import asyncio
+import os
 import shutil
 import sys
 from pathlib import Path
 
 from api import TestRunner, RunnerConfig
 from core.config import RunnerConfig as _RunnerConfig  # noqa: F401 (re-export clarity)
+from core.models import Suite, TestState
 from core.story import normalized_story_filter_profile
 from ui.app import TestRunnerApp
 from ui.render import render_tree_stdout
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Test runner")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run C tests, print the result tree, and exit. Pass specific test"
+            " files to run a subset. Use --watch to open the interactive TUI."
+        ),
+        epilog=(
+            "examples:\n"
+            "  ctester                    Run all tests, print results, exit\n"
+            "  ctester tests/foo.c        Run only the named test file(s)\n"
+            "  ctester --watch            Open the interactive TUI (with file monitoring)\n"
+            "  ctester --parallel 8       Run all tests with 8 parallel workers\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        help=(
+            "Specific test files to run, e.g. tests/foo.c. Omit to run all"
+            " tests. Cannot be combined with --watch."
+        ),
+    )
     # Menu-editable flags default to None so we can tell "not passed" from an
     # explicit value.  Resolution order at startup is:
     #   cli_arg (if not None) > user-config value > builtin default.
     parser.add_argument(
         "--parallel", type=int, default=None, help="Number of parallel workers"
     )
-    parser.add_argument("--watch", action="store_true", help="Watch for file changes")
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Open the interactive TUI and watch for file changes",
+    )
     parser.add_argument(
         "--output-lines",
         type=int,
@@ -192,7 +223,10 @@ def parse_args():
         default=[],
         help="Extra compiler/linker flags (e.g. -lreadline -Wextra -Werror)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.watch and args.files:
+        parser.error("--watch cannot be combined with file arguments")
+    return args
 
 
 # Argparse dest names that correspond to Options-menu fields.  Used to compute
@@ -261,6 +295,72 @@ def _build_config(args, user_config: dict) -> RunnerConfig:
     )
 
 
+# ---------------------------------------------------------------------------
+# Headless selection: map user-supplied file paths to discovered tests
+# ---------------------------------------------------------------------------
+
+
+def _match_path(source_path: str, arg: str) -> bool:
+    """True if a discovered test's source path corresponds to ``arg``.
+
+    Matching is prefix-tolerant so each of these resolves the same test:
+    ``tests/foo.c``, ``./tests/foo.c``, ``foo.c``, ``sub/bar.c``.
+    """
+    sp = os.path.normpath(source_path)
+    a = os.path.normpath(arg)
+    if sp == a:
+        return True
+    return sp.endswith("/" + a) or a.endswith("/" + sp)
+
+
+def _select_tests(all_tests, files):
+    """Split ``files`` into ``(matched_tests, unmatched_args)``.
+
+    Pure: reads ``all_tests`` and ``files`` only. Results are de-duplicated by
+    source path while preserving discovery order.
+    """
+    matched, unmatched = [], []
+    seen = set()
+    for arg in files:
+        hits = [t for t in all_tests if _match_path(t.source_path, arg)]
+        if not hits:
+            unmatched.append(arg)
+            continue
+        for t in hits:
+            if t.source_path not in seen:
+                seen.add(t.source_path)
+                matched.append(t)
+    return matched, unmatched
+
+
+def _prune_suite(suite, keep):
+    """Return a new :class:`Suite` retaining only tests whose source path is
+    in ``keep``. Empty child suites are dropped; the root suite is always
+    returned (possibly with no children)."""
+    pruned = Suite(name=suite.name)
+    pruned.tests = [t for t in suite.tests if t.source_path in keep]
+    for child in suite.children:
+        pruned_child = _prune_suite(child, keep)
+        if pruned_child.tests or pruned_child.children:
+            pruned.children.append(pruned_child)
+    return pruned
+
+
+def _apply_selection(runner, matched):
+    """Restrict ``runner``'s eligible tests to ``matched`` (in place).
+
+    Runs after :meth:`TestRunner.prepare_build` so the generated Makefile and
+    dependency graph still cover the full project; only the set of tests that
+    may execute (and that the result tree renders) is narrowed.  Mutates the
+    shared :class:`AppState` so the engine scheduler and the stdout renderer
+    both observe the trimmed set.
+    """
+    keep = {t.source_path for t in matched}
+    app_state = runner.state.app_state
+    app_state.root_suite = _prune_suite(app_state.root_suite, keep)
+    app_state.all_tests = list(matched)
+
+
 async def _main():
     args = parse_args()
     from core.userconfig import load_user_config
@@ -280,6 +380,13 @@ async def _main():
     runner.prepare_build()
     runner.save_db()
 
+    if config.watch:
+        return await _run_tui(runner, config, user_config, cli_overrides)
+    return await _run_headless(runner, config, args.files)
+
+
+async def _run_tui(runner, config, user_config, cli_overrides) -> int:
+    """Launch the interactive Textual TUI (watch mode)."""
     app = TestRunnerApp(
         runner,
         watch=config.watch,
@@ -298,16 +405,38 @@ async def _main():
         from api._runner import _terminate_active_processes
 
         await _terminate_active_processes()
-        if not config.watch:
-            render_tree_stdout(
-                config.output_lines, shutil.get_terminal_size().columns
-            )
+    return 0
+
+
+async def _run_headless(runner, config, files) -> int:
+    """Run tests without the TUI, print the result tree, return an exit code."""
+    if files:
+        matched, unmatched = _select_tests(runner.tests, files)
+        if unmatched:
+            for arg in unmatched:
+                print(f"Error: no test file matched: {arg}", file=sys.stderr)
+            return 1
+        _apply_selection(runner, matched)
+
+    await runner.run_all()
+    try:
+        runner.save_db()
+    finally:
+        from api._runner import _terminate_active_processes
+
+        await _terminate_active_processes()
+
+    render_tree_stdout(config.output_lines, shutil.get_terminal_size().columns)
+
+    failed = any(t.state != TestState.PASSED for t in runner.tests)
+    return 1 if failed else 0
 
 
 def entry():
-    # "ctester init" is handled at the top of this module before heavy imports.
+    # "ctester init" / "ctester new" are handled at the top of this module
+    # before heavy imports.
     try:
-        asyncio.run(_main())
+        sys.exit(asyncio.run(_main()))
     except KeyboardInterrupt:
         pass
 
