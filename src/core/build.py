@@ -193,6 +193,14 @@ def discover_project_sources(rs: RunnerState) -> list[str]:
 
 
 def _collect_project_dependencies(rs: RunnerState) -> set[str]:
+    """Union of project-source paths + every header/source referenced by any
+    ``.d`` file under ``test_build/obj/``.
+
+    Filters out paths that no longer exist on disk — orphaned ``.d`` files
+    (left behind by ``git mv`` and similar) would otherwise pollute the broad
+    dependency set with phantom paths, causing precision reruns to fire on
+    edits to files that no test actually uses anymore.
+    """
     deps: set[str] = set()
 
     for src in discover_project_sources(rs):
@@ -205,9 +213,80 @@ def _collect_project_dependencies(rs: RunnerState) -> set[str]:
                 if not file_name.endswith(".d"):
                     continue
                 dep_path = os.path.join(root, file_name)
-                deps.update(_parse_dep_file(dep_path))
+                for dep in _parse_dep_file(dep_path):
+                    if os.path.exists(dep):
+                        deps.add(dep)
 
     return deps
+
+
+# Files at the top level of ``test_build/`` that are not test artifacts and
+# must be left alone by the orphan GC.
+_PRESERVED_TEST_BUILD_FILES = {"Makefile", "db.json", "db.json.bak", "db.json.tmp"}
+
+
+def _gc_orphaned_build_artifacts(rs: RunnerState) -> int:
+    """Remove orphaned build artifacts from ``test_build/``.
+
+    Two categories are cleaned:
+
+    1. ``test_build/obj/*.{o,d}`` whose stem no longer maps to a discovered
+       project source.  These accumulate when project sources are renamed,
+       moved, or deleted: ``make`` regenerates the Makefile without rules for
+       the old names but leaves the old object/dep files on disk, where they
+       leak phantom dependency paths into ``_collect_project_dependencies``.
+    2. Top-level ``test_build/{stem}{,.d,.map}`` whose ``stem`` no longer
+       matches any current test.  These accumulate when test sources are
+       renamed (the new stem produces new files; the old ones linger).
+
+    Returns the number of files removed.  Idempotent — safe to call on every
+    ``refresh_dependency_graph`` pass.
+    """
+    if not os.path.isdir("test_build"):
+        return 0
+
+    removed = 0
+
+    obj_dir = os.path.join("test_build", "obj")
+    if os.path.isdir(obj_dir):
+        expected_obj_stems = {_obj_name(src) for src in discover_project_sources(rs)}
+        for entry in os.listdir(obj_dir):
+            stem, ext = os.path.splitext(entry)
+            if ext not in (".o", ".d"):
+                continue
+            if stem in expected_obj_stems:
+                continue
+            try:
+                os.remove(os.path.join(obj_dir, entry))
+                removed += 1
+            except OSError:
+                pass
+
+    expected_test_stems = {
+        test_artifact_stem(t.source_path) for t in rs.app_state.all_tests
+    }
+    for entry in os.listdir("test_build"):
+        if entry in _PRESERVED_TEST_BUILD_FILES:
+            continue
+        full = os.path.join("test_build", entry)
+        if not os.path.isfile(full):
+            continue
+        base, ext = os.path.splitext(entry)
+        if ext in (".d", ".map"):
+            stem_to_check = base
+        elif ext == "":
+            stem_to_check = entry
+        else:
+            continue
+        if stem_to_check in expected_test_stems:
+            continue
+        try:
+            os.remove(full)
+            removed += 1
+        except OSError:
+            pass
+
+    return removed
 
 
 def build_project_sources(rs: RunnerState) -> None:
@@ -435,6 +514,10 @@ def hydrate_dependencies_from_db(rs: RunnerState) -> None:
 def refresh_dependency_graph(rs: RunnerState) -> None:
     """Recompute every test's dependencies from the ``.d`` files + project
     archive map, rebuild the index, and persist."""
+    # GC orphaned artifacts first so we don't parse stale .d files left behind
+    # by renames/moves/deletes — those would re-introduce phantom deps below.
+    _gc_orphaned_build_artifacts(rs)
+
     project_sources = discover_project_sources(rs)
     has_project_sources = bool(project_sources)
     archive_path = os.path.join("test_build", "libproject.a")
@@ -444,7 +527,9 @@ def refresh_dependency_graph(rs: RunnerState) -> None:
         test_dep_file = test_dep_path(test.source_path)
         previous = sorted(set(test.dependencies))
         current: set[str] = set()
-        current.update(_parse_dep_file(test_dep_file))
+        for dep in _parse_dep_file(test_dep_file):
+            if os.path.exists(dep):
+                current.add(dep)
         if has_project_sources:
             map_path = test_map_path(test.source_path)
             linked_members = _parse_linked_archive_members_from_map(map_path, archive_path)
@@ -453,7 +538,9 @@ def refresh_dependency_graph(rs: RunnerState) -> None:
                     broad_project_deps = _collect_project_dependencies(rs)
                 current.update(broad_project_deps)
             else:
-                current.update(_collect_linked_member_dependencies(linked_members))
+                for dep in _collect_linked_member_dependencies(linked_members):
+                    if os.path.exists(dep):
+                        current.add(dep)
         updated = sorted(current)
         test.dependencies = updated
         if updated != previous:
