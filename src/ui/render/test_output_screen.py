@@ -14,7 +14,7 @@ from textual.widgets import RichLog, Static, Tree as TextualTree
 
 import state as global_state
 from core.models import Test, TestState
-from .output import get_test_output
+from .output import get_test_output, _wrap_output_lines
 from .styles import TREE_META_STYLE
 from .clipboard import copy_to_clipboard
 from runner import (
@@ -161,6 +161,8 @@ class TestOutputScreen(Screen[None]):
             run.stdout if run is not None else "",
             run.stderr if run is not None else "",
             run.compile_err if run is not None else "",
+            # Re-wrap when the terminal is resized.
+            self._content_width(),
         )
 
     def _tick(self) -> None:
@@ -196,6 +198,17 @@ class TestOutputScreen(Screen[None]):
         self._selection_cursor = None
         self._selection_active = False
 
+    def _content_width(self) -> int:
+        """Usable column count for wrapping output in this screen.
+
+        Mirrors the convention used in ``app.py`` (``log.size.width or
+        self.size.width or 80``).  The ``#output-full`` widget has no border or
+        padding, so its width is the renderable content width.
+        """
+        if self.log_widget is not None and self.log_widget.size.width:
+            return max(20, self.log_widget.size.width)
+        return max(20, self.size.width or 80)
+
     def _build_output_lines(self) -> list[Text]:
         lines: list[Text] = []
 
@@ -219,7 +232,14 @@ class TestOutputScreen(Screen[None]):
 
         output_lines = get_test_output(self.test)
         if output_lines:
-            lines.extend(output_lines)
+            # Wrap raw output to the terminal width so long lines (e.g. ASan
+            # traces, wide stdout) are folded instead of cut off.  We wrap here
+            # rather than relying on RichLog(wrap=True) so that ``_plain_lines``
+            # stays in sync with the displayed (wrapped) lines and drag-to-select
+            # column math remains correct.
+            wrap_log = self.log_widget if self.log_widget is not None else self.app
+            wrapped = _wrap_output_lines(output_lines, self._content_width(), wrap_log)
+            lines.extend(wrapped)
         else:
             lines.append(Text("No output.", style=TREE_META_STYLE))
 
