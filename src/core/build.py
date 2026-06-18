@@ -33,6 +33,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 _MISSING_HEADER_RE = re.compile(r"fatal error:\s+(\S+):\s+No such file or directory")
 SRC_DIR = os.path.abspath("src")
 DB_PATH = os.path.join("test_build", "db.json")
+DB_TMP_PATH = DB_PATH + ".tmp"
+DB_BAK_PATH = DB_PATH + ".bak"
 _last_db_mtime_ns: int | None = None
 
 
@@ -40,7 +42,46 @@ _last_db_mtime_ns: int | None = None
 # Pure helpers (no state)
 # ---------------------------------------------------------------------------
 
-def _parse_missing_header(stderr: str) -> str | None:
+def _atomic_write_db(content: str) -> None:
+    """Write ``content`` to ``DB_PATH`` atomically.
+
+    Writes to a sibling ``.tmp`` file first, then ``os.replace``s it into
+    place — on POSIX this is atomic so a crash mid-write never leaves a
+    truncated db.json.  Before overwriting, the previous DB is rotated to
+    ``.bak`` so a corrupt or accidentally-clobbered write can be recovered
+    by hand.  Rotation failures are swallowed: losing the backup is bad but
+    losing the save is worse.
+    """
+    os.makedirs("test_build", exist_ok=True)
+    if os.path.exists(DB_PATH):
+        try:
+            os.replace(DB_PATH, DB_BAK_PATH)
+        except OSError:
+            pass
+    with open(DB_TMP_PATH, "w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(DB_TMP_PATH, DB_PATH)
+
+
+def _load_db_json() -> dict | None:
+    """Load and parse db.json.  Falls back to the ``.bak`` if the main file
+    is missing or corrupt.  Returns ``None`` if neither is usable."""
+    for candidate in (DB_PATH, DB_BAK_PATH):
+        if not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+
     match = _MISSING_HEADER_RE.search(stderr)
     return match.group(1) if match else None
 
@@ -383,18 +424,8 @@ def load_dependency_db(rs: RunnerState) -> dict[str, dict]:
     """Load db.json, hydrate runner-wide preferences on ``rs``, return the
     per-test dependency map."""
     global _last_db_mtime_ns
-    if not os.path.exists(DB_PATH):
-        _last_db_mtime_ns = None
-        return {}
-
-    try:
-        with open(DB_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        _last_db_mtime_ns = None
-        return {}
-
-    if not isinstance(data, dict):
+    data = _load_db_json()
+    if data is None:
         _last_db_mtime_ns = None
         return {}
 
@@ -467,9 +498,7 @@ def save_dependency_db(
     if rs.debug_line is not None:
         payload["debugLine"] = rs.debug_line
     new_content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    os.makedirs("test_build", exist_ok=True)
-    with open(DB_PATH, "w", encoding="utf-8") as f:
-        f.write(new_content)
+    _atomic_write_db(new_content)
     try:
         _last_db_mtime_ns = os.stat(DB_PATH).st_mtime_ns
     except OSError:
@@ -657,6 +686,8 @@ def generate_makefile(
 
 __all__ = [
     "DB_PATH",
+    "DB_TMP_PATH",
+    "DB_BAK_PATH",
     "SRC_DIR",
     "build_project_sources",
     "clear_debug_line",
