@@ -9,7 +9,7 @@ from watchdog.events import FileSystemEventHandler
 import state as global_state
 from state import state, dep_index, active_processes
 from core.models import Test, TestState, Suite
-from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph, normalize_dep_path
+from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph, normalize_dep_path, dep_content_unchanged
 from runner.execute import (
     state_changed,
     is_editor_breakpoints_file_path,
@@ -225,12 +225,30 @@ async def _apply_file_changes(
             continue
 
         mapped_for_path = False
-        for test in dep_index.get(dep_key, []):
-            affected[test.source_path] = test
-            mapped_for_path = True
-        for test in state.all_tests:
-            if normalize_dep_path(test.source_path) == dep_key:
+        # For pure ``modified`` events (no create/delete), check the content
+        # hash before scheduling a rerun.  This catches editor touches,
+        # atomic-saves with identical bytes, and git operations that restore
+        # the same content — none of which need a rebuild.
+        modified_only = event_kinds == {"modified"} or (
+            event_kinds <= {"modified", "directory"} and "modified" in event_kinds
+        )
+        content_unchanged = modified_only and dep_content_unchanged(dep_key)
+        if not content_unchanged:
+            for test in dep_index.get(dep_key, []):
                 affected[test.source_path] = test
+                mapped_for_path = True
+            for test in state.all_tests:
+                if normalize_dep_path(test.source_path) == dep_key:
+                    affected[test.source_path] = test
+                    mapped_for_path = True
+        else:
+            # File's bytes match the cached hash; still mark mapped_for_path
+            # so we don't fall through to the unmapped rerun_all fallback
+            # (the path IS mapped, we just decided not to act on it).
+            if dep_index.get(dep_key) or any(
+                normalize_dep_path(t.source_path) == dep_key
+                for t in state.all_tests
+            ):
                 mapped_for_path = True
 
         if "deleted" in event_kinds and in_tests and abs_path.endswith(".c"):

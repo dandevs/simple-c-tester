@@ -15,6 +15,7 @@ preference defaults) live on ``rs``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -37,10 +38,83 @@ DB_TMP_PATH = DB_PATH + ".tmp"
 DB_BAK_PATH = DB_PATH + ".bak"
 _last_db_mtime_ns: int | None = None
 
+# Read-block size for _hash_file.  64 KiB matches the typical page-cache
+# chunk and keeps the inner loop tight on large source files.
+_HASH_CHUNK = 65536
+
+# Last-known sha1 of each dependency path, plus the mtime_ns observed at the
+# time of hashing.  Used to short-circuit watch events: when a file's
+# ``modified`` event fires but its content matches the cached hash, the test
+# runner can skip the affected rebuild.  Populated by refresh_dependency_graph
+# and persisted to db.json so the cache survives restarts.
+_DEP_HASH_CACHE: dict[str, tuple[int, str]] = {}
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers (no state)
 # ---------------------------------------------------------------------------
+
+def _hash_file(path: str) -> str | None:
+    """Return sha1 hex of ``path``'s bytes, or ``None`` on read failure."""
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(_HASH_CHUNK), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _refresh_hash_cache_for(paths: set[str]) -> None:
+    """Update ``_DEP_HASH_CACHE`` for each path.
+
+    Reuses the cached hash when ``mtime_ns`` is unchanged so we don't rehash
+    files that haven't actually been touched since the last refresh.  Paths
+    that no longer exist are dropped from the cache so future ``modified``
+    events on them aren't falsely suppressed.
+    """
+    for path in paths:
+        try:
+            st = os.stat(path)
+        except OSError:
+            _DEP_HASH_CACHE.pop(path, None)
+            continue
+        cached = _DEP_HASH_CACHE.get(path)
+        if cached is not None and cached[0] == st.st_mtime_ns:
+            continue
+        digest = _hash_file(path)
+        if digest is not None:
+            _DEP_HASH_CACHE[path] = (st.st_mtime_ns, digest)
+
+
+def dep_content_unchanged(path: str) -> bool:
+    """``True`` when ``path``'s current sha1 matches the cached hash from the
+    last successful :func:`refresh_dependency_graph`.
+
+    Watch mode calls this on ``modified`` events to skip redundant reruns
+    when a file's mtime bumped but its bytes didn't change (editor
+    touch-without-save, atomic-save with identical content, ``git checkout``
+    restoring the same content).  Updates the cache in place when it
+    re-validates so subsequent events on the same mtime skip the rehash.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    cached = _DEP_HASH_CACHE.get(path)
+    if cached is None:
+        return False
+    cached_mtime, cached_hash = cached
+    if cached_mtime == st.st_mtime_ns:
+        return True
+    # mtime bumped — rehash and compare to see if content actually changed.
+    current = _hash_file(path)
+    if current is None or current != cached_hash:
+        return False
+    _DEP_HASH_CACHE[path] = (st.st_mtime_ns, current)
+    return True
+
 
 def _atomic_write_db(content: str) -> None:
     """Write ``content`` to ``DB_PATH`` atomically.
@@ -443,6 +517,16 @@ def load_dependency_db(rs: RunnerState) -> dict[str, dict]:
     except OSError:
         _last_db_mtime_ns = None
 
+    # Hydrate the content-hash cache.  We don't trust the persisted mtimes
+    # (cross-machine, cross-filesystem), so we store mtime=0 which forces
+    # dep_content_unchanged to rehash on first access; if the bytes still
+    # match, suppression kicks in for subsequent events.
+    hashes_data = data.get("dep_hashes")
+    if isinstance(hashes_data, dict):
+        for path, digest in hashes_data.items():
+            if isinstance(path, str) and isinstance(digest, str):
+                _DEP_HASH_CACHE[path] = (0, digest)
+
     hydrated: dict[str, dict] = {}
     for test_key, payload in tests_data.items():
         if not isinstance(test_key, str) or not isinstance(payload, dict):
@@ -494,7 +578,15 @@ def save_dependency_db(
             entry["timing_history"] = test.timing_history[-10:]
         tests_payload[test_key] = entry
 
-    payload = {"tests": tests_payload, "active": rs.app_active}
+    payload = {
+        "tests": tests_payload,
+        "active": rs.app_active,
+        # Persist the content-hash cache so watch-mode modified-event
+        # suppression survives process restarts.  mtime is not persisted —
+        # the cache is revalidated lazily on first access via
+        # dep_content_unchanged, which rehashes when mtime differs.
+        "dep_hashes": {p: h for p, (_, h) in _DEP_HASH_CACHE.items()},
+    }
     if rs.debug_line is not None:
         payload["debugLine"] = rs.debug_line
     new_content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
@@ -598,6 +690,16 @@ def refresh_dependency_graph(rs: RunnerState) -> None:
         if updated != previous:
             changed_test_keys.add(_normalize_dep_path(test.source_path))
 
+    # Refresh the content-hash cache for every known dep so watch-mode
+    # modified-event suppression has a baseline to compare against.  Also
+    # covers test source paths themselves so edits that don't actually
+    # change bytes (touch, atomic-rewrite) can skip reruns.
+    all_deps: set[str] = set()
+    for test in rs.app_state.all_tests:
+        all_deps.update(test.dependencies)
+        all_deps.add(_normalize_dep_path(test.source_path))
+    _refresh_hash_cache_for(all_deps)
+
     rebuild_dep_index(rs)
     update_dep_graph_readiness(rs)
     save_dependency_db(rs, changed_test_keys)
@@ -691,6 +793,7 @@ __all__ = [
     "SRC_DIR",
     "build_project_sources",
     "clear_debug_line",
+    "dep_content_unchanged",
     "discover_project_sources",
     "generate_makefile",
     "hydrate_dependencies_from_db",
