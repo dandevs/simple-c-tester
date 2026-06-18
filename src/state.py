@@ -1,6 +1,6 @@
 import asyncio
 
-from models import Test, Suite, AppState
+from core.models import Test, Suite, AppState
 
 state = AppState()
 dep_index: dict[str, list[Test]] = {}
@@ -10,7 +10,11 @@ dep_graph_ready = False
 dep_graph_reason = "dependency graph not initialized"
 debug_build_enabled = False
 timeline_capture_enabled = False
+sanitize_enabled = True
+leak_sanitizer_enabled = True
 active_debug_test_key: str | None = None
+debug_auto_restart: bool = False
+debug_auto_restart_pending: str | None = None
 tsv_lines_above = 4
 tsv_lines_below = 4
 tsv_skip_seq_lines = 10

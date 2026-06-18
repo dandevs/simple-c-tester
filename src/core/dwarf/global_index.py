@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - runtime environment dependent
     _PYELFTOOLS_AVAILABLE = False
 
 if TYPE_CHECKING:
-    from ..debugger import GdbMIController
+    from core.debugger import GdbMIController
 
 
 @dataclass(frozen=True)

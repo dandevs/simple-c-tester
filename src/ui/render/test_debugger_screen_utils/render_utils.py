@@ -8,13 +8,59 @@ import state as global_state
 from runner.story_annotations import get_story_annotations
 from .source_utils import display_path, detect_language, load_source_lines
 
-STORY_META_HIGHLIGHT = "#89dceb"
-STORY_META_SELECTED = "#ffd166"
-STORY_HELP = "#7f8a9d"
+STORY_META_HIGHLIGHT = "cyan"
+STORY_META_SELECTED = "yellow"
+STORY_HELP = "dim"
 STORY_CODE_BG = "#272822"
 STORY_CURRENT_LINE = "#34352d"
 STORY_CURRENT_LINE_SELECTED = "#49483e"
-STORY_BAR_BASE = "#2e3440"
+STORY_BAR_BASE = "dim"
+
+# Variable value coloring (by inferred kind).
+VAR_COLOR_NUMBER = "green"
+VAR_COLOR_POINTER = "magenta"
+VAR_COLOR_STRING = "yellow"
+VAR_COLOR_NIL = "bold red"
+VAR_COLOR_BOOL = "bright_cyan"
+VAR_COLOR_DEFAULT = "default"
+VAR_COLOR_NAME = "cyan"
+VAR_DIFF_ADDED_NAME = "bold green"
+VAR_DIFF_REMOVED_NAME = "red strike"
+
+
+def _is_numeric(value: str) -> bool:
+    """True when a rendered value looks like a C numeric literal."""
+    s = value.strip().rstrip("fFuUlL")
+    if not s:
+        return False
+    body = s[1:] if s[0] in "+-" else s
+    lowered = body.lower()
+    if lowered.startswith("0x"):
+        digits = body[2:]
+        return len(digits) > 0 and all(c in "0123456789abcdefABCDEF" for c in digits)
+    try:
+        float(body)
+        return True
+    except ValueError:
+        return False
+
+
+def _value_style(value: str, type_hint: str) -> str:
+    """Pick a Rich style for a variable value from its rendered text + type."""
+    v = value.strip()
+    if v in {"0x0", "(nil)", "nullptr", "NULL", "null"}:
+        return VAR_COLOR_NIL
+    if v.startswith(('"', "'")):
+        return VAR_COLOR_STRING
+    if v.startswith(("0x", "-0x")):
+        return VAR_COLOR_POINTER
+    if v in {"true", "false"}:
+        return VAR_COLOR_BOOL
+    if _is_numeric(v):
+        return VAR_COLOR_NUMBER
+    if type_hint.strip().endswith("*"):
+        return VAR_COLOR_POINTER
+    return VAR_COLOR_DEFAULT
 
 
 def build_frame_snippet(
@@ -26,6 +72,8 @@ def build_frame_snippet(
     selected,
     code_width,
     line_annotations=None,
+    breakpoint_lines=None,
+    covered_lines=None,
 ):
     """Build a syntax-highlighted snippet with pre-computed inline annotations."""
     padded_width = max(1, code_width)
@@ -56,10 +104,36 @@ def build_frame_snippet(
     if not selected:
         for local_line in range(1, line_count + 1):
             syntax.stylize_range(
-                "#9aa0a6",
+                "dim",
                 (local_line, 0),
                 (local_line, padded_width),
             )
+
+    # Feature F: tint breakpoint lines (subtle dark-red) before the current-line
+    # highlight so the active line keeps its own background.
+    bp_lines = breakpoint_lines or set()
+    for bp_line in bp_lines:
+        if snippet_start <= bp_line <= snippet_end:
+            local_bp = (bp_line - snippet_start) + 1
+            syntax.stylize_range(
+                "on #3a1e1e",
+                (local_bp, 0),
+                (local_bp, padded_width),
+            )
+
+    # Feature K: coverage overlay — dim uncovered lines to bright_black (dark
+    # gray) when coverage data is provided.  Covered lines stay at normal
+    # brightness so they stand out.  Applied before the current-line highlight
+    # so the active line keeps its own background.
+    if covered_lines is not None:
+        for snip_line in range(snippet_start, snippet_end + 1):
+            if snip_line not in covered_lines:
+                local = (snip_line - snippet_start) + 1
+                syntax.stylize_range(
+                    "bright_black",
+                    (local, 0),
+                    (local, padded_width),
+                )
 
     local_line = (line_number - snippet_start) + 1
     line_length = padded_width
@@ -85,32 +159,30 @@ def build_frame_title(event, selected):
 
     title = Text()
     if selected:
-        title.append(">> ", style=f"bold {STORY_META_SELECTED}")
-        title.append(path_text, style=f"bold {STORY_META_SELECTED}")
+        title.append("\u25b6 ", style=f"bold {STORY_META_SELECTED}")
+        title.append(path_text, style=f"bold {STORY_META_HIGHLIGHT}")
     else:
-        title.append("   ", style="#7f868d")
-        title.append(path_text, style="#95a3aa")
-    title.append(":")
+        title.append("  ", style="dim")
+        title.append(path_text, style="dim")
+    title.append(":", style="dim")
     if selected:
         title.append(str(line_number), style=STORY_META_HIGHLIGHT)
     else:
-        title.append(str(line_number), style="#95a3aa")
+        title.append(str(line_number), style="dim")
     if event.function:
         if selected:
             title.append(f"  fn={event.function}", style=STORY_HELP)
         else:
-            title.append(f"  fn={event.function}", style="#7f868d")
+            title.append(f"  fn={event.function}", style="dim")
 
     if event.trigger_label:
-        badge_style = f"bold {STORY_META_SELECTED}" if selected else "#9cb9c7"
-        title.append("  [", style=STORY_HELP if selected else "#7f868d")
+        badge_style = f"bold {STORY_META_SELECTED}" if selected else "dim"
+        title.append("  [", style=STORY_HELP)
         title.append(event.trigger_label, style=badge_style)
-        title.append("]",
-            style=STORY_HELP if selected else "#7f868d",
-        )
+        title.append("]", style=STORY_HELP)
 
     if event.trigger_message and bool(global_state.tsv_show_reason_about):
-        detail_style = STORY_HELP if selected else "#7f868d"
+        detail_style = STORY_HELP if selected else "dim"
         title.append(f"  {event.trigger_message}", style=detail_style)
 
     return title
@@ -155,7 +227,7 @@ def render_code_panel(
             fail_text = Text(event.message, style="bold red")
             renderables.append(fail_text)
             if index < end_index - 1:
-                renderables.append(Text("-" * width, style="#3a3f4b"))
+                renderables.append(Text("\u2500" * width, style="dim"))
             continue
 
         source_path = os.path.abspath(event.file_path)
@@ -188,8 +260,7 @@ def render_code_panel(
         renderables.append(title)
         renderables.append(snippet_text)
         if index < end_index - 1:
-            sep_style = STORY_BAR_BASE if selected else "#3a3f4b"
-            renderables.append(Text("-" * width, style=sep_style))
+            renderables.append(Text("\u2500" * width, style="dim"))
 
     if not renderables:
         code_widget.update(Text("No renderable story frames.", style=STORY_HELP))
@@ -219,11 +290,11 @@ def _build_timeline_progress_bar(total, selected_index, start_index, end_index, 
     bar = Text()
     for col in range(width):
         if col == selected_col:
-            bar.append("◆", style=f"bold {STORY_META_SELECTED}")
+            bar.append("\u25c6", style=f"bold {STORY_META_SELECTED}")
         elif window_start_col <= col <= window_end_col:
-            bar.append("━", style="#6ea8fe")
+            bar.append("\u2501", style="blue")
         else:
-            bar.append("─", style=STORY_BAR_BASE)
+            bar.append("\u2500", style="dim")
 
     return bar
 
@@ -234,10 +305,16 @@ def render_full_file_panel(
     selected_frame_index,
     source_cache,
     annotations=None,
+    active_breakpoints=None,
+    covered_lines=None,
 ):
-    """Render the full-file code panel using pre-computed annotations."""
+    """Render the full-file code panel using pre-computed annotations.
+
+    Returns ``(source_path, snippet_start, snippet_end)`` when a source snippet
+    is rendered (used for click-to-toggle breakpoint mapping), otherwise None.
+    """
     if code_widget is None:
-        return
+        return None
 
     total = len(frames)
     if total == 0:
@@ -248,7 +325,7 @@ def render_full_file_panel(
             "Press R to run and capture a story.", style=f"bold {STORY_META_SELECTED}"
         )
         code_widget.update(hint)
-        return
+        return None
 
     selected = selected_frame_index
     if selected < 0 or selected >= total:
@@ -257,13 +334,18 @@ def render_full_file_panel(
 
     if event.kind == "test_failed":
         code_widget.update(Text(event.message, style="bold red"))
-        return
+        return None
 
     source_path = os.path.abspath(event.file_path)
     source_lines = load_source_lines(source_path, source_cache)
     if not source_lines:
         code_widget.update(Text("Source unavailable for selected frame.", style=STORY_HELP))
-        return
+        return None
+
+    # Feature K: per-file covered line set for the coverage overlay.
+    file_covered = set()
+    if covered_lines is not None:
+        file_covered = covered_lines.get(source_path, set())
 
     line_number = max(1, min(len(source_lines), int(event.line)))
     width = max(8, code_widget.size.width - 2)
@@ -279,6 +361,9 @@ def render_full_file_panel(
     number_width = len(str(max(1, snippet_end)))
     code_width = max(1, width - (number_width + 3))
     file_annotations = annotations.get(source_path, {}) if annotations else {}
+    # Feature F: breakpoint lines for the currently shown source file.
+    bp_set = active_breakpoints or set()
+    bp_lines = {line for (path, line) in bp_set if os.path.abspath(path) == source_path}
     snippet = build_frame_snippet(
         source_path,
         source_lines,
@@ -288,17 +373,28 @@ def render_full_file_panel(
         True,
         code_width,
         line_annotations=file_annotations,
+        breakpoint_lines=bp_lines,
+        covered_lines=file_covered if covered_lines is not None else None,
     )
 
     title = Text()
+    title.append("\u25b6 ", style=f"bold {STORY_META_SELECTED}")
     title.append("Full File ", style=f"bold {STORY_META_SELECTED}")
-    title.append(display_path(source_path), style=f"bold {STORY_META_SELECTED}")
-    title.append(":", style=STORY_HELP)
+    title.append(display_path(source_path), style=f"bold {STORY_META_HIGHLIGHT}")
+    title.append(":", style="bright_black")
     title.append(str(line_number), style=STORY_META_HIGHLIGHT)
     if event.function:
-        title.append(f"  fn={event.function}", style=STORY_HELP)
+        title.append(f"  fn={event.function}", style="bright_black")
+    if bp_lines:
+        title.append(f"  \u25cf{len(bp_lines)} bp", style="bold red")
+    if covered_lines is not None:
+        total_lines = snippet_end - snippet_start + 1
+        hit = len(file_covered & set(range(snippet_start, snippet_end + 1)))
+        title.append(f"  cov {hit}/{total_lines}", style="green")
+    title.append("  (click a line to toggle breakpoint)", style="bright_black")
 
     code_widget.update(Group(title, snippet))
+    return (source_path, snippet_start, snippet_end)
 
 
 def _compute_frame_cards_window(selected_frame_index, total, height):
@@ -321,7 +417,25 @@ def _compute_frame_cards_window(selected_frame_index, total, height):
     return (start, end)
 
 
-def build_variables_tree(vars_list, vars_tree_widget, vars_widget):
+def build_variables_tree(
+    vars_list,
+    vars_tree_widget,
+    vars_widget,
+    collapsed_paths=None,
+    diff_map=None,
+):
+    """Render captured variables into a Textual tree.
+
+    Args:
+        collapsed_paths: optional set of dotted-path tuples the user has
+            collapsed; survives rebuilds (paths are content-keyed, not
+            frame-keyed).
+        diff_map: optional ``{name: (status, old_value)}`` where status is
+            ``"added"``/``"removed"``/``"changed"``. Drives diff coloring.
+    """
+    collapsed = collapsed_paths or set()
+    diffs = diff_map or {}
+
     if not vars_list:
         vars_widget.update(
             Text("Variables (none captured for this frame)", style=STORY_HELP)
@@ -381,34 +495,62 @@ def build_variables_tree(vars_list, vars_tree_widget, vars_widget):
     tree.root.remove_children()
     tree.root.expand()
 
-    def _label(node: _Node) -> Text:
+    def _truncate(text: str, limit: int = 80) -> str:
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    def _label(node: _Node, dotted_key: str) -> Text:
+        diff_entry = diffs.get(dotted_key)
+        diff_status = diff_entry[0] if diff_entry else None
+        diff_old = diff_entry[1] if diff_entry else None
+
         label = Text()
-        label.append(node.name, style=STORY_META_HIGHLIGHT)
+        if diff_status == "added":
+            label.append("+", style="bold green")
+            label.append(node.name, style=VAR_DIFF_ADDED_NAME)
+        elif diff_status == "removed":
+            label.append("-", style="bold red")
+            label.append(node.name, style=VAR_DIFF_REMOVED_NAME)
+        else:
+            label.append(node.name, style=VAR_COLOR_NAME)
+
         if node.value:
-            val = node.value
-            if len(val) > 80:
-                val = val[:77] + "..."
-            label.append(" = ", style=STORY_HELP)
-            label.append(val, style="#f8f8f2")
+            if diff_status == "changed" and diff_old is not None:
+                label.append(" = ", style="dim")
+                label.append(_truncate(diff_old, 40), style="red strike")
+                label.append(" \u2192 ", style="dim")
+                label.append(
+                    _truncate(node.value),
+                    style=_value_style(node.value, node.type_hint),
+                )
+            else:
+                label.append(" = ", style="dim")
+                label.append(
+                    _truncate(node.value),
+                    style=_value_style(node.value, node.type_hint),
+                )
+
         if node.type_hint:
-            label.append(f" [{node.type_hint}]", style=STORY_HELP)
+            label.append(f" [{node.type_hint}]", style="dim")
         return label
 
-    def _append(tree_node, item: _Node) -> None:
+    def _append(tree_node, item: _Node, parent_path: tuple = ()) -> None:
+        path = (*parent_path, item.name)
+        dotted_key = ".".join(path)
         allow_expand = bool(item.children)
-        label = _label(item)
+        is_collapsed = path in collapsed
+        label = _label(item, dotted_key)
         child_tree = tree_node.add(
             label,
-            expand=True,
+            data=path,
+            expand=not is_collapsed,
             allow_expand=allow_expand,
         )
         for name in sorted(item.children.keys()):
-            _append(child_tree, item.children[name])
+            _append(child_tree, item.children[name], path)
 
     for name in sorted(root.keys()):
         _append(tree.root, root[name])
 
-    tree.root.expand_all()
     tree.refresh()
 
     return tuple(vars_list)

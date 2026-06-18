@@ -1,5 +1,3 @@
-import shutil
-import subprocess
 import os
 import asyncio
 import time
@@ -15,9 +13,10 @@ from textual.screen import Screen
 from textual.widgets import RichLog, Static, Tree as TextualTree
 
 import state as global_state
-from models import Test, TestState
-from .output import get_test_output
+from core.models import Test, TestState
+from .output import get_test_output, _wrap_output_lines
 from .styles import TREE_META_STYLE
+from .clipboard import copy_to_clipboard
 from runner import (
     start_debug_session,
     stop_debug_session,
@@ -50,7 +49,7 @@ class TestOutputScreen(Screen[None]):
         min-height: 1;
         padding: 0 1;
         background: transparent;
-        color: ansi_bright_black;
+        color: ansi_white;
     }
     """
 
@@ -134,7 +133,7 @@ class TestOutputScreen(Screen[None]):
             event.stop()
             return
 
-        if self._copy_to_clipboard(selected_text):
+        if copy_to_clipboard(selected_text):
             self._set_footer_text("Copied selection to clipboard.")
         else:
             self._set_footer_text(
@@ -162,19 +161,29 @@ class TestOutputScreen(Screen[None]):
             run.stdout if run is not None else "",
             run.stderr if run is not None else "",
             run.compile_err if run is not None else "",
+            # Re-wrap when the terminal is resized.
+            self._content_width(),
         )
 
     def _tick(self) -> None:
         self._render_output()
 
-    def _base_footer_text(self) -> str:
-        return f"Output: {self.test.name}  |  Drag: Select + Copy  |  Ctrl+C/Esc: Go Back"
+    def _base_footer_text(self) -> Text:
+        text = Text()
+        text.append(f"{self.test.name}", style="bold")
+        text.append(" \u2502 ", style="dim")
+        text.append("Drag", style="bold")
+        text.append(" Select + Copy", style="dim")
+        text.append(" \u2502 ", style="dim")
+        text.append("Ctrl+C/Esc", style="bold")
+        text.append(" Go Back", style="dim")
+        return text
 
     def _set_footer_text(self, message: str | None = None, warning: bool = False) -> None:
         if self.footer_widget is None:
             return
         if message is None:
-            self.footer_widget.update(Text(self._base_footer_text(), style="bright_black"))
+            self.footer_widget.update(self._base_footer_text())
             return
 
         style = "yellow" if warning else "bright_black"
@@ -189,19 +198,48 @@ class TestOutputScreen(Screen[None]):
         self._selection_cursor = None
         self._selection_active = False
 
+    def _content_width(self) -> int:
+        """Usable column count for wrapping output in this screen.
+
+        Mirrors the convention used in ``app.py`` (``log.size.width or
+        self.size.width or 80``).  The ``#output-full`` widget has no border or
+        padding, so its width is the renderable content width.
+        """
+        if self.log_widget is not None and self.log_widget.size.width:
+            return max(20, self.log_widget.size.width)
+        return max(20, self.size.width or 80)
+
     def _build_output_lines(self) -> list[Text]:
         lines: list[Text] = []
 
-        title = Text("Output: ", style="bold")
+        if self.test.state == TestState.FAILED:
+            badge_text = "\u2717 FAILED"
+            badge_style = "red"
+        elif self.test.state == TestState.PASSED:
+            badge_text = "\u2713 PASSED"
+            badge_style = "green"
+        else:
+            badge_text = f"\u25cf {self.test.state.value}"
+            badge_style = "yellow"
+
+        title = Text()
+        title.append(" ")
         title.append(self.test.name, style="bold")
-        title.append(f" [{self.test.state.value}]", style=TREE_META_STYLE)
+        title.append(f"  {badge_text}", style=badge_style)
         lines.append(title)
         lines.append(Text(self.test.source_path, style=TREE_META_STYLE))
         lines.append(Text())
 
         output_lines = get_test_output(self.test)
         if output_lines:
-            lines.extend(output_lines)
+            # Wrap raw output to the terminal width so long lines (e.g. ASan
+            # traces, wide stdout) are folded instead of cut off.  We wrap here
+            # rather than relying on RichLog(wrap=True) so that ``_plain_lines``
+            # stays in sync with the displayed (wrapped) lines and drag-to-select
+            # column math remains correct.
+            wrap_log = self.log_widget if self.log_widget is not None else self.app
+            wrapped = _wrap_output_lines(output_lines, self._content_width(), wrap_log)
+            lines.extend(wrapped)
         else:
             lines.append(Text("No output.", style=TREE_META_STYLE))
 
@@ -281,35 +319,6 @@ class TestOutputScreen(Screen[None]):
                 selected_lines.append(line)
 
         return "\n".join(selected_lines)
-
-    def _copy_to_clipboard(self, text: str) -> bool:
-        try:
-            import pyperclip
-
-            pyperclip.copy(text)
-            return True
-        except Exception:
-            pass
-
-        for command in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
-            executable = command[0]
-            if shutil.which(executable) is None:
-                continue
-            try:
-                result = subprocess.run(
-                    command,
-                    input=text,
-                    text=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-                if result.returncode == 0:
-                    return True
-            except Exception:
-                continue
-
-        return False
 
     def _lines_with_selection(self) -> list[Text]:
         display_lines = [line.copy() for line in self._render_lines]

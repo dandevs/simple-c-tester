@@ -1,5 +1,5 @@
 from state import state
-from models import TestState
+from core.models import TestState
 
 
 def all_tests_finished() -> bool:
