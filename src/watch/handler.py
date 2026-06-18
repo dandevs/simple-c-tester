@@ -21,6 +21,15 @@ from runner.execute import (
 _change_lock = asyncio.Lock()
 _deferred_changes: dict[str, set[str]] = {}
 
+# Debounce tuning.  Per-event delay stays at BASE_DEBOUNCE (100 ms) so brief
+# edit bursts collapse into one batch.  Under mass changes (git checkout,
+# large refactors) events can stream for seconds; if we kept resetting the
+# timer by BASE_DEBOUNCE forever the batch could starve indefinitely.  The
+# MAX_DEBOUNCE cap forces a flush after ~1.5 s of continuous activity, which
+# bounds the worst case to one batch per ~1.5 s window during big operations.
+_BASE_DEBOUNCE = 0.1
+_MAX_DEBOUNCE = 1.5
+
 
 def _merge_changed_paths(target: dict[str, set[str]], source: dict[str, set[str]]) -> None:
     for path, kinds in source.items():
@@ -274,6 +283,10 @@ class DebounceHandler(FileSystemEventHandler):
         self._timer: threading.Timer | None = None
         self._changed: dict[str, set[str]] = {}
         self._lock = threading.Lock()
+        # monotonic timestamp of the first event in the current burst; None when
+        # no burst is in progress.  Used to cap total debounce wait at
+        # _MAX_DEBOUNCE even if events keep arriving faster than _BASE_DEBOUNCE.
+        self._burst_start: float | None = None
 
     def _record_change(
         self,
@@ -290,17 +303,34 @@ class DebounceHandler(FileSystemEventHandler):
     def _queue_event(self, event: FileSystemEvent, event_type: str) -> None:
         with self._lock:
             self._record_change(event.src_path, event_type, event.is_directory)
-            if self._timer is not None:
-                self._timer.cancel()
-            self._timer = threading.Timer(0.1, self._schedule)
-            self._timer.daemon = True
-            self._timer.start()
+            self._arm_timer_locked()
+
+    def _arm_timer_locked(self) -> None:
+        """(Re)arm the debounce timer.  Caller must hold ``self._lock``."""
+        now = time.monotonic()
+        if self._burst_start is None:
+            self._burst_start = now
+        # Default to a full BASE_DEBOUNCE delay; but if we've already been
+        # holding events for nearly MAX_DEBOUNCE, shrink the delay so the
+        # batch flushes at the cap instead of running past it.
+        elapsed = now - self._burst_start
+        remaining_budget = _MAX_DEBOUNCE - elapsed
+        delay = min(_BASE_DEBOUNCE, remaining_budget)
+        if delay <= 0:
+            # Budget exhausted — fire immediately.
+            delay = 0.0
+        if self._timer is not None:
+            self._timer.cancel()
+        self._timer = threading.Timer(delay, self._schedule)
+        self._timer.daemon = True
+        self._timer.start()
 
     def _schedule(self):
         with self._lock:
             changed = {path: set(kinds) for path, kinds in self._changed.items()}
             self._changed.clear()
             self._timer = None
+            self._burst_start = None
 
         if not changed:
             return
@@ -322,8 +352,4 @@ class DebounceHandler(FileSystemEventHandler):
         with self._lock:
             self._record_change(event.src_path, "deleted", event.is_directory)
             self._record_change(event.dest_path, "created", event.is_directory)
-            if self._timer is not None:
-                self._timer.cancel()
-            self._timer = threading.Timer(0.1, self._schedule)
-            self._timer.daemon = True
-            self._timer.start()
+            self._arm_timer_locked()
