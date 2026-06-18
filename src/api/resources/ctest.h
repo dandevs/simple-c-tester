@@ -9,9 +9,9 @@
  *     #include "ctest.h"
  *
  *     int main(void) {
- *         ASSERT_EQ(factorial(5), 120);          // fatal: returns 1 on fail
- *         ASSERT_STREQ(greet("Dan"), "Hello, Dan!");
- *         EXPECT_EQ(score, 100);                 // soft: keeps going, reports all
+ *         ASSERT_EQ(120, factorial(5));          // fatal: returns 1 on fail
+ *         ASSERT_STREQ("Hello, Dan!", greet("Dan"));
+ *         EXPECT_EQ(100, score);                 // soft: keeps going, reports all
  *         return TEST_RESULT();                  // 1 if any EXPECT_* failed
  *     }
  *
@@ -19,7 +19,7 @@
  * C Tester TUI parses for inline diagnostics ("expected X, got Y") and a
  * "jump to assertion" target in the debugger:
  *
- *     [CTEST:1] FAIL tests/test_factorial.c:9 ASSERT_EQ(factorial(5), 120) expected=120 actual=60
+ *     [CTEST:1] FAIL tests/test_factorial.c:9 ASSERT_EQ(120, factorial(5)) expected=120 actual=60
  *
  * Two flavors:
  *   - ASSERT_*  aborts the test on failure (returns 1 from main immediately).

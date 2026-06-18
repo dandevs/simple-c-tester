@@ -5,7 +5,7 @@ structured :class:`AssertionFailure` objects for rich UI rendering.
 
 Wire format (single line, newline-terminated)::
 
-    [CTEST:1] FAIL tests/test_factorial.c:9 ASSERT_EQ(factorial(5), 120) expected=120 actual=60
+    [CTEST:1] FAIL tests/test_factorial.c:9 ASSERT_EQ(120, factorial(5)) expected=120 actual=60
 
 The parser is pure (no state, no I/O) and safe to call on any string.
 """
