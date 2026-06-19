@@ -76,6 +76,12 @@ class RunnerState:
     #: Runner-wide default story filter profile for newly discovered tests.
     default_story_filter_profile: str = "balanced"
 
+    #: Project sources dropped from libproject.a by skip-on-error on the last
+    #: build (their compile failed).  Empty when all sources compiled.
+    #: Populated by :func:`build_project_sources`; read by headless output and
+    #: the TUI to surface "skipped" warnings.
+    skipped_sources: list[str] = field(default_factory=list)
+
     # ----- convenient accessors -----------------------------------------
 
     @property

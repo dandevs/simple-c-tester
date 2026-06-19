@@ -26,3 +26,6 @@ story_filter_profile_preference = "balanced"
 debug_line: dict | None = None
 app_active = False
 cflags: str = ""
+# Project sources dropped from libproject.a by skip-on-error (compile failed).
+# Populated by build_project_sources(); read by headless output and the TUI.
+skipped_sources: list = []
