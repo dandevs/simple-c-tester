@@ -6,11 +6,42 @@ This module is the single home for the data model.  It is part of the
 explicitly (dependency injection), never read from globals.
 """
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .enum import TestState
+
+# Matches a C ``int main(...)`` *definition*: the trailing ``{`` distinguishes
+# it from a call site (``main();``).  ``\s`` covers spaces, tabs, and newlines,
+# so ``int\tmain``, ``int\nmain``, and params split across lines all match.
+# ``[^)]*`` accepts any standard signature: ``()``, ``(void)``,
+# ``(int argc, char **argv)``, ``(int argc, char *argv[])``.
+_MAIN_DEFINITION_RE = re.compile(r"\bint\s+main\s*\([^)]*\)\s*\{")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+
+
+def has_main_definition(source_path: str) -> bool:
+    """Return True if ``source_path`` defines a C ``int main(...)`` entry point.
+
+    Used by discovery to filter out ``.c`` files placed under ``tests/`` that
+    are helpers/sources rather than tests -- each test is compiled to its own
+    binary and must provide ``main``.  Conservative on read errors: a file that
+    cannot be read is treated as a test so a genuine failure surfaces as a
+    visible compile/link error instead of vanishing silently.
+    """
+    try:
+        text = Path(source_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+    # Strip comments so a doc/comment mentioning ``int main(void) {`` can't
+    # false-positive.  (This can mangle string literals, but never in a way
+    # that fabricates a real main definition.)
+    text = _BLOCK_COMMENT_RE.sub(" ", text)
+    text = _LINE_COMMENT_RE.sub("", text)
+    return _MAIN_DEFINITION_RE.search(text) is not None
 
 # Defaults used when no explicit configuration is supplied.  These mirror the
 # historical global defaults from the legacy ``state`` module so behaviour is
@@ -185,7 +216,7 @@ class AppState:
                         story_filter_profile=story_filter_profile,
                     )
                 )
-            elif entry.suffix == ".c":
+            elif entry.suffix == ".c" and has_main_definition(str(entry)):
                 test = self._make_test(
                     entry,
                     debug_precision_mode=debug_precision_mode,
@@ -212,7 +243,7 @@ class AppState:
                         story_filter_profile=story_filter_profile,
                     )
                 )
-            elif entry.suffix == ".c":
+            elif entry.suffix == ".c" and has_main_definition(str(entry)):
                 test = self._make_test(
                     entry,
                     debug_precision_mode=debug_precision_mode,

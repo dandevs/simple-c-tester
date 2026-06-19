@@ -13,6 +13,7 @@ from .models import (
     Test,
     TestRun,
     TimelineEvent,
+    has_main_definition,
 )
 from .enum import TestState
 
@@ -24,6 +25,7 @@ __all__ = [
     "TestRun",
     "TestState",
     "TimelineEvent",
+    "has_main_definition",
     "DEFAULT_DEBUG_PRECISION_MODE",
     "DEFAULT_STORY_FILTER_PROFILE",
 ]
