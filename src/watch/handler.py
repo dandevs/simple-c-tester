@@ -8,7 +8,7 @@ from watchdog.events import FileSystemEventHandler
 
 import state as global_state
 from state import state, dep_index, active_processes
-from core.models import Test, TestState, Suite
+from core.models import Test, TestState, Suite, has_main_definition
 from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph, normalize_dep_path, dep_content_unchanged
 from runner.execute import (
     state_changed,
@@ -304,6 +304,8 @@ async def _apply_file_changes(
         if not _is_under(abs_path, tests_dir):
             continue
         if not abs_path.endswith(".c"):
+            continue
+        if not has_main_definition(abs_path):
             continue
         if abs_path in existing_sources:
             continue
