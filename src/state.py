@@ -33,3 +33,6 @@ skipped_sources: list = []
 # skipped_sources is non-empty this holds the actual compile errors so callers
 # can show why sources were skipped, not just the file names.
 build_stderr: str = ""
+# Per-source gcc stderr for each skipped source (path -> that source's isolated
+# compile output). Used to show a test only the errors of the sources it links.
+source_errors: dict = {}

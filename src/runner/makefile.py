@@ -50,6 +50,7 @@ def _bridge() -> RunnerState:
     rs.default_story_filter_profile = global_state.story_filter_profile_preference
     rs.skipped_sources = global_state.skipped_sources
     rs.build_stderr = global_state.build_stderr
+    rs.source_errors = global_state.source_errors
     return rs
 
 
@@ -63,6 +64,7 @@ def _sync_back(rs: RunnerState) -> None:
     global_state.story_filter_profile_preference = rs.default_story_filter_profile
     global_state.skipped_sources = rs.skipped_sources
     global_state.build_stderr = rs.build_stderr
+    global_state.source_errors = rs.source_errors
 
 
 def _config() -> RunnerConfig:

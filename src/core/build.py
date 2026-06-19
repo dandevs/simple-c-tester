@@ -587,11 +587,18 @@ def build_project_sources(rs: RunnerState) -> None:
 
     The gcc stderr from the archive build is captured into ``rs.build_stderr``
     so callers (headless warning, TUI banner) can surface the actual compile
-    errors rather than silently swallowing them.
+    errors rather than silently swallowing them.  In addition, each skipped
+    source is recompiled *individually* (via its own ``make`` object target) so
+    its stderr is captured in isolation into ``rs.source_errors`` (keyed by
+    source path).  The aggregated ``build_stderr`` interleaves every broken
+    source's output; ``source_errors`` keeps them separate so a test's log can
+    show only the errors of the sources *it* links (``test.dependencies ∩
+    skipped_sources``) instead of the whole project's.
     """
     sources = discover_project_sources(rs)
     rs.skipped_sources = []
     rs.build_stderr = ""
+    rs.source_errors = {}
     if not sources:
         return
     makefile = "test_build/Makefile"
@@ -608,6 +615,20 @@ def build_project_sources(rs: RunnerState) -> None:
         for src in sources
         if not os.path.exists(os.path.join(obj_dir, _obj_name(src) + ".o"))
     ]
+    # Capture each broken source's compile output in isolation.  Running the
+    # source's own object target via make reuses the exact Makefile flags
+    # (include dirs, sanitizers, cflags) so the error matches what the real
+    # build produced, but the stderr is clean (not interleaved with other
+    # sources).  Cost: one extra gcc per broken source, only when something
+    # actually broke.  The object rule's leading ``-`` means make exits 0 even
+    # on gcc failure; we only care about the captured stderr.
+    for src in rs.skipped_sources:
+        obj_target = os.path.join(obj_dir, _obj_name(src) + ".o")
+        r = subprocess.run(
+            ["make", "-f", makefile, obj_target],
+            capture_output=True,
+        )
+        rs.source_errors[src] = r.stderr.decode(errors="replace")
 
 
 # ---------------------------------------------------------------------------
@@ -832,7 +853,6 @@ def refresh_dependency_graph(rs: RunnerState) -> None:
     project_sources = discover_project_sources(rs)
     has_project_sources = bool(project_sources)
     archive_path = os.path.join("test_build", "libproject.a")
-    broad_project_deps: set[str] | None = None
     changed_test_keys: set[str] = set()
     for test in rs.app_state.all_tests:
         test_dep_file = test_dep_path(test.source_path)
@@ -844,13 +864,26 @@ def refresh_dependency_graph(rs: RunnerState) -> None:
         if has_project_sources:
             map_path = test_map_path(test.source_path)
             linked_members = _parse_linked_archive_members_from_map(map_path, archive_path)
-            if linked_members is None:
-                if broad_project_deps is None:
-                    broad_project_deps = _collect_project_dependencies(rs)
-                current.update(broad_project_deps)
-            else:
+            if linked_members:
+                # Valid .map: use the linker's truth (which sources this test
+                # actually pulled from the archive).
                 for dep in _collect_linked_member_dependencies(linked_members):
                     if os.path.exists(dep):
+                        current.add(dep)
+            else:
+                # .map missing/empty/incomplete — e.g. after a failed link
+                # where the broken source's object was never pulled, the .map
+                # lists no archive members.  Recomputing from it would DROP the
+                # very source that broke, corrupting the dep set that the
+                # per-test compile-error filter relies on to show only the
+                # relevant source's error.  Preserve the prior project-source
+                # deps (from the last successful build's .map, hydrated from
+                # db.json) until a successful build refreshes them from a valid
+                # .map.  On a fresh start (no prior deps) this adds nothing,
+                # which is fine — dep_graph_ready stays False and watch mode
+                # falls back to rerun_all until the first clean build.
+                for dep in test.dependencies:
+                    if dep.endswith(".c") and os.path.exists(dep):
                         current.add(dep)
         updated = sorted(current)
         test.dependencies = updated

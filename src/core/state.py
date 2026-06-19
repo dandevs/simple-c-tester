@@ -89,6 +89,15 @@ class RunnerState:
     #: sources compiled cleanly.
     build_stderr: str = ""
 
+    #: Per-source gcc stderr for each entry in ``skipped_sources`` (keyed by the
+    #: source path, value = that source's isolated compile output).  Captured by
+    #: re-running ``make`` on the source's object target individually so each
+    #: broken source's error is cleanly separated (the aggregated
+    #: ``build_stderr`` interleaves them).  Used to show a test only the compile
+    #: errors of the sources *it* actually links (``test.dependencies ∩
+    #: skipped_sources``) instead of every broken source in the project.
+    source_errors: dict[str, str] = field(default_factory=dict)
+
     # ----- convenient accessors -----------------------------------------
 
     @property
