@@ -15,6 +15,7 @@ python3 ../src/main.py
 ## CLI Flags
 - `--parallel N` (default 4)
 - `--watch` — file change monitoring, re-runs affected tests
+- `--get-dependencies FILE` — resolve and print a file's dependency info (include dirs, transitive headers via `gcc -MM`, project sources linked into `libproject.a`) and exit; no tests run, no build artifacts written
 - `--output-lines N` (default 10) — max lines in inline output boxes
 - `--theme ansi|default` (default `ansi`)
 - `--timeline` — globally enable per-line Test Story capture with gdb for all tests in the main list

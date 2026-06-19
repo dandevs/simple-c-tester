@@ -277,6 +277,54 @@ def resolve_include_dirs(source_path: str) -> list[str]:
     return include_dirs
 
 
+def _preprocessor_headers(source_path: str, include_dirs: list[str]) -> list[str]:
+    """Transitive user-header closure of ``source_path`` via ``gcc -MM``.
+
+    Returns existing, non-system header/source paths (``-MM`` already excludes
+    system headers), sorted.  Paths come back as gcc emits them (relative when
+    ``include_dirs`` are relative).  Pure: invokes gcc only.
+    """
+    cmd = ["gcc", "-MM"]
+    for d in include_dirs:
+        cmd.extend(["-I", d])
+    cmd.append(source_path)
+    result = subprocess.run(cmd, capture_output=True)
+    out = result.stdout.decode(errors="replace")
+    # Join make-style "\" continuation lines into logical dependency lines.
+    joined = out.replace("\\\n", " ")
+    headers: set[str] = set()
+    for line in joined.splitlines():
+        if ":" not in line:
+            continue
+        _, deps_part = line.split(":", 1)
+        for cand in deps_part.split():
+            if not cand or cand == source_path:
+                continue
+            if os.path.exists(cand):
+                headers.add(cand)
+    return sorted(headers)
+
+
+def get_file_dependencies(source_path: str) -> dict:
+    """Resolve dependency information for ``source_path`` without building.
+
+    Returns a dict with three keys:
+
+      * ``"include_dirs"`` — resolved ``-I`` directories (:func:`resolve_include_dirs`);
+      * ``"headers"`` — transitive user-header closure (``gcc -MM``);
+      * ``"project_sources"`` — ``.c`` sources that would be compiled into
+        ``libproject.a`` for these include dirs plus the ``src/`` tree.
+
+    Pure-ish: invokes ``gcc -E`` / ``gcc -MM``; writes no build artifacts.
+    """
+    include_dirs = resolve_include_dirs(source_path)
+    return {
+        "include_dirs": include_dirs,
+        "headers": _preprocessor_headers(source_path, include_dirs),
+        "project_sources": _project_sources_for(include_dirs),
+    }
+
+
 def _obj_name(source_path: str) -> str:
     rel = os.path.normpath(source_path).replace(os.sep, "__")
     return os.path.splitext(rel)[0]
@@ -323,25 +371,60 @@ def _collect_linked_member_dependencies(linked_members: set[str]) -> set[str]:
 # State-reading helpers
 # ---------------------------------------------------------------------------
 
+def _collect_c_sources(directory: str) -> list[str]:
+    """Walk ``directory`` and return non-test, non-``main.c`` ``.c`` paths.
+
+    Skips anything under a ``test_build`` directory and the ``tests``
+    directory.  Paths come back in the same form as ``directory`` (relative
+    when ``directory`` is relative), matching how sources are written into
+    the generated Makefile.  Pure: depends only on the filesystem.
+    """
+    sources: list[str] = []
+    if not os.path.isdir(directory):
+        return sources
+    for root, dirs, files in os.walk(directory):
+        parts = root.split(os.sep)
+        if "test_build" in parts:
+            continue
+        if root.startswith("tests") or root.startswith("tests/"):
+            continue
+        dirs[:] = [d for d in dirs if d != "test_build"]
+        for f in sorted(files):
+            if f.endswith(".c") and f != "main.c":
+                sources.append(os.path.join(root, f))
+    return sources
+
+
 def discover_project_sources(rs: RunnerState) -> list[str]:
-    """Discover non-test ``.c`` sources from the resolved include dirs."""
-    include_dirs = set()
-    for test in rs.app_state.all_tests:
-        for d in test.include_dirs:
-            include_dirs.add(d)
-    sources = []
-    for inc_dir in sorted(include_dirs):
-        for root, dirs, files in os.walk(inc_dir):
-            parts = root.split(os.sep)
-            if "test_build" in parts:
-                continue
-            if root.startswith("tests") or root.startswith("tests/"):
-                continue
-            dirs[:] = [d for d in dirs if d != "test_build"]
-            for f in sorted(files):
-                if f.endswith(".c") and f != "main.c":
-                    sources.append(os.path.join(root, f))
-    return sorted(set(sources))
+    """Discover non-test ``.c`` sources to compile into ``libproject.a``.
+
+    Sources are collected from two places so both common C layouts work:
+
+      * every resolved test include directory — picks up co-located
+        ``.c``/``.h`` trees such as bundled libraries (``libs/libft``);
+      * the conventional ``src/`` implementation tree — so a project that
+        separates ``include/`` headers from ``src/`` sources (incl. nested
+        modules like ``src/interpreter/``) still links its implementation.
+
+    ``main.c`` and anything under ``tests/`` or ``test_build/`` is excluded.
+    """
+    include_dirs = {d for test in rs.app_state.all_tests for d in test.include_dirs}
+    return _project_sources_for(include_dirs)
+
+
+def _project_sources_for(include_dirs: list[str]) -> list[str]:
+    """Project ``.c`` sources for a given set of include directories.
+
+    Scans the include dirs (co-located ``.c``/``.h`` trees) plus the
+    conventional ``src/`` implementation tree, dedups, and returns sorted
+    paths in the same form as ``include_dirs`` (relative when those are
+    relative).  Pure: depends only on the filesystem.
+    """
+    scan_dirs = sorted(set(include_dirs)) + ["src"]
+    sources: set[str] = set()
+    for directory in scan_dirs:
+        sources.update(_collect_c_sources(directory))
+    return sorted(sources)
 
 
 def _collect_project_dependencies(rs: RunnerState) -> set[str]:
@@ -810,6 +893,7 @@ __all__ = [
     "dep_content_unchanged",
     "discover_project_sources",
     "generate_makefile",
+    "get_file_dependencies",
     "hydrate_dependencies_from_db",
     "load_dependency_db",
     "normalize_dep_path",
