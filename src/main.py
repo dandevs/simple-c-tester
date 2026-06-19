@@ -183,6 +183,15 @@ def parse_args():
         help="Enable LeakSanitizer (ASAN_OPTIONS detect_leaks). Off by default.",
     )
     parser.add_argument(
+        "--debug-log",
+        action="store_true",
+        help=(
+            "Write a timestamped scheduling/cancel diagnostic to"
+            " test_build/log.txt. Use to diagnose runaway rerun loops"
+            " (e.g. a test cycling Running<->Cancelled). No effect when absent."
+        ),
+    )
+    parser.add_argument(
         "--story-filter-profile",
         choices=["minimal", "balanced", "all"],
         default=None,
@@ -536,6 +545,10 @@ def _print_static_dependencies(source_path) -> int:
 
 async def _main():
     args = parse_args()
+    if args.debug_log:
+        from core.debug_log import enable_debug_log
+
+        enable_debug_log("test_build/log.txt")
     if args.get_dependencies:
         return _print_dependencies(args.get_dependencies)
     from core.userconfig import load_user_config

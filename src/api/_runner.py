@@ -1531,10 +1531,14 @@ def _build_proc_env() -> dict[str, str]:
 
 
 async def run_test(test: Test, on_complete: Callable[[], None]):
+    from core.debug_log import debug_log
+
     process_key = _test_key(test)
     current_task = asyncio.current_task()
+    debug_log("run_test start", test=test.name, state=test.state)
     try:
         if test.state == TestState.CANCELLED:
+            debug_log("run_test skip", test=test.name, reason="CANCELLED at start")
             return
 
         proc_env = _build_proc_env()
@@ -1780,8 +1784,16 @@ async def _preempt_test(test: Test) -> None:
     The cancelled test is auto-re-queued via ``rerun_after_user_cancel`` so it
     resumes in the background once the visible tests finish.
     """
+    from core.debug_log import debug_log
+
     test_key = _test_key(test)
     run_task = _active_run_tasks.get(test_key)
+
+    debug_log(
+        "preempt",
+        test=test.name,
+        had_task=run_task is not None and not run_task.done(),
+    )
 
     test.cancelled_by_user = True
     test.rerun_after_user_cancel = True
@@ -1819,9 +1831,17 @@ async def _preempt_test(test: Test) -> None:
 
 
 async def cancel_test_and_restore_normal_build(test: Test) -> None:
+    from core.debug_log import debug_log
+
     test_key = _test_key(test)
     run_task = _active_run_tasks.get(test_key)
     has_active_run_task = run_task is not None and not run_task.done()
+
+    debug_log(
+        "cancel_restore",
+        test=test.name,
+        had_task=has_active_run_task,
+    )
 
     test.timeline_capture_enabled = False
     if not any(t.timeline_capture_enabled for t in state.all_tests):
@@ -1968,6 +1988,8 @@ def get_debug_session(test: Test) -> GdbMIController | None:
 
 
 def state_changed():
+    from core.debug_log import debug_log
+
     tests_to_run: list[Test] = []
     pending_tests = sorted(
         [test for test in state.all_tests if test.state == TestState.PENDING],
@@ -1982,10 +2004,25 @@ def state_changed():
         test.time_state_changed = time.monotonic()
         tests_to_run.append(test)
 
+    if tests_to_run:
+        debug_log(
+            "state_changed dispatch",
+            names=[t.name for t in tests_to_run],
+            free_slots=state.available_runners,
+        )
+
     for test in tests_to_run:
 
         def on_complete(completed_test: Test = test):
+            from core.debug_log import debug_log as _log
+
             state.available_runners += 1
+            _log(
+                "on_complete",
+                test=completed_test.name,
+                state=completed_test.state,
+                rerun_after=completed_test.rerun_after_user_cancel,
+            )
             if completed_test.state == TestState.CANCELLED:
                 if completed_test.rerun_after_user_cancel:
                     completed_test.state = TestState.PENDING
