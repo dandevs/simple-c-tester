@@ -31,6 +31,13 @@ from runner import (
     state_changed,
 )
 
+# Maximum rate at which drag-to-select redraws the output (seconds). Mouse-move
+# events fire dozens of times per second, but each RichLog re-render is
+# O(lines) (clear + one write() per line). Without coalescing, a large output
+# floods Textual's message queue and freezes the TUI. ~50 fps keeps drag
+# feedback responsive while collapsing move bursts into a single redraw.
+SELECTION_RENDER_INTERVAL = 0.02
+
 
 class TestOutputScreen(Screen[None]):
     CSS = """
@@ -70,6 +77,8 @@ class TestOutputScreen(Screen[None]):
         self._selection_cursor: tuple[int, int] | None = None
         self._selection_active = False
         self._footer_timer = None
+        # Coalesced drag-render scheduler (see SELECTION_RENDER_INTERVAL).
+        self._selection_render_timer = None
 
     def compose(self) -> ComposeResult:
         yield RichLog(
@@ -111,10 +120,22 @@ class TestOutputScreen(Screen[None]):
         if position is None or position == self._selection_cursor:
             return
 
+        # Update the cursor immediately (cheap) and coalesce the redraw. See
+        # SELECTION_RENDER_INTERVAL: without this, every mouse-move event would
+        # trigger a full clear + per-line RichLog.write() re-render and flood
+        # the message queue on large outputs.
         self._selection_cursor = position
-        self._render_output(force=True)
+        if self._selection_render_timer is None:
+            self._selection_render_timer = self.set_timer(
+                SELECTION_RENDER_INTERVAL, self._flush_selection_render
+            )
         event.prevent_default()
         event.stop()
+
+    def _flush_selection_render(self) -> None:
+        """Render one coalesced drag-to-select update (timer callback)."""
+        self._selection_render_timer = None
+        self._render_output(force=True)
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         if not self._selection_active:
@@ -123,6 +144,12 @@ class TestOutputScreen(Screen[None]):
         position = self._event_to_position(event)
         if position is not None:
             self._selection_cursor = position
+
+        # A pending coalesced render is now redundant — we render the final
+        # state directly below. Cancel it so it can't fire afterwards.
+        if self._selection_render_timer is not None:
+            self._selection_render_timer.stop()
+            self._selection_render_timer = None
 
         selected_text = self._extract_selected_text()
         self._selection_active = False
