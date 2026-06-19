@@ -933,8 +933,17 @@ def generate_makefile(
 
         # PROJECT_OBJS lets the archive recipe gather only the objects that
         # actually compiled (existing files), skipping any failures above.
+        #
+        # The recipe deletes the archive before recreating it.  ``ar rcs`` is
+        # additive (replace/create): it never *removes* members absent from the
+        # argument list, so without the leading ``rm -f`` a source that used to
+        # compile but now fails would leave its stale object in the archive --
+        # tests would then link against the stale-but-working object and pass,
+        # silently masking the breakage.  Recreating from scratch guarantees the
+        # archive reflects exactly what compiled on this build.
         lines.append(f"PROJECT_OBJS := {' '.join(obj_files)}")
         lines.append(f"{lib_target}: $(PROJECT_OBJS)")
+        lines.append("\trm -f $@")
         lines.append(
             "\tar rcs $@ $$(for o in $(PROJECT_OBJS); do [ -f \"$$o\" ] && printf '%s\\n' \"$$o\"; done)"
         )
