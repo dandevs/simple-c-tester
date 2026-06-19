@@ -1517,16 +1517,16 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
 def _build_proc_env() -> dict[str, str]:
     """Build the environment for test compile/run subprocesses.
 
-    Sets ``COLUMNS`` for gcc message wrapping and, when LeakSanitizer is
-    disabled, injects ``ASAN_OPTIONS=detect_leaks=0`` (merged with any value
-    the user already exported) so ASan skips the leak check at exit.
+    Sets ``COLUMNS`` for gcc message wrapping and injects
+    ``ASAN_OPTIONS=... detect_leaks=<0|1>`` (merged with any value the user
+    already exported, appended last so it wins) so LeakSanitizer follows the
+    configured setting regardless of the ambient ``ASAN_OPTIONS``.
     """
     proc_env = os.environ.copy()
     proc_env["COLUMNS"] = str(max(20, subprocess_columns))
-    if not global_state.leak_sanitizer_enabled:
-        existing = proc_env.get("ASAN_OPTIONS", "")
-        opts = f"{existing} detect_leaks=0".strip()
-        proc_env["ASAN_OPTIONS"] = opts
+    detect_leaks = "1" if global_state.leak_sanitizer_enabled else "0"
+    existing = proc_env.get("ASAN_OPTIONS", "")
+    proc_env["ASAN_OPTIONS"] = f"{existing} detect_leaks={detect_leaks}".strip()
     return proc_env
 
 
