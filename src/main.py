@@ -630,6 +630,10 @@ async def _run_headless(runner, config, files) -> int:
         )
         for s in _gstate.skipped_sources:
             print(f"  - {s}", file=sys.stderr)
+        if _gstate.build_stderr.strip():
+            print(file=sys.stderr)
+            print("Compiler output for skipped sources:", file=sys.stderr)
+            print(_gstate.build_stderr.rstrip(), file=sys.stderr)
         print(file=sys.stderr)
 
     render_tree_stdout(config.output_lines, shutil.get_terminal_size().columns)

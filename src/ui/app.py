@@ -938,14 +938,36 @@ class TestRunnerApp(App[None]):
             return
 
         warning = self.query_one("#dep-warning", Static)
-        if global_state.dep_graph_ready:
-            warning.update("")
-            return
+        parts: list[str] = []
 
-        warning.update(
-            "Dependency graph incomplete (fresh build or compile errors)."
-            " Run one clean pass for precise selective reruns."
-        )
+        # Skip-on-error: surface project sources that failed to compile, with
+        # the actual gcc errors so the user sees *why* they were dropped (not
+        # just the file names).  Without this, a syntax error in src/ is
+        # silently swallowed and tests that don't need the broken source pass
+        # with no indication anything went wrong.
+        if global_state.skipped_sources:
+            names = ", ".join(global_state.skipped_sources)
+            parts.append(
+                f"{len(global_state.skipped_sources)} project source(s) skipped"
+                f" (compile failed, not linked): {names}"
+            )
+            stderr = (global_state.build_stderr or "").strip()
+            if stderr:
+                # Trim to a reasonable banner length; the full output is in
+                # test_build/ artifacts for deep debugging.
+                tail = stderr[-600:]
+                parts.append(tail)
+
+        if not global_state.dep_graph_ready:
+            parts.append(
+                "Dependency graph incomplete (fresh build or compile errors)."
+                " Run one clean pass for precise selective reruns."
+            )
+
+        if parts:
+            warning.update("\n".join(parts))
+        else:
+            warning.update("")
 
     def _flush_deferred_watch_changes(self) -> None:
         if global_state.active_debug_test_key is not None:

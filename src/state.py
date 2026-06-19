@@ -29,3 +29,7 @@ cflags: str = ""
 # Project sources dropped from libproject.a by skip-on-error (compile failed).
 # Populated by build_project_sources(); read by headless output and the TUI.
 skipped_sources: list = []
+# gcc stderr from the last build_project_sources archive build. When
+# skipped_sources is non-empty this holds the actual compile errors so callers
+# can show why sources were skipped, not just the file names.
+build_stderr: str = ""
