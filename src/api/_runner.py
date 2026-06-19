@@ -737,8 +737,10 @@ async def _enrich_variable_types(
 ) -> list[tuple[str, str, str]]:
     if not binary_path or not file_path or line <= 0:
         return variables
-    enriched: list[tuple[str, str, str]] = []
-    for var_tuple in variables:
+    if not variables:
+        return []
+
+    async def _resolve_one(var_tuple: tuple) -> tuple[str, str, str]:
         if len(var_tuple) >= 3:
             name, value, _ = var_tuple
         else:
@@ -750,8 +752,14 @@ async def _enrich_variable_types(
             type_hint = _format_dwarf_type(type_info) if type_info else ""
         except Exception:
             type_hint = ""
-        enriched.append((name, value, type_hint))
-    return enriched
+        return (name, value, type_hint)
+
+    # Resolve all variable types concurrently on the thread pool instead
+    # of issuing N sequential to_thread round-trips.  The DWARF type index
+    # is read-only after first build (GIL-safe dict.get), so parallel
+    # access is safe — worst case is a one-time redundant _build_type_index
+    # if threads race on a cold cache.
+    return await asyncio.gather(*[_resolve_one(v) for v in variables])
 
 
 async def _capture_global_variables(
@@ -770,23 +778,30 @@ async def _capture_global_variables(
         return []
 
     local_names = {name for name, _, _ in local_variables}
-    results: list[tuple[str, str, str]] = []
-    for entry in index.values():
+
+    async def _capture_one_global(entry) -> tuple[str, str, str] | None:
+        if entry.name in local_names:
+            return None
         try:
-            if entry.name in local_names:
-                continue
             value = await evaluate_global(controller, entry.name)
             if value is None:
-                continue
+                return None
             prefix = "[global]" if entry.linkage_name else "[static]"
             type_info = await asyncio.to_thread(
                 resolve_variable_type, binary_path, entry.name, entry.file_path, entry.line, cache=cache
             )
             type_hint = _format_dwarf_type(type_info) if type_info else ""
-            results.append((f"{prefix} {entry.name}", value, type_hint))
+            return (f"{prefix} {entry.name}", value, type_hint)
         except Exception:
-            continue
-    return results
+            return None
+
+    # Pipeline all global evaluations concurrently — gdb MI tags each
+    # -data-evaluate-expression command with a token so N globals become
+    # one batch of pipelined round-trips instead of N sequential awaits.
+    gathered = await asyncio.gather(
+        *[_capture_one_global(entry) for entry in index.values()]
+    )
+    return [r for r in gathered if r is not None]
 
 
 async def _capture_scope_variables(
@@ -806,12 +821,14 @@ async def _capture_scope_variables(
             return []
 
         children = await controller.var_list_children(var_name)
-        expanded: list[tuple[str, str, str]] = []
-        for child in children:
+        if not children:
+            return []
+
+        async def _expand_one_child(child: dict) -> list[tuple[str, str, str]]:
             child_var_name = str(child.get("name", ""))
             child_exp = str(child.get("exp", "") or child_var_name)
             if not child_var_name or not child_exp:
-                continue
+                return []
 
             child_value = str(child.get("value", "?"))
             if child_value in {"?", "", "{...}"}:
@@ -822,11 +839,11 @@ async def _capture_scope_variables(
                 child_value = "?"
             label = f"{label_prefix}.{child_exp}"
             child_type = str(child.get("type", ""))
-            expanded.append((label, child_value, child_type))
+            result = [(label, child_value, child_type)]
 
             child_numchild = int(child.get("numchild", 0))
             if child_numchild > 0 and depth < max_depth:
-                expanded.extend(
+                result.extend(
                     await _expand_children(
                         child_var_name,
                         label,
@@ -834,7 +851,17 @@ async def _capture_scope_variables(
                         max_depth,
                     )
                 )
+            return result
 
+        # Expand all siblings concurrently — each child's var_evaluate
+        # and recursive var_list_children are independent gdb round-trips
+        # that can be pipelined via the MI token-future mechanism.
+        child_results = await asyncio.gather(
+            *[_expand_one_child(child) for child in children]
+        )
+        expanded: list[tuple[str, str, str]] = []
+        for r in child_results:
+            expanded.extend(r)
         return expanded
 
     async def _expand_variable(
@@ -881,14 +908,23 @@ async def _capture_scope_variables(
             simple_vars = await controller.list_all_variables(timeout=1.5)
 
         max_depth = max(1, int(global_state.tsv_vars_depth))
-        flattened: list[tuple[str, str, str]] = []
-        for var_tuple in simple_vars:
+
+        async def _expand_one_var(var_tuple: tuple) -> list[tuple[str, str, str]]:
             if len(var_tuple) >= 3:
                 name, value, type_hint = var_tuple
             else:
                 name, value = var_tuple
                 type_hint = ""
-            flattened.extend(await _expand_variable(name, value, type_hint, max_depth))
+            return await _expand_variable(name, value, type_hint, max_depth)
+
+        # Expand all top-level variables concurrently — each manages
+        # its own var_create/var_delete lifecycle independently.
+        expand_results = await asyncio.gather(
+            *[_expand_one_var(v) for v in simple_vars]
+        )
+        flattened: list[tuple[str, str, str]] = []
+        for r in expand_results:
+            flattened.extend(r)
 
         seen: set[str] = set()
         deduped: list[tuple[str, str, str]] = []
