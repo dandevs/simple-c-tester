@@ -938,7 +938,24 @@ class TestRunnerApp(App[None]):
             return
 
         warning = self.query_one("#dep-warning", Static)
-        parts: list[str] = []
+        # Build the banner as a rich Text rather than a plain string: the gcc
+        # stderr from a skipped source carries ANSI colour escapes, and
+        # Static.update() on a str defaults to markup parsing -- those escapes
+        # (e.g. ``\x1b[01;31m``) look like malformed markup tags and raise
+        # MarkupError, crashing the paint tick.  A Text object bypasses markup
+        # parsing entirely (textual.visual.visualize routes Text through
+        # Content.from_rich_text, never the markup branch), so no kwarg is
+        # needed.  Text.from_ansi() also parses the escapes into styled spans
+        # so the gcc colours are preserved in the banner.
+        banner = Text()
+        first = True
+
+        def _emit(chunk: "Text | str") -> None:
+            nonlocal first
+            if not first:
+                banner.append("\n")
+            banner.append(chunk)
+            first = False
 
         # Skip-on-error: surface project sources that failed to compile, with
         # the actual gcc errors so the user sees *why* they were dropped (not
@@ -947,7 +964,7 @@ class TestRunnerApp(App[None]):
         # with no indication anything went wrong.
         if global_state.skipped_sources:
             names = ", ".join(global_state.skipped_sources)
-            parts.append(
+            _emit(
                 f"{len(global_state.skipped_sources)} project source(s) skipped"
                 f" (compile failed, not linked): {names}"
             )
@@ -955,17 +972,16 @@ class TestRunnerApp(App[None]):
             if stderr:
                 # Trim to a reasonable banner length; the full output is in
                 # test_build/ artifacts for deep debugging.
-                tail = stderr[-600:]
-                parts.append(tail)
+                _emit(Text.from_ansi(stderr[-600:]))
 
         if not global_state.dep_graph_ready:
-            parts.append(
+            _emit(
                 "Dependency graph incomplete (fresh build or compile errors)."
                 " Run one clean pass for precise selective reruns."
             )
 
-        if parts:
-            warning.update("\n".join(parts))
+        if len(banner) > 0:
+            warning.update(banner)
         else:
             warning.update("")
 
