@@ -63,6 +63,13 @@ class OptionField:
 OPTION_FIELDS: tuple[OptionField, ...] = (
     OptionField("parallel", "Parallel workers", "Execution", "stepper", 4, 1, 32),
     OptionField(
+        "leak_sanitizer",
+        "Leak sanitizer",
+        "Execution",
+        "toggle",
+        False,
+    ),
+    OptionField(
         "output_lines", "Inline output lines", "Output", "stepper", 10, 1, 200
     ),
     OptionField(
