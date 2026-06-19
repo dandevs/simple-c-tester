@@ -46,9 +46,9 @@ class RunnerConfig:
     #: Compile and link with -fsanitize=address,undefined. On by default;
     #: use ``--no-sanitize`` to disable.
     sanitize: bool = True
-    #: Enable LeakSanitizer (bundled inside ASan on Linux). On by default;
-    #: use ``--no-leak-sanitizer`` to disable via ``ASAN_OPTIONS``.
-    leak_sanitizer: bool = True
+    #: Enable LeakSanitizer (bundled inside ASan on Linux). Off by default;
+    #: use ``--leak-sanitizer`` to enable via ``ASAN_OPTIONS=detect_leaks=1``.
+    leak_sanitizer: bool = False
 
     # --- UI / output -----------------------------------------------------
     #: Maximum output lines shown per inline output box.
