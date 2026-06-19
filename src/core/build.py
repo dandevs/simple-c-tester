@@ -325,6 +325,57 @@ def get_file_dependencies(source_path: str) -> dict:
     }
 
 
+def analyze_test_build(
+    test, discovered_sources: list[str], skipped_sources: list[str]
+) -> dict:
+    """Read a built test's true dependencies from its build artifacts.
+
+    ``test`` must already be compiled and linked so its ``.d`` (transitive
+    header closure) and ``.map`` (linker archive members) exist.  This reads
+    the same artifacts :func:`refresh_dependency_graph` uses for watch mode,
+    so the result reflects what the linker actually pulled — not the static
+    discovery set.
+
+    Returns a dict:
+
+      * ``include_dirs``       — the test's resolved ``-I`` directories
+      * ``headers``            — transitive user headers, from the ``.d`` file
+      * ``linked_sources``     — ``.c`` sources the linker actually pulled
+                                 from ``libproject.a`` (the bare minimum),
+                                 resolved from ``.map`` archive members
+      * ``discovered_sources`` — every ``.c`` discovered (the contrast set)
+      * ``skipped_sources``    — sources dropped by skip-on-error
+      * ``built``              — whether the test binary exists on disk
+    """
+    # Headers: transitive #include closure recorded in the .d file.
+    headers = [
+        dep
+        for dep in _parse_dep_file(test_dep_path(test.source_path))
+        if dep.endswith(".h") and os.path.exists(dep)
+    ]
+    # Linked sources: archive members the linker pulled, resolved to .c paths.
+    archive_path = os.path.join("test_build", "libproject.a")
+    members = _parse_linked_archive_members_from_map(
+        test_map_path(test.source_path), archive_path
+    )
+    obj_to_src = {_obj_name(s): s for s in discovered_sources}
+    linked: list[str] = []
+    if members:
+        for member in members:  # e.g. "src__interpreter__interpreter.o"
+            stem = member[:-2] if member.endswith(".o") else member
+            src = obj_to_src.get(stem)
+            if src:
+                linked.append(src)
+    return {
+        "include_dirs": list(test.include_dirs),
+        "headers": sorted(set(headers)),
+        "linked_sources": sorted(set(linked)),
+        "discovered_sources": list(discovered_sources),
+        "skipped_sources": list(skipped_sources),
+        "built": os.path.exists(test_binary_path(test.source_path)),
+    }
+
+
 def _obj_name(source_path: str) -> str:
     rel = os.path.normpath(source_path).replace(os.sep, "__")
     return os.path.splitext(rel)[0]
@@ -916,6 +967,7 @@ __all__ = [
     "discover_project_sources",
     "generate_makefile",
     "get_file_dependencies",
+    "analyze_test_build",
     "hydrate_dependencies_from_db",
     "load_dependency_db",
     "normalize_dep_path",

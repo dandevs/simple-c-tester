@@ -235,9 +235,11 @@ def parse_args():
         metavar="FILE",
         default=None,
         help=(
-            "Resolve and print dependency info for FILE (include dirs,"
-            " transitive headers, project sources linked into libproject.a)"
-            " and exit. No tests are run. e.g. --get-dependencies tests/foo.c"
+            "Print dependency info for FILE and exit. For a test file, builds"
+            " it and reports the true deps read from .d/.map artifacts (include"
+            " dirs, transitive headers, sources actually linked, skipped). For"
+            " other files, falls back to static gcc -MM analysis."
+            " e.g. --get-dependencies tests/foo.c"
         ),
     )
     args = parser.parse_args()
@@ -380,21 +382,131 @@ def _apply_selection(runner, matched):
     app_state.all_tests = list(matched)
 
 
+def _relpath(p: str) -> str:
+    """Display a path relative to CWD when possible (cleaner output)."""
+    try:
+        return os.path.relpath(p)
+    except ValueError:
+        return p
+
+
+def _find_test_for(source_path: str):
+    """Return the discovered test matching ``source_path``, or ``None``."""
+    tests_dir = Path("tests")
+    if not tests_dir.is_dir():
+        return None
+    from state import state as app_state
+
+    app_state.populate_suites(str(tests_dir))
+    for t in app_state.all_tests:
+        if _match_path(t.source_path, source_path):
+            return t
+    return None
+
+
 def _print_dependencies(source_path) -> int:
     """Resolve and print dependency info for ``source_path``, then exit.
 
-    Uses the real build machinery (include resolution, ``gcc -MM``, project
-    source discovery) but writes no build artifacts.  Returns an exit code.
+    For a test file, runs the real build phases (Makefile generation →
+    libproject.a build → per-test link) and reads the true dependencies from
+    the resulting ``.d``/``.map`` artifacts — the same data the watch-mode
+    dependency graph uses.  For a non-test file, falls back to static
+    ``gcc -MM`` analysis (no link step exists to produce a ``.map``).
+    Returns an exit code.
     """
-    from core.build import get_file_dependencies
-
     if not os.path.isfile(source_path):
         print(f"Error: file not found: {source_path}", file=sys.stderr)
         return 1
 
+    test = _find_test_for(source_path)
+    if test is not None:
+        return _print_test_dependencies(test)
+    return _print_static_dependencies(source_path)
+
+
+def _print_test_dependencies(test) -> int:
+    """Build ``test`` and print its true dependencies read from artifacts."""
+    import subprocess
+    import state as gstate
+    from core.artifacts import test_binary_path
+    from core.build import analyze_test_build
+    from runner.makefile import (
+        build_project_sources,
+        discover_project_sources,
+        generate_makefile,
+    )
+
+    norm = os.path.normpath(test.source_path)
+    print(f"Dependencies for: {norm}  (built from .d/.map artifacts)")
+    print()
+    # Run the build phases so the .d/.map reflect reality (skip-on-error aware).
+    generate_makefile()
+    build_project_sources()
+    binary = test_binary_path(test.source_path)
+    link = subprocess.run(
+        ["make", "-f", "test_build/Makefile", binary],
+        capture_output=True,
+    )
+    discovered = discover_project_sources()
+    info = analyze_test_build(test, discovered, gstate.skipped_sources)
+
+    linked = {_relpath(s) for s in info["linked_sources"]}
+
+    print("Include directories:")
+    if info["include_dirs"]:
+        for d in info["include_dirs"]:
+            print(f"  -I{d}")
+    else:
+        print("  (none)")
+    print()
+
+    print(f"Header dependencies ({len(info['headers'])}):")
+    for h in info["headers"]:
+        print(f"  {_relpath(h)}")
+    print()
+
+    print(f"Linked project sources ({len(info['linked_sources'])}):")
+    if info["linked_sources"]:
+        for s in info["linked_sources"]:
+            print(f"  {_relpath(s)}")
+    else:
+        print("  (none pulled from libproject.a)")
+    print()
+
+    print(
+        f"Discovered project sources ({len(info['discovered_sources'])}) "
+        "[all .c under src/ + include dirs; contrast with linked]:"
+    )
+    for s in info["discovered_sources"]:
+        rel = _relpath(s)
+        mark = "  *" if rel in linked else ""
+        print(f"  {rel}{mark}")
+    print()
+
+    if info["skipped_sources"]:
+        print(
+            f"Skipped — compile failed, dropped from libproject.a "
+            f"({len(info['skipped_sources'])}):"
+        )
+        for s in info["skipped_sources"]:
+            print(f"  {_relpath(s)}")
+        print()
+
+    print("(* = actually linked into this test)")
+    if not info["built"]:
+        print()
+        print("Link FAILED — test binary not produced:")
+        print(link.stderr.decode(errors="replace").rstrip())
+        return 1
+    return 0
+
+
+def _print_static_dependencies(source_path) -> int:
+    """Static (no-build) dependency analysis for non-test files."""
+    from core.build import get_file_dependencies
+
     deps = get_file_dependencies(source_path)
-    norm = os.path.normpath(source_path)
-    print(f"Dependencies for: {norm}")
+    print(f"Dependencies for: {os.path.normpath(source_path)}  (static — no build)")
     print()
     print("Include directories:")
     if deps["include_dirs"]:
@@ -408,10 +520,17 @@ def _print_dependencies(source_path) -> int:
         print(f"  {h}")
     print()
     print(
-        f"Project sources linked into libproject.a ({len(deps['project_sources'])}):"
+        f"Discovered project sources ({len(deps['project_sources'])}) "
+        "[full discovery set — NOT the subset a test would link]:"
     )
     for s in deps["project_sources"]:
         print(f"  {s}")
+    print()
+    print(
+        "(static analysis — no link performed. Pass a test file, e.g.\n"
+        " tests/foo.c, for accurate artifact-based results showing what the\n"
+        " linker actually pulls.)"
+    )
     return 0
 
 
