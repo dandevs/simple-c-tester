@@ -1171,6 +1171,65 @@ async def _terminate_active_processes() -> None:
     active_processes.clear()
 
 
+def _assemble_compile_error(test: Test, make_stderr: bytes) -> str:
+    """Build the compile-error text shown in a test's log when its build fails.
+
+    A test fails to build for one of two reasons:
+
+    1. The test file itself has a compile error -- ``make_stderr`` is that
+       error and there's nothing to filter.
+    2. A project source the test *links* failed to compile (skip-on-error
+       dropped it) so the link step reports ``undefined reference``.  In watch
+       mode ``make`` recompiles *every* broken source while rebuilding the
+       archive, so ``make_stderr`` would dump the whole project's errors --
+       noisy and mostly irrelevant (this test doesn't link expand.c).
+
+    For case 2 we know the test's real dependencies from the prior ``.map``
+    (``test.dependencies``) and we have each broken source's isolated stderr in
+    ``global_state.source_errors``.  So we show only the compile errors of the
+    sources this test actually links, plus a concise link-failure line, instead
+    of the whole project's output.
+
+    Fallback: if the test has no recorded dependencies yet (first run, no
+    ``.map``) or none of its deps were skipped, return ``make_stderr`` verbatim
+    (the current behaviour) -- this also covers case 1 (test-file error).
+    """
+    raw = make_stderr.decode(errors="replace")
+    # ``test.dependencies`` (from the .d/.map via db.json) are absolute paths,
+    # while ``skipped_sources`` (from discover_project_sources) are relative.
+    # Normalise both to absolute before intersecting or the set is always empty.
+    deps_abs = {os.path.normpath(os.path.abspath(d)) for d in test.dependencies}
+    # source_errors is keyed by the relative paths in skipped_sources, so keep
+    # `src` in its original (relative) form for that lookup.
+    relevant = sorted(
+        src
+        for src in global_state.skipped_sources
+        if os.path.normpath(os.path.abspath(src)) in deps_abs
+        and src in global_state.source_errors
+    )
+    if not relevant:
+        return raw
+
+    parts: list[str] = []
+    for src in relevant:
+        err = (global_state.source_errors.get(src) or "").strip()
+        if err:
+            parts.append(f"Dependency `{src}` failed to compile:\n{err}")
+
+    # Pull just the link-phase lines out of the (possibly noisy) make stderr so
+    # the log confirms *which* symbol is unresolved without re-dumping every
+    # broken source's compile output.  "undefined reference to `sym`" appears in
+    # plain text inside the ANSI-coloured line, so a substring scan works.
+    link_lines = [
+        line for line in raw.splitlines()
+        if "undefined reference" in line or "collect2:" in line or "ld returned" in line
+    ]
+    if link_lines:
+        parts.append("Link failure:\n" + "\n".join(link_lines))
+
+    return "\n\n".join(parts) if parts else raw
+
+
 async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tuple[bool, str]:
     process_key = _test_key(test)
     binary_path = test_binary_path(test.source_path)
@@ -1194,22 +1253,38 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
     if active_processes.get(process_key) is make_proc:
         active_processes.pop(process_key, None)
 
-    await asyncio.to_thread(refresh_dependency_graph)
-
     if make_proc.returncode != 0:
         if test.state == TestState.CANCELLED:
             return False, binary_path
         run = test.current_run
         if run is not None:
-            run.compile_err = make_stderr.decode(errors="replace")
-            run.compile_err_raw = make_stderr
+            filtered = _assemble_compile_error(test, make_stderr)
+            run.compile_err = filtered
+            # Encode the filtered text as compile_err_raw too -- the output
+            # box renders compile_err_raw first (via Text.from_ansi to keep
+            # gcc's colours), falling back to compile_err only when raw is
+            # empty.  If we left raw = make_stderr the box would show the
+            # unfiltered whole-project output regardless of the filtered
+            # string.  The filtered text still carries ANSI escapes (from
+            # source_errors' isolated gcc output), so Text.from_ansi parses
+            # them correctly.
+            run.compile_err_raw = filtered.encode(errors="replace")
         test.state = TestState.FAILED
         test.time_state_changed = time.monotonic()
         global_state.dep_graph_ready = False
         global_state.dep_graph_reason = "compile errors present"
         _append_timeline_event(test, "compile_failed", "compile failed")
+        # NOTE: refresh_dependency_graph is deliberately NOT called on failure.
+        # A failed link writes an incomplete .map (the linker never pulled the
+        # broken source's object), so refreshing would recompute test.dependencies
+        # WITHOUT the very source that broke -- corrupting the dep set that
+        # _assemble_compile_error relies on to filter the log to the relevant
+        # source.  Keep the prior (last-good-build) deps instead.
         return False, binary_path
 
+    # Build succeeded: the .map is valid, so refresh the dependency graph from
+    # it (updates test.dependencies, dep_index, and the content-hash cache).
+    await asyncio.to_thread(refresh_dependency_graph)
     run = test.current_run
     if run is not None:
         run.compile_err = ""
