@@ -180,6 +180,7 @@ def parse_args():
     parser.add_argument(
         "--leak-sanitizer",
         action="store_true",
+        default=None,
         help="Enable LeakSanitizer (ASAN_OPTIONS detect_leaks). Off by default.",
     )
     parser.add_argument(
@@ -271,6 +272,7 @@ _MENU_ARG_KEYS = (
     "tsv_vars_depth",
     "tsv_variables_height",
     "tsv_show_reason_about",
+    "leak_sanitizer",
 )
 
 
@@ -284,8 +286,8 @@ def _build_config(args, user_config: dict) -> RunnerConfig:
 
     For each menu field: ``cli_arg`` wins if explicitly passed, else the
     persisted ``user_config`` value, else the builtin default.  Non-menu flags
-    (watch, debug-build, no-sanitize, leak-sanitizer, cflags) keep their
-    plain CLI/default values.
+    (watch, debug-build, no-sanitize, cflags) keep their plain CLI/default
+    values.
     """
 
     def resolve(key: str, attr: str, default, coerce=lambda v: v):
@@ -305,7 +307,7 @@ def _build_config(args, user_config: dict) -> RunnerConfig:
         timeline=timeline,
         debug_build=bool(args.debug_build or timeline),
         sanitize=not args.no_sanitize,
-        leak_sanitizer=args.leak_sanitizer,
+        leak_sanitizer=bool(resolve("leak_sanitizer", "leak_sanitizer", False)),
         story_filter_profile=normalized_story_filter_profile(
             resolve("story_filter_profile", "story_filter_profile", "balanced")
         ),

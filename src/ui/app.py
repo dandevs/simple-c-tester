@@ -546,6 +546,10 @@ class TestRunnerApp(App[None]):
             gs.debug_precision_mode_preference = value
             for t in state.all_tests:
                 t.debug_precision_mode = value
+        elif key == "leak_sanitizer":
+            # Runtime-only (ASAN_OPTIONS=detect_leaks), not a compile flag —
+            # takes effect on the next test run, no rebuild needed.
+            gs.leak_sanitizer_enabled = bool(value)
 
         # Persist (best-effort; read-only HOME never crashes the TUI).
         self.user_config[key] = value
