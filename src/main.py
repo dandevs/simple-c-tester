@@ -118,6 +118,7 @@ def parse_args():
         description=(
             "Run C tests, print the result tree, and exit. Pass specific test"
             " files to run a subset. Use --watch to open the interactive TUI."
+            " Use --get-dependencies FILE to inspect a file's dependencies."
         ),
         epilog=(
             "examples:\n"
@@ -125,6 +126,7 @@ def parse_args():
             "  ctester tests/foo.c        Run only the named test file(s)\n"
             "  ctester --watch            Open the interactive TUI (with file monitoring)\n"
             "  ctester --parallel 8       Run all tests with 8 parallel workers\n"
+            "  ctester --get-dependencies tests/foo.c   Print deps for a file, exit\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -227,6 +229,16 @@ def parse_args():
         nargs=argparse.REMAINDER,
         default=[],
         help="Extra compiler/linker flags (e.g. -lreadline -Wextra -Werror)",
+    )
+    parser.add_argument(
+        "--get-dependencies",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Resolve and print dependency info for FILE (include dirs,"
+            " transitive headers, project sources linked into libproject.a)"
+            " and exit. No tests are run. e.g. --get-dependencies tests/foo.c"
+        ),
     )
     args = parser.parse_args()
     if args.watch and args.files:
@@ -368,8 +380,45 @@ def _apply_selection(runner, matched):
     app_state.all_tests = list(matched)
 
 
+def _print_dependencies(source_path) -> int:
+    """Resolve and print dependency info for ``source_path``, then exit.
+
+    Uses the real build machinery (include resolution, ``gcc -MM``, project
+    source discovery) but writes no build artifacts.  Returns an exit code.
+    """
+    from core.build import get_file_dependencies
+
+    if not os.path.isfile(source_path):
+        print(f"Error: file not found: {source_path}", file=sys.stderr)
+        return 1
+
+    deps = get_file_dependencies(source_path)
+    norm = os.path.normpath(source_path)
+    print(f"Dependencies for: {norm}")
+    print()
+    print("Include directories:")
+    if deps["include_dirs"]:
+        for d in deps["include_dirs"]:
+            print(f"  -I{d}")
+    else:
+        print("  (none)")
+    print()
+    print(f"Header dependencies ({len(deps['headers'])}):")
+    for h in deps["headers"]:
+        print(f"  {h}")
+    print()
+    print(
+        f"Project sources linked into libproject.a ({len(deps['project_sources'])}):"
+    )
+    for s in deps["project_sources"]:
+        print(f"  {s}")
+    return 0
+
+
 async def _main():
     args = parse_args()
+    if args.get_dependencies:
+        return _print_dependencies(args.get_dependencies)
     from core.userconfig import load_user_config
 
     user_config = load_user_config()
