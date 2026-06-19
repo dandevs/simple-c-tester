@@ -482,6 +482,22 @@ async def _run_headless(runner, config, files) -> int:
 
         await _terminate_active_processes()
 
+    # Surface skip-on-error warnings: project sources that failed to compile
+    # and were dropped from libproject.a.  (Printed to stderr; headless only
+    # — the TUI reads the same list from global state to avoid corrupting
+    # the screen.)
+    import state as _gstate
+
+    if _gstate.skipped_sources:
+        print(
+            f"Warning: {len(_gstate.skipped_sources)} project source(s) skipped"
+            " (compile failed, not linked into libproject.a):",
+            file=sys.stderr,
+        )
+        for s in _gstate.skipped_sources:
+            print(f"  - {s}", file=sys.stderr)
+        print(file=sys.stderr)
+
     render_tree_stdout(config.output_lines, shutil.get_terminal_size().columns)
 
     failed = any(t.state != TestState.PASSED for t in runner.tests)

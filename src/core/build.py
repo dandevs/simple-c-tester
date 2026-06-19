@@ -525,19 +525,32 @@ def _gc_orphaned_build_artifacts(rs: RunnerState) -> int:
 
 
 def build_project_sources(rs: RunnerState) -> None:
-    """Build ``test_build/libproject.a`` from discovered project sources."""
+    """Build ``test_build/libproject.a`` from discovered project sources.
+
+    Skip-on-error: a project source that fails to compile is dropped from
+    the archive (its path is recorded in ``rs.skipped_sources``) so one
+    broken WIP file cannot block every test.  The generated Makefile ignores
+    per-object compile failures and archives only the objects that built.
+    Tests that genuinely need a skipped symbol then surface a precise linker
+    "undefined reference" error instead of a project-wide build failure.
+    """
     sources = discover_project_sources(rs)
+    rs.skipped_sources = []
     if not sources:
         return
     makefile = "test_build/Makefile"
     if not os.path.exists(makefile):
         return
-    result = subprocess.run(
+    subprocess.run(
         ["make", "-f", makefile, "test_build/libproject.a"],
         capture_output=True,
     )
-    if result.returncode != 0:
-        pass
+    obj_dir = os.path.join("test_build", "obj")
+    rs.skipped_sources = [
+        src
+        for src in sources
+        if not os.path.exists(os.path.join(obj_dir, _obj_name(src) + ".o"))
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -852,13 +865,22 @@ def generate_makefile(
             obj_files.append(obj_path)
             lines.append(f"{obj_path}: {src}")
             lines.append(f"\t@mkdir -p {obj_dir}")
+            # Skip-on-error: a broken project source (e.g. WIP) must not
+            # block the whole library.  The leading "-" tells make to ignore
+            # a compile failure; "|| rm -f $@" clears any stale object so the
+            # archive never ships an out-of-date build of a now-broken file.
             lines.append(
-                f"\tgcc {include_flags} {debug_flags} {sanitize_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_path} -c $< -o $@ {cflags}"
+                f"\t-gcc {include_flags} {debug_flags} {sanitize_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_path} -c $< -o $@ {cflags} || rm -f $@"
             )
             lines.append("")
 
-        lines.append(f"{lib_target}: {' '.join(obj_files)}")
-        lines.append(f"\tar rcs $@ $^")
+        # PROJECT_OBJS lets the archive recipe gather only the objects that
+        # actually compiled (existing files), skipping any failures above.
+        lines.append(f"PROJECT_OBJS := {' '.join(obj_files)}")
+        lines.append(f"{lib_target}: $(PROJECT_OBJS)")
+        lines.append(
+            "\tar rcs $@ $$(for o in $(PROJECT_OBJS); do [ -f \"$$o\" ] && printf '%s\\n' \"$$o\"; done)"
+        )
         lines.append("")
 
     for test in rs.app_state.all_tests:
