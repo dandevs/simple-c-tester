@@ -202,7 +202,15 @@ async def _apply_file_changes(
     # per-path loop.
     renamed_tests = _apply_test_renames(moves)
 
-    if len(changed_paths) >= _MASS_CHANGE_THRESHOLD:
+    # Mass-change detection.  Must ignore test_build writes: a single build
+    # emits dozens of artifact writes (.o/.d/libproject.a/binary/.map/Makefile/
+    # db.json) that would otherwise trip the threshold, cancel the running test
+    # via rerun_all, and feed an infinite run -> build -> cancel loop.  Only a
+    # bulk change to *sources* (git checkout, directory move) should trigger it.
+    non_test_build_changes = [
+        p for p in changed_paths if not _is_in_test_build(os.path.abspath(p))
+    ]
+    if len(non_test_build_changes) >= _MASS_CHANGE_THRESHOLD:
         rerun_all = True
 
     for path, event_kinds in changed_paths.items():
