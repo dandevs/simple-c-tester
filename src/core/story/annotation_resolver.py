@@ -35,14 +35,23 @@ async def resolve_line_annotations(
     if not expressions:
         return {line_number: {}}
 
-    annotations: dict[str, str] = {}
+    # Deduplicate while preserving order, then evaluate all expressions
+    # concurrently.  gdb MI tags each command with a token and matches
+    # responses by token, so pipelining N -data-evaluate-expression calls
+    # turns N sequential round-trips into a single batch.
+    unique_exprs: list[str] = []
     seen: set[str] = set()
-
     for expr in expressions:
-        if expr in seen:
-            continue
-        seen.add(expr)
-        value = await _evaluate_single_expression(debugger, expr)
+        if expr not in seen:
+            seen.add(expr)
+            unique_exprs.append(expr)
+
+    values = await asyncio.gather(
+        *[_evaluate_single_expression(debugger, expr) for expr in unique_exprs]
+    )
+
+    annotations: dict[str, str] = {}
+    for expr, value in zip(unique_exprs, values):
         if value is not None:
             annotations[expr] = value
 
