@@ -584,18 +584,24 @@ def build_project_sources(rs: RunnerState) -> None:
     per-object compile failures and archives only the objects that built.
     Tests that genuinely need a skipped symbol then surface a precise linker
     "undefined reference" error instead of a project-wide build failure.
+
+    The gcc stderr from the archive build is captured into ``rs.build_stderr``
+    so callers (headless warning, TUI banner) can surface the actual compile
+    errors rather than silently swallowing them.
     """
     sources = discover_project_sources(rs)
     rs.skipped_sources = []
+    rs.build_stderr = ""
     if not sources:
         return
     makefile = "test_build/Makefile"
     if not os.path.exists(makefile):
         return
-    subprocess.run(
+    result = subprocess.run(
         ["make", "-f", makefile, "test_build/libproject.a"],
         capture_output=True,
     )
+    rs.build_stderr = result.stderr.decode(errors="replace")
     obj_dir = os.path.join("test_build", "obj")
     rs.skipped_sources = [
         src

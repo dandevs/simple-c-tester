@@ -82,6 +82,13 @@ class RunnerState:
     #: the TUI to surface "skipped" warnings.
     skipped_sources: list[str] = field(default_factory=list)
 
+    #: gcc stderr from the last ``build_project_sources`` archive build.  When
+    #: ``skipped_sources`` is non-empty this holds the actual compile errors
+    #: (file:line: error: ...) so callers can show *why* sources were skipped
+    #: instead of just the file names.  Empty when nothing was built or all
+    #: sources compiled cleanly.
+    build_stderr: str = ""
+
     # ----- convenient accessors -----------------------------------------
 
     @property
