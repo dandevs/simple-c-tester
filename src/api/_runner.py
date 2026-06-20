@@ -1858,7 +1858,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
             variables=vars_for_event,
             debugger=controller,
         )
-        if _stop_has_source_location(initial_stop):
+        if _stop_has_source_location(initial_stop) and not global_state.debug_line_suppressed:
             save_debug_line(initial_stop.file_path, initial_stop.line)
         run.timeline_selected_event_index = -1
         _schedule_story_annotations_persist(test)
@@ -2075,7 +2075,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
         variables=vars_for_event,
         debugger=controller,
     )
-    if _stop_has_source_location(stop_event):
+    if _stop_has_source_location(stop_event) and not global_state.debug_line_suppressed:
         save_debug_line(stop_event.file_path, stop_event.line)
     run = test.current_run
     if run is not None:

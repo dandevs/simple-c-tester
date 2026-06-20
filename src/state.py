@@ -26,6 +26,10 @@ story_filter_profile_preference = "balanced"
 debug_line: dict | None = None
 app_active = False
 cflags: str = ""
+# When True, debugLine db.json updates are suppressed so the user's IDE
+# doesn't jump to source lines while inspecting the variable tree view.
+# Set by VariableTreeScreen.on_mount / on_unmount.
+debug_line_suppressed: bool = False
 # Project sources dropped from libproject.a by skip-on-error (compile failed).
 # Populated by build_project_sources(); read by headless output and the TUI.
 skipped_sources: list = []
