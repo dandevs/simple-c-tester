@@ -828,7 +828,7 @@ class TestDebuggerScreen(Screen[None]):
         else:
             run.timeline_selected_event_index = idx
             run.aggregate_annotations = False
-        if is_manual and frame.file_path and frame.line > 0:
+        if is_manual and frame.file_path and frame.line > 0 and not global_state.debug_line_suppressed:
             save_debug_line(frame.file_path, frame.line)
         _schedule_story_annotations_persist(self.test)
 
@@ -1943,7 +1943,7 @@ class TestDebuggerScreen(Screen[None]):
         selected = None
         if 0 <= self.selected_frame_index < total:
             selected = frames[self.selected_frame_index]
-            if self._follow_latest_frame and is_debug_active(self.test) and selected.file_path and selected.line > 0:
+            if self._follow_latest_frame and is_debug_active(self.test) and selected.file_path and selected.line > 0 and not global_state.debug_line_suppressed:
                 save_debug_line(selected.file_path, selected.line)
 
         if self.header_widget is not None:
