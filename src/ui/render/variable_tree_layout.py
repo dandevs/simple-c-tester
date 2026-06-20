@@ -17,6 +17,7 @@ All functions are **pure** — same inputs always produce the same output.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from rich.console import Group
 from rich.text import Text
@@ -97,6 +98,37 @@ def _truncate(value: str, limit: int = MAX_VAL_LEN) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
+# Matches gdb's char* output: ``0x<addr> "string content"``
+_ADDR_STRING_RE = re.compile(r'^0x[0-9a-fA-F]+\s+(".*")\s*$')
+# Matches ``char *`` / ``const char *`` / ``unsigned char *`` etc.
+# (but NOT ``char **`` — that's an array of strings, not a single string).
+_STRING_TYPE_RE = re.compile(
+    r'^(?:const\s+)?(?:volatile\s+)?(?:unsigned\s+|signed\s+)?char\s*\*$'
+)
+
+
+def _is_string_type(type_hint: str) -> bool:
+    """True for ``char *`` / ``const char *`` variants (not ``char **``)."""
+    return bool(_STRING_TYPE_RE.match(type_hint.strip()))
+
+
+def _clean_string_value(value: str) -> str:
+    """Strip the ``0x... `` prefix from a gdb char* value.
+
+    gdb formats non-NULL ``char *`` as ``0x7fff... "hello"``; only the
+    ``"hello"`` part is useful in the tree display.  NULL pointers (``0x0``)
+    and values without a string literal are returned unchanged.
+    """
+    m = _ADDR_STRING_RE.match(value.strip())
+    return m.group(1) if m else value
+
+
+def _display_value(value: str, type_hint: str) -> str:
+    """Clean string addresses, then truncate for display."""
+    cleaned = _clean_string_value(value) if _is_string_type(type_hint) else value
+    return _truncate(cleaned)
+
+
 def _short_name(name: str) -> str:
     """Show only the last path component for readability."""
     if "." in name:
@@ -122,7 +154,7 @@ def _content_entries(node: VarTreeNode) -> list[ContentEntry]:
     title_target = LineTarget(expr=node.expr, type_hint=node.type_hint, is_title=True)
     entries.append((
         [(_short_name(node.name) + " = ", _STYLE_NAME),
-         (_truncate(node.value), val_style)],
+         (_display_value(node.value, node.type_hint), val_style)],
         title_target,
     ))
 
@@ -141,7 +173,7 @@ def _content_entries(node: VarTreeNode) -> list[ContentEntry]:
         target = LineTarget(expr=f.expr, type_hint=f.type_hint, is_title=False)
         entries.append((
             [(f.name + " = ", _STYLE_FIELD_NAME),
-             (_truncate(f.value), _STYLE_FIELD_VAL)],
+             (_display_value(f.value, f.type_hint), _STYLE_FIELD_VAL)],
             target,
         ))
 
