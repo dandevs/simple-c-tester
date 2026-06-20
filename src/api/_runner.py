@@ -48,6 +48,11 @@ _active_run_tasks: dict[str, asyncio.Task] = {}
 _source_line_cache: dict[str, list[str]] = {}
 _user_function_cache: set[str] = set()
 _user_function_cache_key: object | None = None
+# Set to True when debug build mode actually changes (normal↔debug).  Read by
+# _compile_binary_for_test to pass ``-B`` (always-make) to the *first*
+# compilation after the switch — that's the only time we need to force
+# recompilation of every .o with the new flags.  Reset after consumption.
+_debug_mode_just_changed: bool = False
 
 _CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 _FUNC_DEF_RE = re.compile(
@@ -1167,12 +1172,19 @@ def _debug_callbacks(test: Test):
 
 
 async def _ensure_debug_build_mode(enabled: bool) -> None:
+    global _debug_mode_just_changed
     desired = bool(enabled)
     current = bool(global_state.debug_build_enabled)
-    global_state.debug_build_enabled = desired
 
-    if desired == current and not desired:
+    # Already in the desired mode — nothing to do.  The previous condition
+    # (``desired == current and not desired``) only short-circuited when both
+    # were False, so pressing 'd' while already in debug mode still triggered
+    # a full Makefile regeneration + archive rebuild on every single session.
+    if desired == current:
         return
+
+    global_state.debug_build_enabled = desired
+    _debug_mode_just_changed = True
 
     await asyncio.to_thread(generate_makefile)
     await asyncio.to_thread(build_project_sources)
@@ -1267,13 +1279,21 @@ def _assemble_compile_error(test: Test, make_stderr: bytes) -> str:
 
 
 async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tuple[bool, str]:
+    global _debug_mode_just_changed
     process_key = _test_key(test)
     binary_path = test_binary_path(test.source_path)
 
     _append_timeline_event(test, "compile_start", f"compiling {binary_path}")
     make_args = ["make", "-f", "test_build/Makefile"]
+    # ``-B`` (always-make) is only needed when the build mode JUST changed
+    # (normal→debug or debug→normal) so every .o is recompiled with the new
+    # flags, or when a one-off force-rebuild is requested.  Previously this
+    # checked ``debug_build_enabled`` — True for the entire debug session —
+    # which meant *every* compilation recompiled the whole project from
+    # scratch even when nothing had changed.  For a 74-source project that
+    # turned a 0.2 s incremental link into a 4 s full rebuild on every 'd'.
     force_rebuild = test.force_rebuild_once
-    if global_state.debug_build_enabled or force_rebuild:
+    if _debug_mode_just_changed or force_rebuild:
         make_args.append("-B")
     make_args.append(binary_path)
     make_proc = await asyncio.create_subprocess_exec(
@@ -1284,6 +1304,11 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
     )
     if force_rebuild:
         test.force_rebuild_once = False
+    # Consume the mode-change flag regardless of build success/failure.  The
+    # Makefile has already been regenerated with the new flags, so even if
+    # this build fails, the .o files that DID compile carry the new flags.
+    # Subsequent incremental builds will pick up where this left off.
+    _debug_mode_just_changed = False
     active_processes[process_key] = make_proc
     _, make_stderr = await make_proc.communicate()
     if active_processes.get(process_key) is make_proc:
