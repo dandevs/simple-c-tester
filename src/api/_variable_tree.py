@@ -54,6 +54,11 @@ class VarTreeNode:
     # True when this node is a scalar pointer expanded into array elements.
     # The compaction pass keeps such nodes as their own boxes (not inlined).
     is_expanded_array: bool = False
+    # True when this node is a pointer to a struct/union (a graph edge).
+    # Set during ``_build_node`` so the compaction pass can keep it as a
+    # box even when the type name is a typedef (e.g. ``t_ast *``) that
+    # ``_points_to_aggregate`` cannot recognise from the name alone.
+    is_graph_edge: bool = False
 
 
 # Pointer values that represent NULL and should not be expanded.
@@ -209,6 +214,13 @@ async def _build_node(
         type_hint=type_hint,
         address=address,
         expr=expr,
+        # A pointer whose target has multiple fields is a graph edge.
+        # Covers both explicit ``struct Foo *`` and typedef'd types like
+        # ``t_ast *`` that ``_points_to_aggregate`` cannot detect by name.
+        is_graph_edge=(
+            _points_to_aggregate(type_hint)
+            or (_is_pointer_type(type_hint) and numchild > 1)
+        ),
     )
 
     if numchild <= 0:
@@ -254,9 +266,47 @@ async def _build_node(
             ):
                 continue
 
-        # Scalar fields (numchild == 0) are shown inside the node box.
-        # Pointer/aggregate fields (numchild > 0) become tree edges.
+        # Classify the child as a tree edge (sub-box) or a scalar field.
         if child_numchild <= 0:
+            # gdb reports no children for this varobj.  Some gdb builds do
+            # not auto-dereference struct/union pointers — including
+            # typedef'd types like ``t_ast *`` — leaving numchild at 0.
+            # Force a dereference via ``*(expr)`` for any non-NULL pointer;
+            # the deref'd numchild tells us whether the target is an
+            # aggregate (struct → numchild > 0) or a scalar (int*/char*
+            # → numchild == 0).  Same dereferencing the manual ``a``
+            # expansion does, but done automatically during tree building.
+            if (
+                _is_pointer_type(child_type)
+                and child_value.strip() not in _NULL_VALUES
+                and child_value.strip() != "?"
+            ):
+                deref_created = await controller.var_create(
+                    f"*({child_expr})", frame="*", timeout=2.0
+                )
+                if deref_created is not None:
+                    deref_name = str(deref_created.get("name", ""))
+                    deref_numchild = int(deref_created.get("numchild", 0))
+                    try:
+                        if deref_numchild > 0:
+                            deref_node = await _build_node(
+                                controller,
+                                deref_name,
+                                child_display,
+                                child_value,
+                                child_type,
+                                deref_numchild,
+                                visited,
+                                node_count,
+                                max_nodes,
+                                expr=child_expr,
+                            )
+                            if deref_node is not None:
+                                node.children.append(deref_node)
+                                continue
+                    finally:
+                        await controller.var_delete(deref_name, timeout=1.0)
+            # Not dereferenceable — treat as a scalar field.
             node.fields.append(
                 VarField(
                     name=child_exp,
@@ -320,8 +370,13 @@ def _has_graph_node(node: VarTreeNode) -> bool:
     collapsed away.  A scalar pointer expanded into an array
     (``is_expanded_array``) is also kept as a box so its element fields stay
     visible and the node stays hoverable for re-expansion.
+
+    The ``is_graph_edge`` flag covers typedef'd pointer types (e.g.
+    ``t_ast *``) that ``_points_to_aggregate`` cannot recognise by name
+    alone — it is set during ``_build_node`` when the pointer's target is
+    confirmed to have multiple fields.
     """
-    if node.is_expanded_array or _points_to_aggregate(node.type_hint):
+    if node.is_expanded_array or node.is_graph_edge or _points_to_aggregate(node.type_hint):
         return True
     return any(_has_graph_node(child) for child in node.children)
 
@@ -412,6 +467,7 @@ def _compact_node(node: VarTreeNode) -> VarTreeNode:
         address=node.address,
         expr=node.expr,
         is_expanded_array=node.is_expanded_array,
+        is_graph_edge=node.is_graph_edge,
     )
 
 
@@ -490,6 +546,14 @@ def build_tree_from_captured(
                 node.fields.append(
                     VarField(name=seg, value=child_val, type_hint=child_type)
                 )
+
+        # Set is_graph_edge after children are known so the compaction
+        # pass keeps typedef'd struct/union pointers (e.g. ``t_ast *``)
+        # as boxes when they have captured sub-fields.
+        node.is_graph_edge = (
+            _points_to_aggregate(type_hint)
+            or (_is_pointer_type(type_hint) and len(node.children) > 1)
+        )
         return node
 
     built = _build((root_name,), root_name)
