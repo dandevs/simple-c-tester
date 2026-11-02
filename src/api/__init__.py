@@ -327,6 +327,15 @@ class TestRunner:
         non_visible_running.sort(key=lambda t: t.time_start, reverse=True)
         to_cancel = non_visible_running[:needed]
 
+        from core.debug_log import debug_log
+
+        debug_log(
+            "prioritize preempt",
+            search=search_active,
+            visible=len(visible_pending),
+            cancelling=[t.name for t in to_cancel],
+        )
+
         for test in to_cancel:
             await _preempt_test(test)
 

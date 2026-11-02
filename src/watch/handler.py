@@ -8,7 +8,7 @@ from watchdog.events import FileSystemEventHandler
 
 import state as global_state
 from state import state, dep_index, active_processes
-from core.models import Test, TestState, Suite
+from core.models import Test, TestState, Suite, has_main_definition
 from runner.makefile import generate_makefile, build_project_sources, refresh_dependency_graph, normalize_dep_path, dep_content_unchanged
 from runner.execute import (
     state_changed,
@@ -169,8 +169,25 @@ async def _apply_file_changes(
     changed_paths: dict[str, set[str]],
     moves: list[tuple[str, str]] | None = None,
 ) -> None:
+    from core.debug_log import debug_log
+
     if moves is None:
         moves = []
+
+    # Diagnostic entry log.  Guard: only write when the batch has at least one
+    # path OUTSIDE test_build.  Without this, log.txt writes (this diagnostic
+    # itself) would feed back: write -> watch event -> entry log -> write ...,
+    # producing an infinite logging loop.  test_build-only batches are filtered
+    # from reruns anyway, so they're not interesting to log.
+    relevant_for_log = [
+        p for p in changed_paths if not _is_in_test_build(os.path.abspath(p))
+    ]
+    if relevant_for_log:
+        debug_log(
+            "apply_file_changes entry",
+            paths=sorted(relevant_for_log),
+            moves=len(moves),
+        )
 
     breakpoints_changed = False
     relevant_code_changes = False
@@ -185,7 +202,15 @@ async def _apply_file_changes(
     # per-path loop.
     renamed_tests = _apply_test_renames(moves)
 
-    if len(changed_paths) >= _MASS_CHANGE_THRESHOLD:
+    # Mass-change detection.  Must ignore test_build writes: a single build
+    # emits dozens of artifact writes (.o/.d/libproject.a/binary/.map/Makefile/
+    # db.json) that would otherwise trip the threshold, cancel the running test
+    # via rerun_all, and feed an infinite run -> build -> cancel loop.  Only a
+    # bulk change to *sources* (git checkout, directory move) should trigger it.
+    non_test_build_changes = [
+        p for p in changed_paths if not _is_in_test_build(os.path.abspath(p))
+    ]
+    if len(non_test_build_changes) >= _MASS_CHANGE_THRESHOLD:
         rerun_all = True
 
     for path, event_kinds in changed_paths.items():
@@ -276,9 +301,20 @@ async def _apply_file_changes(
         for test in state.all_tests:
             affected[test.source_path] = test
 
+    # Only log when something actually happens; an empty result would feed back
+    # via log.txt writes on no-op (test_build-only) batches.
+    if affected or rerun_all:
+        debug_log(
+            "apply_file_changes result",
+            rerun_all=rerun_all,
+            affected=[t.name for t in affected.values()],
+            running=[t.name for t in affected.values() if t.state == TestState.RUNNING],
+        )
+
     for test in affected.values():
         test.include_dirs = []
         if test.state == TestState.RUNNING:
+            debug_log("watch-cancel", test=test.name, rerun_all=rerun_all)
             test.state = TestState.CANCELLED
             test.cancelled_by_user = False
             test.time_state_changed = time.monotonic()
@@ -304,6 +340,8 @@ async def _apply_file_changes(
         if not _is_under(abs_path, tests_dir):
             continue
         if not abs_path.endswith(".c"):
+            continue
+        if not has_main_definition(abs_path):
             continue
         if abs_path in existing_sources:
             continue

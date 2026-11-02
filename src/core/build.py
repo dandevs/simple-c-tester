@@ -277,6 +277,105 @@ def resolve_include_dirs(source_path: str) -> list[str]:
     return include_dirs
 
 
+def _preprocessor_headers(source_path: str, include_dirs: list[str]) -> list[str]:
+    """Transitive user-header closure of ``source_path`` via ``gcc -MM``.
+
+    Returns existing, non-system header/source paths (``-MM`` already excludes
+    system headers), sorted.  Paths come back as gcc emits them (relative when
+    ``include_dirs`` are relative).  Pure: invokes gcc only.
+    """
+    cmd = ["gcc", "-MM"]
+    for d in include_dirs:
+        cmd.extend(["-I", d])
+    cmd.append(source_path)
+    result = subprocess.run(cmd, capture_output=True)
+    out = result.stdout.decode(errors="replace")
+    # Join make-style "\" continuation lines into logical dependency lines.
+    joined = out.replace("\\\n", " ")
+    headers: set[str] = set()
+    for line in joined.splitlines():
+        if ":" not in line:
+            continue
+        _, deps_part = line.split(":", 1)
+        for cand in deps_part.split():
+            if not cand or cand == source_path:
+                continue
+            if os.path.exists(cand):
+                headers.add(cand)
+    return sorted(headers)
+
+
+def get_file_dependencies(source_path: str) -> dict:
+    """Resolve dependency information for ``source_path`` without building.
+
+    Returns a dict with three keys:
+
+      * ``"include_dirs"`` — resolved ``-I`` directories (:func:`resolve_include_dirs`);
+      * ``"headers"`` — transitive user-header closure (``gcc -MM``);
+      * ``"project_sources"`` — ``.c`` sources that would be compiled into
+        ``libproject.a`` for these include dirs plus the ``src/`` tree.
+
+    Pure-ish: invokes ``gcc -E`` / ``gcc -MM``; writes no build artifacts.
+    """
+    include_dirs = resolve_include_dirs(source_path)
+    return {
+        "include_dirs": include_dirs,
+        "headers": _preprocessor_headers(source_path, include_dirs),
+        "project_sources": _project_sources_for(include_dirs),
+    }
+
+
+def analyze_test_build(
+    test, discovered_sources: list[str], skipped_sources: list[str]
+) -> dict:
+    """Read a built test's true dependencies from its build artifacts.
+
+    ``test`` must already be compiled and linked so its ``.d`` (transitive
+    header closure) and ``.map`` (linker archive members) exist.  This reads
+    the same artifacts :func:`refresh_dependency_graph` uses for watch mode,
+    so the result reflects what the linker actually pulled — not the static
+    discovery set.
+
+    Returns a dict:
+
+      * ``include_dirs``       — the test's resolved ``-I`` directories
+      * ``headers``            — transitive user headers, from the ``.d`` file
+      * ``linked_sources``     — ``.c`` sources the linker actually pulled
+                                 from ``libproject.a`` (the bare minimum),
+                                 resolved from ``.map`` archive members
+      * ``discovered_sources`` — every ``.c`` discovered (the contrast set)
+      * ``skipped_sources``    — sources dropped by skip-on-error
+      * ``built``              — whether the test binary exists on disk
+    """
+    # Headers: transitive #include closure recorded in the .d file.
+    headers = [
+        dep
+        for dep in _parse_dep_file(test_dep_path(test.source_path))
+        if dep.endswith(".h") and os.path.exists(dep)
+    ]
+    # Linked sources: archive members the linker pulled, resolved to .c paths.
+    archive_path = os.path.join("test_build", "libproject.a")
+    members = _parse_linked_archive_members_from_map(
+        test_map_path(test.source_path), archive_path
+    )
+    obj_to_src = {_obj_name(s): s for s in discovered_sources}
+    linked: list[str] = []
+    if members:
+        for member in members:  # e.g. "src__interpreter__interpreter.o"
+            stem = member[:-2] if member.endswith(".o") else member
+            src = obj_to_src.get(stem)
+            if src:
+                linked.append(src)
+    return {
+        "include_dirs": list(test.include_dirs),
+        "headers": sorted(set(headers)),
+        "linked_sources": sorted(set(linked)),
+        "discovered_sources": list(discovered_sources),
+        "skipped_sources": list(skipped_sources),
+        "built": os.path.exists(test_binary_path(test.source_path)),
+    }
+
+
 def _obj_name(source_path: str) -> str:
     rel = os.path.normpath(source_path).replace(os.sep, "__")
     return os.path.splitext(rel)[0]
@@ -323,25 +422,60 @@ def _collect_linked_member_dependencies(linked_members: set[str]) -> set[str]:
 # State-reading helpers
 # ---------------------------------------------------------------------------
 
+def _collect_c_sources(directory: str) -> list[str]:
+    """Walk ``directory`` and return non-test, non-``main.c`` ``.c`` paths.
+
+    Skips anything under a ``test_build`` directory and the ``tests``
+    directory.  Paths come back in the same form as ``directory`` (relative
+    when ``directory`` is relative), matching how sources are written into
+    the generated Makefile.  Pure: depends only on the filesystem.
+    """
+    sources: list[str] = []
+    if not os.path.isdir(directory):
+        return sources
+    for root, dirs, files in os.walk(directory):
+        parts = root.split(os.sep)
+        if "test_build" in parts:
+            continue
+        if root.startswith("tests") or root.startswith("tests/"):
+            continue
+        dirs[:] = [d for d in dirs if d != "test_build"]
+        for f in sorted(files):
+            if f.endswith(".c") and f != "main.c":
+                sources.append(os.path.join(root, f))
+    return sources
+
+
 def discover_project_sources(rs: RunnerState) -> list[str]:
-    """Discover non-test ``.c`` sources from the resolved include dirs."""
-    include_dirs = set()
-    for test in rs.app_state.all_tests:
-        for d in test.include_dirs:
-            include_dirs.add(d)
-    sources = []
-    for inc_dir in sorted(include_dirs):
-        for root, dirs, files in os.walk(inc_dir):
-            parts = root.split(os.sep)
-            if "test_build" in parts:
-                continue
-            if root.startswith("tests") or root.startswith("tests/"):
-                continue
-            dirs[:] = [d for d in dirs if d != "test_build"]
-            for f in sorted(files):
-                if f.endswith(".c") and f != "main.c":
-                    sources.append(os.path.join(root, f))
-    return sorted(set(sources))
+    """Discover non-test ``.c`` sources to compile into ``libproject.a``.
+
+    Sources are collected from two places so both common C layouts work:
+
+      * every resolved test include directory — picks up co-located
+        ``.c``/``.h`` trees such as bundled libraries (``libs/libft``);
+      * the conventional ``src/`` implementation tree — so a project that
+        separates ``include/`` headers from ``src/`` sources (incl. nested
+        modules like ``src/interpreter/``) still links its implementation.
+
+    ``main.c`` and anything under ``tests/`` or ``test_build/`` is excluded.
+    """
+    include_dirs = {d for test in rs.app_state.all_tests for d in test.include_dirs}
+    return _project_sources_for(include_dirs)
+
+
+def _project_sources_for(include_dirs: list[str]) -> list[str]:
+    """Project ``.c`` sources for a given set of include directories.
+
+    Scans the include dirs (co-located ``.c``/``.h`` trees) plus the
+    conventional ``src/`` implementation tree, dedups, and returns sorted
+    paths in the same form as ``include_dirs`` (relative when those are
+    relative).  Pure: depends only on the filesystem.
+    """
+    scan_dirs = sorted(set(include_dirs)) + ["src"]
+    sources: set[str] = set()
+    for directory in scan_dirs:
+        sources.update(_collect_c_sources(directory))
+    return sorted(sources)
 
 
 def _collect_project_dependencies(rs: RunnerState) -> set[str]:
@@ -442,8 +576,29 @@ def _gc_orphaned_build_artifacts(rs: RunnerState) -> int:
 
 
 def build_project_sources(rs: RunnerState) -> None:
-    """Build ``test_build/libproject.a`` from discovered project sources."""
+    """Build ``test_build/libproject.a`` from discovered project sources.
+
+    Skip-on-error: a project source that fails to compile is dropped from
+    the archive (its path is recorded in ``rs.skipped_sources``) so one
+    broken WIP file cannot block every test.  The generated Makefile ignores
+    per-object compile failures and archives only the objects that built.
+    Tests that genuinely need a skipped symbol then surface a precise linker
+    "undefined reference" error instead of a project-wide build failure.
+
+    The gcc stderr from the archive build is captured into ``rs.build_stderr``
+    so callers (headless warning, TUI banner) can surface the actual compile
+    errors rather than silently swallowing them.  In addition, each skipped
+    source is recompiled *individually* (via its own ``make`` object target) so
+    its stderr is captured in isolation into ``rs.source_errors`` (keyed by
+    source path).  The aggregated ``build_stderr`` interleaves every broken
+    source's output; ``source_errors`` keeps them separate so a test's log can
+    show only the errors of the sources *it* links (``test.dependencies ∩
+    skipped_sources``) instead of the whole project's.
+    """
     sources = discover_project_sources(rs)
+    rs.skipped_sources = []
+    rs.build_stderr = ""
+    rs.source_errors = {}
     if not sources:
         return
     makefile = "test_build/Makefile"
@@ -453,8 +608,27 @@ def build_project_sources(rs: RunnerState) -> None:
         ["make", "-f", makefile, "test_build/libproject.a"],
         capture_output=True,
     )
-    if result.returncode != 0:
-        pass
+    rs.build_stderr = result.stderr.decode(errors="replace")
+    obj_dir = os.path.join("test_build", "obj")
+    rs.skipped_sources = [
+        src
+        for src in sources
+        if not os.path.exists(os.path.join(obj_dir, _obj_name(src) + ".o"))
+    ]
+    # Capture each broken source's compile output in isolation.  Running the
+    # source's own object target via make reuses the exact Makefile flags
+    # (include dirs, sanitizers, cflags) so the error matches what the real
+    # build produced, but the stderr is clean (not interleaved with other
+    # sources).  Cost: one extra gcc per broken source, only when something
+    # actually broke.  The object rule's leading ``-`` means make exits 0 even
+    # on gcc failure; we only care about the captured stderr.
+    for src in rs.skipped_sources:
+        obj_target = os.path.join(obj_dir, _obj_name(src) + ".o")
+        r = subprocess.run(
+            ["make", "-f", makefile, obj_target],
+            capture_output=True,
+        )
+        rs.source_errors[src] = r.stderr.decode(errors="replace")
 
 
 # ---------------------------------------------------------------------------
@@ -679,7 +853,6 @@ def refresh_dependency_graph(rs: RunnerState) -> None:
     project_sources = discover_project_sources(rs)
     has_project_sources = bool(project_sources)
     archive_path = os.path.join("test_build", "libproject.a")
-    broad_project_deps: set[str] | None = None
     changed_test_keys: set[str] = set()
     for test in rs.app_state.all_tests:
         test_dep_file = test_dep_path(test.source_path)
@@ -691,13 +864,26 @@ def refresh_dependency_graph(rs: RunnerState) -> None:
         if has_project_sources:
             map_path = test_map_path(test.source_path)
             linked_members = _parse_linked_archive_members_from_map(map_path, archive_path)
-            if linked_members is None:
-                if broad_project_deps is None:
-                    broad_project_deps = _collect_project_dependencies(rs)
-                current.update(broad_project_deps)
-            else:
+            if linked_members:
+                # Valid .map: use the linker's truth (which sources this test
+                # actually pulled from the archive).
                 for dep in _collect_linked_member_dependencies(linked_members):
                     if os.path.exists(dep):
+                        current.add(dep)
+            else:
+                # .map missing/empty/incomplete — e.g. after a failed link
+                # where the broken source's object was never pulled, the .map
+                # lists no archive members.  Recomputing from it would DROP the
+                # very source that broke, corrupting the dep set that the
+                # per-test compile-error filter relies on to show only the
+                # relevant source's error.  Preserve the prior project-source
+                # deps (from the last successful build's .map, hydrated from
+                # db.json) until a successful build refreshes them from a valid
+                # .map.  On a fresh start (no prior deps) this adds nothing,
+                # which is fine — dep_graph_ready stays False and watch mode
+                # falls back to rerun_all until the first clean build.
+                for dep in test.dependencies:
+                    if dep.endswith(".c") and os.path.exists(dep):
                         current.add(dep)
         updated = sorted(current)
         test.dependencies = updated
@@ -769,13 +955,31 @@ def generate_makefile(
             obj_files.append(obj_path)
             lines.append(f"{obj_path}: {src}")
             lines.append(f"\t@mkdir -p {obj_dir}")
+            # Skip-on-error: a broken project source (e.g. WIP) must not
+            # block the whole library.  The leading "-" tells make to ignore
+            # a compile failure; "|| rm -f $@" clears any stale object so the
+            # archive never ships an out-of-date build of a now-broken file.
             lines.append(
-                f"\tgcc {include_flags} {debug_flags} {sanitize_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_path} -c $< -o $@ {cflags}"
+                f"\t-gcc {include_flags} {debug_flags} {sanitize_flags} -fdiagnostics-color=always -fmessage-length={message_length} -MMD -MP -MF {dep_path} -c $< -o $@ {cflags} || rm -f $@"
             )
             lines.append("")
 
-        lines.append(f"{lib_target}: {' '.join(obj_files)}")
-        lines.append(f"\tar rcs $@ $^")
+        # PROJECT_OBJS lets the archive recipe gather only the objects that
+        # actually compiled (existing files), skipping any failures above.
+        #
+        # The recipe deletes the archive before recreating it.  ``ar rcs`` is
+        # additive (replace/create): it never *removes* members absent from the
+        # argument list, so without the leading ``rm -f`` a source that used to
+        # compile but now fails would leave its stale object in the archive --
+        # tests would then link against the stale-but-working object and pass,
+        # silently masking the breakage.  Recreating from scratch guarantees the
+        # archive reflects exactly what compiled on this build.
+        lines.append(f"PROJECT_OBJS := {' '.join(obj_files)}")
+        lines.append(f"{lib_target}: $(PROJECT_OBJS)")
+        lines.append("\trm -f $@")
+        lines.append(
+            "\tar rcs $@ $$(for o in $(PROJECT_OBJS); do [ -f \"$$o\" ] && printf '%s\\n' \"$$o\"; done)"
+        )
         lines.append("")
 
     for test in rs.app_state.all_tests:
@@ -810,6 +1014,8 @@ __all__ = [
     "dep_content_unchanged",
     "discover_project_sources",
     "generate_makefile",
+    "get_file_dependencies",
+    "analyze_test_build",
     "hydrate_dependencies_from_db",
     "load_dependency_db",
     "normalize_dep_path",

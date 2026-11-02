@@ -118,6 +118,7 @@ def parse_args():
         description=(
             "Run C tests, print the result tree, and exit. Pass specific test"
             " files to run a subset. Use --watch to open the interactive TUI."
+            " Use --get-dependencies FILE to inspect a file's dependencies."
         ),
         epilog=(
             "examples:\n"
@@ -125,6 +126,7 @@ def parse_args():
             "  ctester tests/foo.c        Run only the named test file(s)\n"
             "  ctester --watch            Open the interactive TUI (with file monitoring)\n"
             "  ctester --parallel 8       Run all tests with 8 parallel workers\n"
+            "  ctester --get-dependencies tests/foo.c   Print deps for a file, exit\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -176,9 +178,19 @@ def parse_args():
         help="Disable AddressSanitizer + UndefinedBehaviorSanitizer (on by default)",
     )
     parser.add_argument(
-        "--no-leak-sanitizer",
+        "--leak-sanitizer",
         action="store_true",
-        help="Disable LeakSanitizer via ASAN_OPTIONS=detect_leaks=0 (on by default)",
+        default=None,
+        help="Enable LeakSanitizer (ASAN_OPTIONS detect_leaks). Off by default.",
+    )
+    parser.add_argument(
+        "--debug-log",
+        action="store_true",
+        help=(
+            "Write a timestamped scheduling/cancel diagnostic to"
+            " test_build/log.txt. Use to diagnose runaway rerun loops"
+            " (e.g. a test cycling Running<->Cancelled). No effect when absent."
+        ),
     )
     parser.add_argument(
         "--story-filter-profile",
@@ -228,6 +240,18 @@ def parse_args():
         default=[],
         help="Extra compiler/linker flags (e.g. -lreadline -Wextra -Werror)",
     )
+    parser.add_argument(
+        "--get-dependencies",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Print dependency info for FILE and exit. For a test file, builds"
+            " it and reports the true deps read from .d/.map artifacts (include"
+            " dirs, transitive headers, sources actually linked, skipped). For"
+            " other files, falls back to static gcc -MM analysis."
+            " e.g. --get-dependencies tests/foo.c"
+        ),
+    )
     args = parser.parse_args()
     if args.watch and args.files:
         parser.error("--watch cannot be combined with file arguments")
@@ -248,6 +272,7 @@ _MENU_ARG_KEYS = (
     "tsv_vars_depth",
     "tsv_variables_height",
     "tsv_show_reason_about",
+    "leak_sanitizer",
 )
 
 
@@ -261,8 +286,8 @@ def _build_config(args, user_config: dict) -> RunnerConfig:
 
     For each menu field: ``cli_arg`` wins if explicitly passed, else the
     persisted ``user_config`` value, else the builtin default.  Non-menu flags
-    (watch, debug-build, no-sanitize, no-leak-sanitizer, cflags) keep their
-    plain CLI/default values.
+    (watch, debug-build, no-sanitize, cflags) keep their plain CLI/default
+    values.
     """
 
     def resolve(key: str, attr: str, default, coerce=lambda v: v):
@@ -282,7 +307,7 @@ def _build_config(args, user_config: dict) -> RunnerConfig:
         timeline=timeline,
         debug_build=bool(args.debug_build or timeline),
         sanitize=not args.no_sanitize,
-        leak_sanitizer=not args.no_leak_sanitizer,
+        leak_sanitizer=bool(resolve("leak_sanitizer", "leak_sanitizer", False)),
         story_filter_profile=normalized_story_filter_profile(
             resolve("story_filter_profile", "story_filter_profile", "balanced")
         ),
@@ -368,8 +393,166 @@ def _apply_selection(runner, matched):
     app_state.all_tests = list(matched)
 
 
+def _relpath(p: str) -> str:
+    """Display a path relative to CWD when possible (cleaner output)."""
+    try:
+        return os.path.relpath(p)
+    except ValueError:
+        return p
+
+
+def _find_test_for(source_path: str):
+    """Return the discovered test matching ``source_path``, or ``None``."""
+    tests_dir = Path("tests")
+    if not tests_dir.is_dir():
+        return None
+    from state import state as app_state
+
+    app_state.populate_suites(str(tests_dir))
+    for t in app_state.all_tests:
+        if _match_path(t.source_path, source_path):
+            return t
+    return None
+
+
+def _print_dependencies(source_path) -> int:
+    """Resolve and print dependency info for ``source_path``, then exit.
+
+    For a test file, runs the real build phases (Makefile generation →
+    libproject.a build → per-test link) and reads the true dependencies from
+    the resulting ``.d``/``.map`` artifacts — the same data the watch-mode
+    dependency graph uses.  For a non-test file, falls back to static
+    ``gcc -MM`` analysis (no link step exists to produce a ``.map``).
+    Returns an exit code.
+    """
+    if not os.path.isfile(source_path):
+        print(f"Error: file not found: {source_path}", file=sys.stderr)
+        return 1
+
+    test = _find_test_for(source_path)
+    if test is not None:
+        return _print_test_dependencies(test)
+    return _print_static_dependencies(source_path)
+
+
+def _print_test_dependencies(test) -> int:
+    """Build ``test`` and print its true dependencies read from artifacts."""
+    import subprocess
+    import state as gstate
+    from core.artifacts import test_binary_path
+    from core.build import analyze_test_build
+    from runner.makefile import (
+        build_project_sources,
+        discover_project_sources,
+        generate_makefile,
+    )
+
+    norm = os.path.normpath(test.source_path)
+    print(f"Dependencies for: {norm}  (built from .d/.map artifacts)")
+    print()
+    # Run the build phases so the .d/.map reflect reality (skip-on-error aware).
+    generate_makefile()
+    build_project_sources()
+    binary = test_binary_path(test.source_path)
+    link = subprocess.run(
+        ["make", "-f", "test_build/Makefile", binary],
+        capture_output=True,
+    )
+    discovered = discover_project_sources()
+    info = analyze_test_build(test, discovered, gstate.skipped_sources)
+
+    linked = {_relpath(s) for s in info["linked_sources"]}
+
+    print("Include directories:")
+    if info["include_dirs"]:
+        for d in info["include_dirs"]:
+            print(f"  -I{d}")
+    else:
+        print("  (none)")
+    print()
+
+    print(f"Header dependencies ({len(info['headers'])}):")
+    for h in info["headers"]:
+        print(f"  {_relpath(h)}")
+    print()
+
+    print(f"Linked project sources ({len(info['linked_sources'])}):")
+    if info["linked_sources"]:
+        for s in info["linked_sources"]:
+            print(f"  {_relpath(s)}")
+    else:
+        print("  (none pulled from libproject.a)")
+    print()
+
+    print(
+        f"Discovered project sources ({len(info['discovered_sources'])}) "
+        "[all .c under src/ + include dirs; contrast with linked]:"
+    )
+    for s in info["discovered_sources"]:
+        rel = _relpath(s)
+        mark = "  *" if rel in linked else ""
+        print(f"  {rel}{mark}")
+    print()
+
+    if info["skipped_sources"]:
+        print(
+            f"Skipped — compile failed, dropped from libproject.a "
+            f"({len(info['skipped_sources'])}):"
+        )
+        for s in info["skipped_sources"]:
+            print(f"  {_relpath(s)}")
+        print()
+
+    print("(* = actually linked into this test)")
+    if not info["built"]:
+        print()
+        print("Link FAILED — test binary not produced:")
+        print(link.stderr.decode(errors="replace").rstrip())
+        return 1
+    return 0
+
+
+def _print_static_dependencies(source_path) -> int:
+    """Static (no-build) dependency analysis for non-test files."""
+    from core.build import get_file_dependencies
+
+    deps = get_file_dependencies(source_path)
+    print(f"Dependencies for: {os.path.normpath(source_path)}  (static — no build)")
+    print()
+    print("Include directories:")
+    if deps["include_dirs"]:
+        for d in deps["include_dirs"]:
+            print(f"  -I{d}")
+    else:
+        print("  (none)")
+    print()
+    print(f"Header dependencies ({len(deps['headers'])}):")
+    for h in deps["headers"]:
+        print(f"  {h}")
+    print()
+    print(
+        f"Discovered project sources ({len(deps['project_sources'])}) "
+        "[full discovery set — NOT the subset a test would link]:"
+    )
+    for s in deps["project_sources"]:
+        print(f"  {s}")
+    print()
+    print(
+        "(static analysis — no link performed. Pass a test file, e.g.\n"
+        " tests/foo.c, for accurate artifact-based results showing what the\n"
+        " linker actually pulls.)"
+    )
+    return 0
+
+
 async def _main():
     args = parse_args()
+    if args.debug_log:
+        from core.debug_log import enable_debug_log
+
+        enable_debug_log("test_build/log.txt")
+    if args.get_dependencies:
+        return _print_dependencies(args.get_dependencies)
     from core.userconfig import load_user_config
 
     user_config = load_user_config()
@@ -432,6 +615,26 @@ async def _run_headless(runner, config, files) -> int:
         from api._runner import _terminate_active_processes
 
         await _terminate_active_processes()
+
+    # Surface skip-on-error warnings: project sources that failed to compile
+    # and were dropped from libproject.a.  (Printed to stderr; headless only
+    # — the TUI reads the same list from global state to avoid corrupting
+    # the screen.)
+    import state as _gstate
+
+    if _gstate.skipped_sources:
+        print(
+            f"Warning: {len(_gstate.skipped_sources)} project source(s) skipped"
+            " (compile failed, not linked into libproject.a):",
+            file=sys.stderr,
+        )
+        for s in _gstate.skipped_sources:
+            print(f"  - {s}", file=sys.stderr)
+        if _gstate.build_stderr.strip():
+            print(file=sys.stderr)
+            print("Compiler output for skipped sources:", file=sys.stderr)
+            print(_gstate.build_stderr.rstrip(), file=sys.stderr)
+        print(file=sys.stderr)
 
     render_tree_stdout(config.output_lines, shutil.get_terminal_size().columns)
 

@@ -48,6 +48,11 @@ _active_run_tasks: dict[str, asyncio.Task] = {}
 _source_line_cache: dict[str, list[str]] = {}
 _user_function_cache: set[str] = set()
 _user_function_cache_key: object | None = None
+# Set to True when debug build mode actually changes (normal↔debug).  Read by
+# _compile_binary_for_test to pass ``-B`` (always-make) to the *first*
+# compilation after the switch — that's the only time we need to force
+# recompilation of every .o with the new flags.  Reset after consumption.
+_debug_mode_just_changed: bool = False
 
 _CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 _FUNC_DEF_RE = re.compile(
@@ -737,8 +742,10 @@ async def _enrich_variable_types(
 ) -> list[tuple[str, str, str]]:
     if not binary_path or not file_path or line <= 0:
         return variables
-    enriched: list[tuple[str, str, str]] = []
-    for var_tuple in variables:
+    if not variables:
+        return []
+
+    async def _resolve_one(var_tuple: tuple) -> tuple[str, str, str]:
         if len(var_tuple) >= 3:
             name, value, _ = var_tuple
         else:
@@ -750,8 +757,14 @@ async def _enrich_variable_types(
             type_hint = _format_dwarf_type(type_info) if type_info else ""
         except Exception:
             type_hint = ""
-        enriched.append((name, value, type_hint))
-    return enriched
+        return (name, value, type_hint)
+
+    # Resolve all variable types concurrently on the thread pool instead
+    # of issuing N sequential to_thread round-trips.  The DWARF type index
+    # is read-only after first build (GIL-safe dict.get), so parallel
+    # access is safe — worst case is a one-time redundant _build_type_index
+    # if threads race on a cold cache.
+    return await asyncio.gather(*[_resolve_one(v) for v in variables])
 
 
 async def _capture_global_variables(
@@ -770,23 +783,30 @@ async def _capture_global_variables(
         return []
 
     local_names = {name for name, _, _ in local_variables}
-    results: list[tuple[str, str, str]] = []
-    for entry in index.values():
+
+    async def _capture_one_global(entry) -> tuple[str, str, str] | None:
+        if entry.name in local_names:
+            return None
         try:
-            if entry.name in local_names:
-                continue
             value = await evaluate_global(controller, entry.name)
             if value is None:
-                continue
+                return None
             prefix = "[global]" if entry.linkage_name else "[static]"
             type_info = await asyncio.to_thread(
                 resolve_variable_type, binary_path, entry.name, entry.file_path, entry.line, cache=cache
             )
             type_hint = _format_dwarf_type(type_info) if type_info else ""
-            results.append((f"{prefix} {entry.name}", value, type_hint))
+            return (f"{prefix} {entry.name}", value, type_hint)
         except Exception:
-            continue
-    return results
+            return None
+
+    # Pipeline all global evaluations concurrently — gdb MI tags each
+    # -data-evaluate-expression command with a token so N globals become
+    # one batch of pipelined round-trips instead of N sequential awaits.
+    gathered = await asyncio.gather(
+        *[_capture_one_global(entry) for entry in index.values()]
+    )
+    return [r for r in gathered if r is not None]
 
 
 async def _capture_scope_variables(
@@ -806,12 +826,14 @@ async def _capture_scope_variables(
             return []
 
         children = await controller.var_list_children(var_name)
-        expanded: list[tuple[str, str, str]] = []
-        for child in children:
+        if not children:
+            return []
+
+        async def _expand_one_child(child: dict) -> list[tuple[str, str, str]]:
             child_var_name = str(child.get("name", ""))
             child_exp = str(child.get("exp", "") or child_var_name)
             if not child_var_name or not child_exp:
-                continue
+                return []
 
             child_value = str(child.get("value", "?"))
             if child_value in {"?", "", "{...}"}:
@@ -822,11 +844,11 @@ async def _capture_scope_variables(
                 child_value = "?"
             label = f"{label_prefix}.{child_exp}"
             child_type = str(child.get("type", ""))
-            expanded.append((label, child_value, child_type))
+            result = [(label, child_value, child_type)]
 
             child_numchild = int(child.get("numchild", 0))
             if child_numchild > 0 and depth < max_depth:
-                expanded.extend(
+                result.extend(
                     await _expand_children(
                         child_var_name,
                         label,
@@ -834,7 +856,17 @@ async def _capture_scope_variables(
                         max_depth,
                     )
                 )
+            return result
 
+        # Expand all siblings concurrently — each child's var_evaluate
+        # and recursive var_list_children are independent gdb round-trips
+        # that can be pipelined via the MI token-future mechanism.
+        child_results = await asyncio.gather(
+            *[_expand_one_child(child) for child in children]
+        )
+        expanded: list[tuple[str, str, str]] = []
+        for r in child_results:
+            expanded.extend(r)
         return expanded
 
     async def _expand_variable(
@@ -881,14 +913,23 @@ async def _capture_scope_variables(
             simple_vars = await controller.list_all_variables(timeout=1.5)
 
         max_depth = max(1, int(global_state.tsv_vars_depth))
-        flattened: list[tuple[str, str, str]] = []
-        for var_tuple in simple_vars:
+
+        async def _expand_one_var(var_tuple: tuple) -> list[tuple[str, str, str]]:
             if len(var_tuple) >= 3:
                 name, value, type_hint = var_tuple
             else:
                 name, value = var_tuple
                 type_hint = ""
-            flattened.extend(await _expand_variable(name, value, type_hint, max_depth))
+            return await _expand_variable(name, value, type_hint, max_depth)
+
+        # Expand all top-level variables concurrently — each manages
+        # its own var_create/var_delete lifecycle independently.
+        expand_results = await asyncio.gather(
+            *[_expand_one_var(v) for v in simple_vars]
+        )
+        flattened: list[tuple[str, str, str]] = []
+        for r in expand_results:
+            flattened.extend(r)
 
         seen: set[str] = set()
         deduped: list[tuple[str, str, str]] = []
@@ -1131,12 +1172,19 @@ def _debug_callbacks(test: Test):
 
 
 async def _ensure_debug_build_mode(enabled: bool) -> None:
+    global _debug_mode_just_changed
     desired = bool(enabled)
     current = bool(global_state.debug_build_enabled)
-    global_state.debug_build_enabled = desired
 
-    if desired == current and not desired:
+    # Already in the desired mode — nothing to do.  The previous condition
+    # (``desired == current and not desired``) only short-circuited when both
+    # were False, so pressing 'd' while already in debug mode still triggered
+    # a full Makefile regeneration + archive rebuild on every single session.
+    if desired == current:
         return
+
+    global_state.debug_build_enabled = desired
+    _debug_mode_just_changed = True
 
     await asyncio.to_thread(generate_makefile)
     await asyncio.to_thread(build_project_sources)
@@ -1171,14 +1219,81 @@ async def _terminate_active_processes() -> None:
     active_processes.clear()
 
 
+def _assemble_compile_error(test: Test, make_stderr: bytes) -> str:
+    """Build the compile-error text shown in a test's log when its build fails.
+
+    A test fails to build for one of two reasons:
+
+    1. The test file itself has a compile error -- ``make_stderr`` is that
+       error and there's nothing to filter.
+    2. A project source the test *links* failed to compile (skip-on-error
+       dropped it) so the link step reports ``undefined reference``.  In watch
+       mode ``make`` recompiles *every* broken source while rebuilding the
+       archive, so ``make_stderr`` would dump the whole project's errors --
+       noisy and mostly irrelevant (this test doesn't link expand.c).
+
+    For case 2 we know the test's real dependencies from the prior ``.map``
+    (``test.dependencies``) and we have each broken source's isolated stderr in
+    ``global_state.source_errors``.  So we show only the compile errors of the
+    sources this test actually links, plus a concise link-failure line, instead
+    of the whole project's output.
+
+    Fallback: if the test has no recorded dependencies yet (first run, no
+    ``.map``) or none of its deps were skipped, return ``make_stderr`` verbatim
+    (the current behaviour) -- this also covers case 1 (test-file error).
+    """
+    raw = make_stderr.decode(errors="replace")
+    # ``test.dependencies`` (from the .d/.map via db.json) are absolute paths,
+    # while ``skipped_sources`` (from discover_project_sources) are relative.
+    # Normalise both to absolute before intersecting or the set is always empty.
+    deps_abs = {os.path.normpath(os.path.abspath(d)) for d in test.dependencies}
+    # source_errors is keyed by the relative paths in skipped_sources, so keep
+    # `src` in its original (relative) form for that lookup.
+    relevant = sorted(
+        src
+        for src in global_state.skipped_sources
+        if os.path.normpath(os.path.abspath(src)) in deps_abs
+        and src in global_state.source_errors
+    )
+    if not relevant:
+        return raw
+
+    parts: list[str] = []
+    for src in relevant:
+        err = (global_state.source_errors.get(src) or "").strip()
+        if err:
+            parts.append(f"Dependency `{src}` failed to compile:\n{err}")
+
+    # Pull just the link-phase lines out of the (possibly noisy) make stderr so
+    # the log confirms *which* symbol is unresolved without re-dumping every
+    # broken source's compile output.  "undefined reference to `sym`" appears in
+    # plain text inside the ANSI-coloured line, so a substring scan works.
+    link_lines = [
+        line for line in raw.splitlines()
+        if "undefined reference" in line or "collect2:" in line or "ld returned" in line
+    ]
+    if link_lines:
+        parts.append("Link failure:\n" + "\n".join(link_lines))
+
+    return "\n\n".join(parts) if parts else raw
+
+
 async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tuple[bool, str]:
+    global _debug_mode_just_changed
     process_key = _test_key(test)
     binary_path = test_binary_path(test.source_path)
 
     _append_timeline_event(test, "compile_start", f"compiling {binary_path}")
     make_args = ["make", "-f", "test_build/Makefile"]
+    # ``-B`` (always-make) is only needed when the build mode JUST changed
+    # (normal→debug or debug→normal) so every .o is recompiled with the new
+    # flags, or when a one-off force-rebuild is requested.  Previously this
+    # checked ``debug_build_enabled`` — True for the entire debug session —
+    # which meant *every* compilation recompiled the whole project from
+    # scratch even when nothing had changed.  For a 74-source project that
+    # turned a 0.2 s incremental link into a 4 s full rebuild on every 'd'.
     force_rebuild = test.force_rebuild_once
-    if global_state.debug_build_enabled or force_rebuild:
+    if _debug_mode_just_changed or force_rebuild:
         make_args.append("-B")
     make_args.append(binary_path)
     make_proc = await asyncio.create_subprocess_exec(
@@ -1189,27 +1304,48 @@ async def _compile_binary_for_test(test: Test, proc_env: dict[str, str]) -> tupl
     )
     if force_rebuild:
         test.force_rebuild_once = False
+    # Consume the mode-change flag regardless of build success/failure.  The
+    # Makefile has already been regenerated with the new flags, so even if
+    # this build fails, the .o files that DID compile carry the new flags.
+    # Subsequent incremental builds will pick up where this left off.
+    _debug_mode_just_changed = False
     active_processes[process_key] = make_proc
     _, make_stderr = await make_proc.communicate()
     if active_processes.get(process_key) is make_proc:
         active_processes.pop(process_key, None)
-
-    await asyncio.to_thread(refresh_dependency_graph)
 
     if make_proc.returncode != 0:
         if test.state == TestState.CANCELLED:
             return False, binary_path
         run = test.current_run
         if run is not None:
-            run.compile_err = make_stderr.decode(errors="replace")
-            run.compile_err_raw = make_stderr
+            filtered = _assemble_compile_error(test, make_stderr)
+            run.compile_err = filtered
+            # Encode the filtered text as compile_err_raw too -- the output
+            # box renders compile_err_raw first (via Text.from_ansi to keep
+            # gcc's colours), falling back to compile_err only when raw is
+            # empty.  If we left raw = make_stderr the box would show the
+            # unfiltered whole-project output regardless of the filtered
+            # string.  The filtered text still carries ANSI escapes (from
+            # source_errors' isolated gcc output), so Text.from_ansi parses
+            # them correctly.
+            run.compile_err_raw = filtered.encode(errors="replace")
         test.state = TestState.FAILED
         test.time_state_changed = time.monotonic()
         global_state.dep_graph_ready = False
         global_state.dep_graph_reason = "compile errors present"
         _append_timeline_event(test, "compile_failed", "compile failed")
+        # NOTE: refresh_dependency_graph is deliberately NOT called on failure.
+        # A failed link writes an incomplete .map (the linker never pulled the
+        # broken source's object), so refreshing would recompute test.dependencies
+        # WITHOUT the very source that broke -- corrupting the dep set that
+        # _assemble_compile_error relies on to filter the log to the relevant
+        # source.  Keep the prior (last-good-build) deps instead.
         return False, binary_path
 
+    # Build succeeded: the .map is valid, so refresh the dependency graph from
+    # it (updates test.dependencies, dep_index, and the content-hash cache).
+    await asyncio.to_thread(refresh_dependency_graph)
     run = test.current_run
     if run is not None:
         run.compile_err = ""
@@ -1517,24 +1653,28 @@ async def _run_auto_debug_trace(test: Test, binary_path: str, proc_env: dict[str
 def _build_proc_env() -> dict[str, str]:
     """Build the environment for test compile/run subprocesses.
 
-    Sets ``COLUMNS`` for gcc message wrapping and, when LeakSanitizer is
-    disabled, injects ``ASAN_OPTIONS=detect_leaks=0`` (merged with any value
-    the user already exported) so ASan skips the leak check at exit.
+    Sets ``COLUMNS`` for gcc message wrapping and injects
+    ``ASAN_OPTIONS=... detect_leaks=<0|1>`` (merged with any value the user
+    already exported, appended last so it wins) so LeakSanitizer follows the
+    configured setting regardless of the ambient ``ASAN_OPTIONS``.
     """
     proc_env = os.environ.copy()
     proc_env["COLUMNS"] = str(max(20, subprocess_columns))
-    if not global_state.leak_sanitizer_enabled:
-        existing = proc_env.get("ASAN_OPTIONS", "")
-        opts = f"{existing} detect_leaks=0".strip()
-        proc_env["ASAN_OPTIONS"] = opts
+    detect_leaks = "1" if global_state.leak_sanitizer_enabled else "0"
+    existing = proc_env.get("ASAN_OPTIONS", "")
+    proc_env["ASAN_OPTIONS"] = f"{existing} detect_leaks={detect_leaks}".strip()
     return proc_env
 
 
 async def run_test(test: Test, on_complete: Callable[[], None]):
+    from core.debug_log import debug_log
+
     process_key = _test_key(test)
     current_task = asyncio.current_task()
+    debug_log("run_test start", test=test.name, state=test.state)
     try:
         if test.state == TestState.CANCELLED:
+            debug_log("run_test skip", test=test.name, reason="CANCELLED at start")
             return
 
         proc_env = _build_proc_env()
@@ -1718,7 +1858,7 @@ async def start_debug_session(test: Test, precision_mode: str = "loose") -> None
             variables=vars_for_event,
             debugger=controller,
         )
-        if _stop_has_source_location(initial_stop):
+        if _stop_has_source_location(initial_stop) and not global_state.debug_line_suppressed:
             save_debug_line(initial_stop.file_path, initial_stop.line)
         run.timeline_selected_event_index = -1
         _schedule_story_annotations_persist(test)
@@ -1780,8 +1920,16 @@ async def _preempt_test(test: Test) -> None:
     The cancelled test is auto-re-queued via ``rerun_after_user_cancel`` so it
     resumes in the background once the visible tests finish.
     """
+    from core.debug_log import debug_log
+
     test_key = _test_key(test)
     run_task = _active_run_tasks.get(test_key)
+
+    debug_log(
+        "preempt",
+        test=test.name,
+        had_task=run_task is not None and not run_task.done(),
+    )
 
     test.cancelled_by_user = True
     test.rerun_after_user_cancel = True
@@ -1819,9 +1967,17 @@ async def _preempt_test(test: Test) -> None:
 
 
 async def cancel_test_and_restore_normal_build(test: Test) -> None:
+    from core.debug_log import debug_log
+
     test_key = _test_key(test)
     run_task = _active_run_tasks.get(test_key)
     has_active_run_task = run_task is not None and not run_task.done()
+
+    debug_log(
+        "cancel_restore",
+        test=test.name,
+        had_task=has_active_run_task,
+    )
 
     test.timeline_capture_enabled = False
     if not any(t.timeline_capture_enabled for t in state.all_tests):
@@ -1919,7 +2075,7 @@ async def _debug_step(test: Test, action: str) -> DebugStopEvent | None:
         variables=vars_for_event,
         debugger=controller,
     )
-    if _stop_has_source_location(stop_event):
+    if _stop_has_source_location(stop_event) and not global_state.debug_line_suppressed:
         save_debug_line(stop_event.file_path, stop_event.line)
     run = test.current_run
     if run is not None:
@@ -1968,6 +2124,8 @@ def get_debug_session(test: Test) -> GdbMIController | None:
 
 
 def state_changed():
+    from core.debug_log import debug_log
+
     tests_to_run: list[Test] = []
     pending_tests = sorted(
         [test for test in state.all_tests if test.state == TestState.PENDING],
@@ -1982,10 +2140,25 @@ def state_changed():
         test.time_state_changed = time.monotonic()
         tests_to_run.append(test)
 
+    if tests_to_run:
+        debug_log(
+            "state_changed dispatch",
+            names=[t.name for t in tests_to_run],
+            free_slots=state.available_runners,
+        )
+
     for test in tests_to_run:
 
         def on_complete(completed_test: Test = test):
+            from core.debug_log import debug_log as _log
+
             state.available_runners += 1
+            _log(
+                "on_complete",
+                test=completed_test.name,
+                state=completed_test.state,
+                rerun_after=completed_test.rerun_after_user_cancel,
+            )
             if completed_test.state == TestState.CANCELLED:
                 if completed_test.rerun_after_user_cancel:
                     completed_test.state = TestState.PENDING

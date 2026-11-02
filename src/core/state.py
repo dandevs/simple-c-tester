@@ -76,6 +76,28 @@ class RunnerState:
     #: Runner-wide default story filter profile for newly discovered tests.
     default_story_filter_profile: str = "balanced"
 
+    #: Project sources dropped from libproject.a by skip-on-error on the last
+    #: build (their compile failed).  Empty when all sources compiled.
+    #: Populated by :func:`build_project_sources`; read by headless output and
+    #: the TUI to surface "skipped" warnings.
+    skipped_sources: list[str] = field(default_factory=list)
+
+    #: gcc stderr from the last ``build_project_sources`` archive build.  When
+    #: ``skipped_sources`` is non-empty this holds the actual compile errors
+    #: (file:line: error: ...) so callers can show *why* sources were skipped
+    #: instead of just the file names.  Empty when nothing was built or all
+    #: sources compiled cleanly.
+    build_stderr: str = ""
+
+    #: Per-source gcc stderr for each entry in ``skipped_sources`` (keyed by the
+    #: source path, value = that source's isolated compile output).  Captured by
+    #: re-running ``make`` on the source's object target individually so each
+    #: broken source's error is cleanly separated (the aggregated
+    #: ``build_stderr`` interleaves them).  Used to show a test only the compile
+    #: errors of the sources *it* actually links (``test.dependencies ∩
+    #: skipped_sources``) instead of every broken source in the project.
+    source_errors: dict[str, str] = field(default_factory=dict)
+
     # ----- convenient accessors -----------------------------------------
 
     @property

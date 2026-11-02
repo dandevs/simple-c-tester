@@ -272,6 +272,19 @@ class VariableTreeScreen(Screen[None]):
         self._positioned = compute_layout(self._tree)
         self._reset_footer()
         self._refresh()
+        # Suppress debugLine updates so the IDE doesn't jump while we're
+        # inspecting the tree.  Clear the current line immediately so any
+        # IDE watcher stops tracking the old position right away.
+        global_state.debug_line_suppressed = True
+        try:
+            from runner import clear_debug_line
+            clear_debug_line()
+        except Exception:
+            pass
+
+    def on_unmount(self) -> None:
+        # Restore debugLine updates for the parent debug screen.
+        global_state.debug_line_suppressed = False
 
     def _refresh(self) -> None:
         if self._canvas is None or self._positioned is None:
